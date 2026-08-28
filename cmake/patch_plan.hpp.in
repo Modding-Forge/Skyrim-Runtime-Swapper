@@ -1,0 +1,18 @@
+#pragma once
+
+#include <array>
+#include <string_view>
+
+namespace runtime_swapper {
+
+struct PatchPlanEntry {
+  std::wstring_view relative_file;
+  std::wstring_view patch_file;
+  std::string_view source_sha256;
+  std::string_view target_sha256;
+};
+
+inline constexpr std::array patch_plan{
+@PATCH_PLAN_ENTRIES@};
+
+}  // namespace runtime_swapper

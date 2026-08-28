@@ -1,0 +1,33 @@
+#pragma once
+
+#include <compare>
+#include <cstdint>
+#include <string>
+#include <string_view>
+
+namespace runtime_swapper {
+
+struct RuntimeVersion {
+  std::uint16_t major{};
+  std::uint16_t minor{};
+  std::uint16_t patch{};
+  std::uint16_t revision{};
+
+  auto operator<=>(const RuntimeVersion&) const = default;
+
+  [[nodiscard]] std::wstring to_string() const {
+    std::wstring result = std::to_wstring(major) + L"." + std::to_wstring(minor) + L"." +
+                          std::to_wstring(patch);
+    if (revision != 0) result += L"." + std::to_wstring(revision);
+    return result;
+  }
+};
+
+inline constexpr RuntimeVersion source_runtime{@SOURCE_MAJOR@, @SOURCE_MINOR@, @SOURCE_PATCH@,
+                                                @SOURCE_REVISION@};
+inline constexpr RuntimeVersion target_runtime{@TARGET_MAJOR@, @TARGET_MINOR@, @TARGET_PATCH@,
+                                                @TARGET_REVISION@};
+inline constexpr std::wstring_view source_version_label = L"@SOURCE_VERSION@";
+inline constexpr std::wstring_view target_version_label = L"@TARGET_VERSION@";
+
+}  // namespace runtime_swapper
