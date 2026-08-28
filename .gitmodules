@@ -1,0 +1,3 @@
+[submodule "third_party/HDiffPatch5"]
+	path = third_party/HDiffPatch5
+	url = https://github.com/sisong/HDiffPatch5.git

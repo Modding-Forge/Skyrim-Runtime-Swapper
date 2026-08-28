@@ -1,15 +1,23 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <string_view>
 
 namespace runtime_swapper {
 
 struct PatchPlanEntry {
   std::wstring_view relative_file;
-  std::wstring_view patch_file;
+  bool source_present;
+  bool target_present;
   std::string_view source_sha256;
   std::string_view target_sha256;
+  std::uint64_t source_size;
+  std::uint64_t target_size;
+  std::wstring_view forward_patch;
+  std::wstring_view reverse_patch;
+  std::string_view forward_patch_sha256;
+  std::string_view reverse_patch_sha256;
 };
 
 inline constexpr std::array patch_plan{

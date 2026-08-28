@@ -22,9 +22,15 @@ if /I "%~1"=="-Configuration" (
     )
 )
 
-echo Usage: build.bat [Release^|Debug]
+echo Usage: build.bat [Release^|Debug] [asset-manifest]
 exit /b 2
 
 :build
+set "asset_manifest=%~2"
+
+if defined asset_manifest (
+    cmake -DCONFIGURATION=%configuration% "-DASSET_MANIFEST=%asset_manifest%" -P "%~dp0tools\build-all.cmake"
+    exit /b %ERRORLEVEL%
+)
 cmake -DCONFIGURATION=%configuration% -P "%~dp0tools\build-all.cmake"
 exit /b %ERRORLEVEL%

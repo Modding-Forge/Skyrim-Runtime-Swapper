@@ -9,6 +9,7 @@
 *.md text eol=lf
 
 *.bsdiff binary
+*.hdiff binary
 *.png binary
 *.dll binary
 *.exe binary
