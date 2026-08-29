@@ -33,6 +33,12 @@ endif()
 
 string(TIMESTAMP BUILD_ID "%Y%m%d-%H%M%S")
 set(RELEASE_ROOT "${REPOSITORY_ROOT}/dist/builds/${RELEASE_VERSION}/${BUILD_ID}")
+set(VORTEX_OVERRIDE_FILE
+  "${REPOSITORY_ROOT}/assets/vortex_override_instructions.json")
+if(NOT EXISTS "${VORTEX_OVERRIDE_FILE}")
+  message(FATAL_ERROR
+    "Missing Vortex override instructions: ${VORTEX_OVERRIDE_FILE}")
+endif()
 get_filename_component(CMAKE_BIN_DIRECTORY "${CMAKE_COMMAND}" DIRECTORY)
 find_program(CTEST_COMMAND ctest HINTS "${CMAKE_BIN_DIRECTORY}" REQUIRED)
 
@@ -113,6 +119,8 @@ foreach(ASSET_MANIFEST IN LISTS ASSET_MANIFESTS)
     file(COPY_FILE "${BINARY_ROOT}/version.dll" "${OUTPUT_ROOT}/version.dll")
     file(COPY_FILE "${BINARY_ROOT}/SkyrimRuntimeSwapper.exe"
       "${OUTPUT_ROOT}/SkyrimRuntimeSwapper.exe")
+    file(COPY_FILE "${VORTEX_OVERRIDE_FILE}"
+      "${OUTPUT_ROOT}/vortex_override_instructions.json")
 
     set(SELECTED_ENTRIES "")
     set(FOUND_PROFILE_FILES "")
@@ -197,6 +205,7 @@ ${SELECTED_ENTRIES}
     execute_process(
       COMMAND "${CMAKE_COMMAND}" -E tar cf "${ARCHIVE_PATH}" --format=zip
         version.dll SkyrimRuntimeSwapper.exe RuntimeSwap
+        vortex_override_instructions.json
       WORKING_DIRECTORY "${OUTPUT_ROOT}"
       RESULT_VARIABLE ARCHIVE_RESULT
     )

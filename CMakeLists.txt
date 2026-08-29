@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(SkyrimRuntimeSwapper VERSION 1.0.0 LANGUAGES C CXX)
+project(SkyrimRuntimeSwapper VERSION 1.1.0 LANGUAGES C CXX)
 
 if(NOT WIN32)
   message(FATAL_ERROR "Skyrim Runtime Swapper is Windows-only")

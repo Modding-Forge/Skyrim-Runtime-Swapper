@@ -21,6 +21,7 @@
 #include <optional>
 #include <string>
 #include <system_error>
+#include <vector>
 
 namespace runtime_swapper::app {
 namespace {
@@ -182,7 +183,9 @@ class ManualOperationLock {
   return {true, L"Skyrim 1.7.104 is restored and automatic runtime detection is active."};
 }
 
-[[nodiscard]] std::wstring status_text(const std::filesystem::path& game_root) {
+[[nodiscard]] std::wstring status_text(const std::filesystem::path& game_root,
+                                       FixedRuntimeState fixed_state,
+                                       bool fixed_target_verified) {
   std::wstring status = L"Game directory:\n" + game_root.wstring() + L"\n\nProfile: " +
                         profile_name() + L"\nAvailable switch: 1.7.104 <-> " +
                         std::wstring(target_version_label) + L"\n";
@@ -190,12 +193,12 @@ class ManualOperationLock {
   status += L"Installed executable: ";
   status += version ? version->to_string() : L"not detected";
   status += L"\nPersistent target: ";
-  switch (inspect_fixed_runtime(game_root)) {
+  switch (fixed_state) {
     case FixedRuntimeState::inactive:
       status += L"disabled";
       break;
     case FixedRuntimeState::active:
-      status += target_runtime_is_active(game_root)
+      status += fixed_target_verified
                     ? L"enabled and verified"
                     : L"enabled, but the managed target files require repair";
       break;
@@ -208,15 +211,21 @@ class ManualOperationLock {
 
 [[nodiscard]] int show_control_panel(const std::filesystem::path& game_root) {
   for (;;) {
-    const auto content = status_text(game_root);
+    const auto fixed_state = inspect_fixed_runtime(game_root);
+    const bool fixed_target_verified =
+        fixed_state == FixedRuntimeState::active &&
+        target_runtime_is_active(game_root);
+    const auto content =
+        status_text(game_root, fixed_state, fixed_target_verified);
     const std::wstring switch_label =
         L"Switch and keep Skyrim " + std::wstring(target_version_label);
     const std::wstring restore_label = L"Restore Skyrim 1.7.104";
-    const TASKDIALOG_BUTTON buttons[] = {
-        {switch_button_id, switch_label.c_str()},
-        {restore_button_id, restore_label.c_str()},
-        {refresh_button_id, L"Refresh"},
-    };
+    std::vector<TASKDIALOG_BUTTON> buttons;
+    if (!fixed_target_verified) {
+      buttons.push_back({switch_button_id, switch_label.c_str()});
+    }
+    buttons.push_back({restore_button_id, restore_label.c_str()});
+    buttons.push_back({refresh_button_id, L"Refresh"});
     TASKDIALOGCONFIG configuration{};
     configuration.cbSize = sizeof(configuration);
     configuration.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
@@ -224,9 +233,10 @@ class ManualOperationLock {
     configuration.pszMainIcon = TD_INFORMATION_ICON;
     configuration.pszMainInstruction = L"Manual runtime control";
     configuration.pszContent = content.c_str();
-    configuration.cButtons = static_cast<UINT>(std::size(buttons));
-    configuration.pButtons = buttons;
-    configuration.nDefaultButton = switch_button_id;
+    configuration.cButtons = static_cast<UINT>(buttons.size());
+    configuration.pButtons = buttons.data();
+    configuration.nDefaultButton =
+        fixed_target_verified ? restore_button_id : switch_button_id;
     configuration.dwCommonButtons = TDCBF_CLOSE_BUTTON;
 
     int selected{};
@@ -242,6 +252,7 @@ class ManualOperationLock {
     MessageBoxW(nullptr, result.message.c_str(), L"Skyrim Runtime Swapper",
                 MB_OK | (result.success ? MB_ICONINFORMATION : MB_ICONERROR) |
                     MB_SETFOREGROUND);
+    if (result.success) return 0;
   }
 }
 

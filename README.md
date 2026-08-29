@@ -2,16 +2,16 @@
 
 Skyrim Runtime Swapper lets a Skyrim mod collection built for an older runtime start through the unmodified `skse64_loader.exe`. The original Steam runtime is restored automatically after every game session.
 
-Current release: `1.0.0`.
+Current release: `1.1.0`.
 
 ## Profiles
 
 Both profiles are available for Skyrim `1.6.1170` and `1.5.97`. They switch an installed `1.7.104` runtime before launch and restore `1.7.104` after the game exits.
 
-- Best of Both Worlds patches `SkyrimSE.exe`, `SkyrimSELauncher.exe`, and `Skyrim - Shaders.bsa`.
-- Best of All Worlds also patches `Skyrim - Interface.bsa` and the five official master files.
-- The 1.5.97 profiles additionally patch `steam_api64.dll` and create `binkw64.dll` for the session. Their runtime is 1.5.97, while runtime-facing data uses the proven 1.6.1170 AE-compatible baseline.
-- The 1.5.97 Best of All Worlds profile also quarantines every present official `cc*` plugin and BSA from the root of `Data` for the game session.
+| Patcher type | Target game version: `1.6.1170` | Target game version: `1.5.97` |
+| --- | --- | --- |
+| **Best of Both Worlds** | Binary-patches `SkyrimSE.exe`, `SkyrimSELauncher.exe`, and `Data\Skyrim - Shaders.bsa` to their 1.6.1170 versions. | Binary-patches `SkyrimSE.exe`, `SkyrimSELauncher.exe`, `steam_api64.dll`, and `Data\Skyrim - Shaders.bsa`. Creates the target-only `binkw64.dll`. The executable runtime is 1.5.97, while runtime-facing data uses the proven 1.6.1170 AE-compatible baseline. |
+| **Best of All Worlds** | Applies all Best of Both Worlds changes. Also binary-patches `Data\Skyrim - Interface.bsa`, `Skyrim.esm`, `Update.esm`, `Dawnguard.esm`, `HearthFires.esm`, and `Dragonborn.esm`. | Applies all Best of Both Worlds changes and the additional interface and master-file patches. Before launch, every present `cc*.bsa`, `cc*.esl`, `cc*.esm`, and `cc*.esp` in the root of `Data` is hash-verified and moved into the fallback backup. These files are restored after the game session. |
 
 Other source files, stores, and runtimes are rejected without modification.
 
