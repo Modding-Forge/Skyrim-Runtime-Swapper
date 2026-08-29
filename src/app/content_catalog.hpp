@@ -11,6 +11,9 @@ struct ContentCatalogResult {
   std::wstring message;
 };
 
+[[nodiscard]] ContentCatalogResult recover_content_catalog(
+    const std::filesystem::path& game_root = {});
+
 [[nodiscard]] ContentCatalogResult remove_incompatible_content_catalog(
     const std::filesystem::path& game_root);
 

@@ -29,5 +29,11 @@ inline constexpr RuntimeVersion target_runtime{@TARGET_MAJOR@, @TARGET_MINOR@, @
                                                 @TARGET_REVISION@};
 inline constexpr std::wstring_view source_version_label = L"@SOURCE_VERSION@";
 inline constexpr std::wstring_view target_version_label = L"@TARGET_VERSION@";
+inline constexpr std::string_view source_version_label_utf8 = "@SOURCE_VERSION@";
+inline constexpr std::string_view target_version_label_utf8 = "@TARGET_VERSION@";
+inline constexpr std::string_view build_profile_label = "@SKYRIM_RUNTIME_BUILD_PROFILE@";
+
+inline constexpr bool quarantines_creation_club_content =
+    target_version_label_utf8 == "1.5.97" && build_profile_label == "boaw";
 
 }  // namespace runtime_swapper

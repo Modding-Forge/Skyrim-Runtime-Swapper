@@ -22,11 +22,13 @@ struct SessionResult {
 [[nodiscard]] bool launch_session_watcher(
     const std::filesystem::path& helper, const std::filesystem::path& game_root,
     DWORD loader_process_id, bool restore_runtime_after_session,
-    bool restore_content_catalog_after_session);
+    bool restore_content_catalog_after_session,
+    bool restore_creation_club_after_session);
 
 [[nodiscard]] SessionResult watch_session_and_restore(
     const std::filesystem::path& game_root, DWORD loader_process_id,
     bool restore_runtime_after_session, bool restore_content_catalog_after_session,
+    bool restore_creation_club_after_session,
     const std::wstring& ready_event_name);
 
 }  // namespace runtime_swapper::app

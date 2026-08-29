@@ -3,6 +3,7 @@
 #include <runtime_swapper/sha256.hpp>
 
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string_view>
 
@@ -25,18 +26,37 @@ int wmain(int argc, wchar_t** argv) {
   const auto patch_root = absolute_path(argv[2]);
   const auto output_root = absolute_path(argv[3]);
   for (const auto& entry : runtime_swapper::patch_plan) {
-    const auto source = source_root / entry.relative_file;
-    const auto output = output_root / L"target" / entry.relative_file;
-    const auto restored = output_root / L"source" / entry.relative_file;
+    const auto relative = std::filesystem::path(std::u8string(
+        reinterpret_cast<const char8_t*>(entry.relative_file.data()),
+        reinterpret_cast<const char8_t*>(entry.relative_file.data() + entry.relative_file.size())));
+    const auto forward = std::filesystem::path(std::u8string(
+        reinterpret_cast<const char8_t*>(entry.forward_patch.data()),
+        reinterpret_cast<const char8_t*>(entry.forward_patch.data() + entry.forward_patch.size())));
+    const auto reverse_patch_path = std::filesystem::path(std::u8string(
+        reinterpret_cast<const char8_t*>(entry.reverse_patch.data()),
+        reinterpret_cast<const char8_t*>(entry.reverse_patch.data() + entry.reverse_patch.size())));
+    const auto live_source = source_root / relative;
+    auto source = live_source;
+    const auto output = output_root / L"target" / relative;
+    const auto restored = output_root / L"source" / relative;
 
-    std::wcout << L"Checking " << entry.relative_file << L"...\n";
+    std::wcout << L"Checking " << relative.wstring() << L"...\n";
+    if (!entry.source_present) {
+      if (std::filesystem::exists(live_source)) {
+        std::wcerr << L"Expected source file to be absent: " << live_source << L"\n";
+        return 3;
+      }
+      source = output_root / L"empty-input" / relative;
+      std::filesystem::create_directories(source.parent_path());
+      std::ofstream(source, std::ios::binary | std::ios::trunc).close();
+    }
     const auto source_hash = runtime_swapper::sha256_file(source);
     if (!source_hash || *source_hash != entry.source_sha256) {
       std::wcerr << L"Source hash mismatch: " << source << L"\n";
       return 3;
     }
     const auto result = runtime_swapper::apply_hdiff_patch(
-        source, patch_root / entry.forward_patch, output);
+        source, patch_root / forward, output);
     if (!result.success) {
       std::wcerr << result.error << L"\n";
       return 4;
@@ -47,7 +67,7 @@ int wmain(int argc, wchar_t** argv) {
       return 5;
     }
     const auto reverse = runtime_swapper::apply_hdiff_patch(
-        output, patch_root / entry.reverse_patch, restored);
+        output, patch_root / reverse_patch_path, restored);
     if (!reverse.success) {
       std::wcerr << reverse.error << L"\n";
       return 6;
@@ -57,7 +77,7 @@ int wmain(int argc, wchar_t** argv) {
       std::wcerr << L"Restored source hash mismatch: " << restored << L"\n";
       return 7;
     }
-    std::wcout << L"Verified " << entry.relative_file << L"\n";
+    std::wcout << L"Verified " << relative.wstring() << L"\n";
   }
 
   std::wcout << L"All forward and reverse patches reconstructed and verified.\n";

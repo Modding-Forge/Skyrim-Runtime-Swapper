@@ -8,6 +8,8 @@
 
 namespace runtime_swapper::app {
 
+void log_diagnostic(const std::wstring& message) noexcept;
+
 int finish(ExitCode code, const std::wstring& message, UINT icon, bool quiet = false);
 
 }  // namespace runtime_swapper::app

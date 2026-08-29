@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <shlobj.h>
+#include <shellapi.h>
 
 #include <cstring>
 #include <filesystem>
@@ -11,11 +12,24 @@
 #include <optional>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 namespace runtime_swapper::app {
 namespace {
 
 constexpr int copy_skse_log_button_id = 1001;
+constexpr int verify_game_files_button_id = 1002;
+
+[[nodiscard]] std::optional<std::filesystem::path> swapper_log_path() {
+  const DWORD required = GetEnvironmentVariableW(L"LOCALAPPDATA", nullptr, 0);
+  if (required == 0) return std::nullopt;
+  std::vector<wchar_t> value(required);
+  if (GetEnvironmentVariableW(L"LOCALAPPDATA", value.data(), required) == 0) {
+    return std::nullopt;
+  }
+  return std::filesystem::path(value.data()) / L"Skyrim Special Edition" / L"SKSE" /
+         L"SkyrimRuntimeSwapper.log";
+}
 
 [[nodiscard]] bool starts_with_ignore_case(std::wstring_view value,
                                            std::wstring_view prefix) {
@@ -115,9 +129,19 @@ constexpr int copy_skse_log_button_id = 1001;
 [[nodiscard]] bool copy_latest_skse_log() {
   try {
     const auto log = latest_skse_log();
-    if (!log) return false;
-    const auto text = read_log_text(*log);
-    return text && copy_text_to_clipboard(*text);
+    const auto swapper_log = swapper_log_path();
+    std::wstring combined;
+    if (swapper_log) {
+      if (const auto text = read_log_text(*swapper_log)) {
+        combined += L"===== Skyrim Runtime Swapper =====\r\n" + *text + L"\r\n";
+      }
+    }
+    if (log) {
+      if (const auto text = read_log_text(*log)) {
+        combined += L"===== Latest SKSE log =====\r\n" + *text;
+      }
+    }
+    return !combined.empty() && copy_text_to_clipboard(combined);
   } catch (...) {
     return false;
   }
@@ -125,7 +149,8 @@ constexpr int copy_skse_log_button_id = 1001;
 
 void show_error_dialog(const std::wstring& message) {
   const TASKDIALOG_BUTTON buttons[] = {
-      {copy_skse_log_button_id, L"Copy latest SKSE log"},
+      {copy_skse_log_button_id, L"Copy logs"},
+      {verify_game_files_button_id, L"Verify files with Steam"},
       {IDCLOSE, L"Close"},
   };
   TASKDIALOGCONFIG configuration{};
@@ -146,6 +171,10 @@ void show_error_dialog(const std::wstring& message) {
       MessageBoxW(nullptr, L"The latest SKSE log could not be found or copied.",
                   L"Skyrim Runtime Swapper", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
     }
+    if (selected_button == verify_game_files_button_id) {
+      ShellExecuteW(nullptr, L"open", L"steam://validate/489830", nullptr, nullptr,
+                    SW_SHOWNORMAL);
+    }
     return;
   }
   MessageBoxW(nullptr, message.c_str(), L"Skyrim Runtime Swapper",
@@ -154,7 +183,43 @@ void show_error_dialog(const std::wstring& message) {
 
 }  // namespace
 
+void log_diagnostic(const std::wstring& message) noexcept {
+  try {
+    const auto path = swapper_log_path();
+    if (!path) return;
+    std::error_code error;
+    std::filesystem::create_directories(path->parent_path(), error);
+    if (error) return;
+
+    SYSTEMTIME time{};
+    GetLocalTime(&time);
+    wchar_t prefix[64]{};
+    swprintf_s(prefix, L"[%04u-%02u-%02u %02u:%02u:%02u] ", time.wYear, time.wMonth,
+               time.wDay, time.wHour, time.wMinute, time.wSecond);
+    const std::wstring line = std::wstring(prefix) + message + L"\r\n";
+    const int required = WideCharToMultiByte(CP_UTF8, 0, line.c_str(),
+                                             static_cast<int>(line.size()), nullptr, 0, nullptr,
+                                             nullptr);
+    if (required <= 0) return;
+    std::string bytes(static_cast<std::size_t>(required), '\0');
+    if (WideCharToMultiByte(CP_UTF8, 0, line.c_str(), static_cast<int>(line.size()),
+                            bytes.data(), required, nullptr, nullptr) != required) {
+      return;
+    }
+    HANDLE file = CreateFileW(path->c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
+                              OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
+                              nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    DWORD written{};
+    WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr);
+    FlushFileBuffers(file);
+    CloseHandle(file);
+  } catch (...) {
+  }
+}
+
 int finish(ExitCode code, const std::wstring& message, UINT icon, bool quiet) {
+  log_diagnostic(L"Exit " + std::to_wstring(static_cast<int>(code)) + L": " + message);
   if (!quiet) {
     if ((icon & MB_ICONMASK) == MB_ICONERROR) {
       show_error_dialog(message);

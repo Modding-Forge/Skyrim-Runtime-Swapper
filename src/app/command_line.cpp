@@ -49,6 +49,8 @@ CommandLineOptions parse_command_line(int argc, wchar_t** argv) {
   options.restore_runtime_after_session = has_argument(argc, argv, L"--restore-runtime");
   options.restore_content_catalog_after_session =
       has_argument(argc, argv, L"--restore-content-catalog");
+  options.restore_creation_club_after_session =
+      has_argument(argc, argv, L"--restore-creation-club");
   return options;
 }
 

@@ -6,6 +6,8 @@
 /dist/
 /out/
 /lifecycle-tests/
+/docs/*.md
+/docs/**/*.md
 
 build-*/
 cmake-build*/

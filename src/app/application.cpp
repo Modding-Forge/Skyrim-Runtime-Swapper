@@ -2,6 +2,7 @@
 
 #include "command_line.hpp"
 #include "content_catalog.hpp"
+#include "creation_club.hpp"
 #include "diagnostics.hpp"
 #include "runtime_labels.hpp"
 #include "runtime_version_reader.hpp"
@@ -13,6 +14,7 @@
 #include <runtime_swapper/runtime_version.hpp>
 #include <runtime_swapper/session_gate.hpp>
 #include <runtime_swapper/session_plan.hpp>
+#include <runtime_swapper/transaction_backend.hpp>
 
 #include <windows.h>
 
@@ -49,7 +51,8 @@ class MutexLock {
   }
   const auto result = watch_session_and_restore(
       *options.game_root, *options.loader_process_id, options.restore_runtime_after_session,
-      options.restore_content_catalog_after_session, *options.ready_event_name);
+      options.restore_content_catalog_after_session,
+      options.restore_creation_club_after_session, *options.ready_event_name);
   if (!result.success()) return finish(result.code, result.message, MB_ICONERROR, options.quiet);
   return static_cast<int>(ExitCode::success);
 }
@@ -80,6 +83,51 @@ int run(int argc, wchar_t** argv) {
   }
   MutexLock mutex_lock(mutex.get());
 
+  const auto transaction_lock_path =
+      *options.game_root / L".skyrim-runtime-swapper" / L"transaction.lock";
+  std::error_code lock_error;
+  std::filesystem::create_directories(transaction_lock_path.parent_path(), lock_error);
+  UniqueHandle transaction_lock(
+      lock_error ? INVALID_HANDLE_VALUE
+                 : CreateFileW(transaction_lock_path.c_str(), GENERIC_READ | GENERIC_WRITE, 0,
+                               nullptr, OPEN_ALWAYS,
+                               FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_WRITE_THROUGH, nullptr));
+  if (!transaction_lock) {
+    mutex_lock.unlock();
+    return finish(ExitCode::another_instance_failed,
+                  L"The durable runtime transaction lock could not be acquired.",
+                  MB_ICONERROR, options.quiet);
+  }
+
+  const auto backend_probe = transaction_backend().probe(*options.game_root);
+  log_diagnostic(L"Backend: " + backend_probe.description);
+
+  const auto recovered = recover_runtime(*options.game_root);
+  log_diagnostic(L"Runtime recovery: " + recovered.message);
+  if (!recovered.success()) {
+    mutex_lock.unlock();
+    return finish(recovered.code,
+                  recovered.message +
+                      L"\n\nSkyrim was not started. Use Steam's Verify integrity of game files "
+                      L"action if recovery remains unavailable.",
+                  MB_ICONERROR, options.quiet);
+  }
+  const auto recovered_catalog = recover_content_catalog(*options.game_root);
+  if (!recovered_catalog.success) {
+    mutex_lock.unlock();
+    return finish(ExitCode::content_catalog_cleanup_failed,
+                  recovered_catalog.message + L"\n\nSkyrim was not started.",
+                  MB_ICONERROR, options.quiet);
+  }
+  const auto recovered_creation_club =
+      recover_creation_club_content(*options.game_root);
+  if (!recovered_creation_club.success) {
+    mutex_lock.unlock();
+    return finish(ExitCode::creation_club_cleanup_failed,
+                  recovered_creation_club.message + L"\n\nSkyrim was not started.",
+                  MB_ICONERROR, options.quiet);
+  }
+
   const auto executable = *options.game_root / L"SkyrimSE.exe";
   if (!std::filesystem::is_regular_file(executable)) {
     mutex_lock.unlock();
@@ -104,27 +152,49 @@ int run(int argc, wchar_t** argv) {
   }
 
   const auto patch_root = *options.game_root / L"RuntimeSwap\\patches";
-  const auto result = downgrade_runtime(*options.game_root, patch_root);
-  ContentCatalogResult catalog_cleanup{};
+  const auto result = downgrade_runtime_after_recovery(*options.game_root, patch_root);
+  log_diagnostic(L"Runtime prepare: " + result.message);
+  ContentCatalogResult catalog_cleanup{true, false, {}};
+  CreationClubResult creation_club_cleanup{true, false, {}};
   if (result.success()) {
     catalog_cleanup = remove_incompatible_content_catalog(*options.game_root);
+    log_diagnostic(catalog_cleanup.success
+                       ? L"ContentCatalog prepare: complete"
+                       : L"ContentCatalog prepare failed: " + catalog_cleanup.message);
+  }
+  if (result.success() && catalog_cleanup.success) {
+    creation_club_cleanup =
+        quarantine_creation_club_content(*options.game_root);
+    log_diagnostic(
+        creation_club_cleanup.success
+            ? L"Creation Club prepare: complete"
+            : L"Creation Club prepare failed: " + creation_club_cleanup.message);
   }
 
   const auto session_plan = make_session_plan(
-      options.from_skse_loader, result.changed_files, catalog_cleanup.changed);
+      options.from_skse_loader, result.changed_files, catalog_cleanup.changed,
+      creation_club_cleanup.changed);
   bool watcher_started = true;
   std::optional<DowngradeResult> safety_restore;
   bool safety_catalog_restored = true;
-  if (result.success() && catalog_cleanup.success && session_plan.start_watcher) {
+  bool safety_creation_club_restored = true;
+  if (result.success() && catalog_cleanup.success && creation_club_cleanup.success &&
+      session_plan.start_watcher) {
     watcher_started =
         options.loader_process_id &&
         launch_session_watcher(options.helper_path, *options.game_root,
                                *options.loader_process_id,
                                session_plan.restore_runtime_after_session,
-                               session_plan.restore_content_catalog_after_session);
+                               session_plan.restore_content_catalog_after_session,
+                               session_plan.restore_creation_club_after_session);
   }
-  if (result.success() && (!catalog_cleanup.success || !watcher_started)) {
+  if (result.success() &&
+      (!catalog_cleanup.success || !creation_club_cleanup.success || !watcher_started)) {
     if (result.changed_files) safety_restore = restore_runtime(*options.game_root);
+    if (creation_club_cleanup.changed) {
+      safety_creation_club_restored =
+          recover_creation_club_content(*options.game_root).success;
+    }
     if (catalog_cleanup.changed) {
       safety_catalog_restored = restore_content_catalog(*options.game_root).success;
     }
@@ -150,6 +220,12 @@ int run(int argc, wchar_t** argv) {
                               ? L" ContentCatalog.txt was restored as a safety precaution."
                               : L" ContentCatalog.txt could not be restored.";
     }
+    if (creation_club_cleanup.changed) {
+      recovery_message +=
+          safety_creation_club_restored
+              ? L" Creation Club content was restored as a safety precaution."
+              : L" Creation Club content could not be restored.";
+    }
     return finish(ExitCode::watcher_start_failed,
                   L"The session watcher could not be started." + recovery_message,
                   MB_ICONERROR, options.quiet);
@@ -161,8 +237,17 @@ int run(int argc, wchar_t** argv) {
                       L" may crash with the newer content catalog.",
                   MB_ICONERROR, options.quiet);
   }
+  if (!creation_club_cleanup.success) {
+    return finish(ExitCode::creation_club_cleanup_failed,
+                  creation_club_cleanup.message +
+                      L"\n\nSkyrim will not be started because Creation Club content "
+                      L"could not be quarantined safely.",
+                  MB_ICONERROR, options.quiet);
+  }
 
-  if ((result.changed_files || catalog_cleanup.changed) && !options.quiet &&
+  if ((result.changed_files || catalog_cleanup.changed ||
+       creation_club_cleanup.changed) &&
+      !options.quiet &&
       !options.from_skse_loader) {
     MessageBoxW(nullptr,
                 (result.message + L"\n\nSKSE will now continue with the matching runtime.").c_str(),

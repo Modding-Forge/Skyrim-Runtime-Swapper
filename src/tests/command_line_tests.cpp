@@ -13,10 +13,12 @@ int main() {
   wchar_t watch_flag[] = L"--watch";
   wchar_t restore_runtime_flag[] = L"--restore-runtime";
   wchar_t restore_catalog_flag[] = L"--restore-content-catalog";
+  wchar_t restore_creation_club_flag[] = L"--restore-creation-club";
   wchar_t quiet_flag[] = L"--quiet";
 
   std::array argv{executable, game_root_flag, game_root, loader_flag, loader_id, ready_flag,
-                  ready_name, watch_flag, restore_runtime_flag, restore_catalog_flag, quiet_flag};
+                  ready_name, watch_flag, restore_runtime_flag, restore_catalog_flag,
+                  restore_creation_club_flag, quiet_flag};
   const auto options = runtime_swapper::app::parse_command_line(
       static_cast<int>(argv.size()), argv.data());
 
@@ -27,6 +29,7 @@ int main() {
       !options.restore_content_catalog_after_session || !options.quiet) {
     return 4;
   }
+  if (!options.restore_creation_club_after_session) return 7;
   if (options.from_skse_loader) return 5;
 
   wchar_t invalid_id[] = L"not-a-process";

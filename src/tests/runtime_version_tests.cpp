@@ -24,25 +24,39 @@ int main() {
     return 3;
   }
 
-  constexpr auto swapped_runtime = runtime_swapper::make_session_plan(true, true, true);
+  constexpr auto swapped_runtime =
+      runtime_swapper::make_session_plan(true, true, true, true);
   static_assert(swapped_runtime.start_watcher);
   static_assert(swapped_runtime.restore_runtime_after_session);
   static_assert(swapped_runtime.restore_content_catalog_after_session);
+  static_assert(swapped_runtime.restore_creation_club_after_session);
 
-  constexpr auto existing_target = runtime_swapper::make_session_plan(true, false, true);
+  constexpr auto existing_target =
+      runtime_swapper::make_session_plan(true, false, true, false);
   static_assert(existing_target.start_watcher);
   static_assert(!existing_target.restore_runtime_after_session);
   static_assert(existing_target.restore_content_catalog_after_session);
+  static_assert(!existing_target.restore_creation_club_after_session);
 
-  constexpr auto untouched_target = runtime_swapper::make_session_plan(true, false, false);
+  constexpr auto untouched_target =
+      runtime_swapper::make_session_plan(true, false, false, false);
   static_assert(!untouched_target.start_watcher);
   static_assert(!untouched_target.restore_runtime_after_session);
   static_assert(!untouched_target.restore_content_catalog_after_session);
+  static_assert(!untouched_target.restore_creation_club_after_session);
 
-  constexpr auto swapped_without_catalog = runtime_swapper::make_session_plan(true, true, false);
+  constexpr auto swapped_without_catalog =
+      runtime_swapper::make_session_plan(true, true, false, false);
   static_assert(swapped_without_catalog.start_watcher);
   static_assert(swapped_without_catalog.restore_runtime_after_session);
   static_assert(!swapped_without_catalog.restore_content_catalog_after_session);
+  static_assert(!swapped_without_catalog.restore_creation_club_after_session);
+
+  constexpr auto creation_club_only =
+      runtime_swapper::make_session_plan(true, false, false, true);
+  static_assert(creation_club_only.start_watcher);
+  static_assert(!creation_club_only.restore_runtime_after_session);
+  static_assert(creation_club_only.restore_creation_club_after_session);
 
   std::error_code filesystem_error;
   const auto missing_catalog = std::filesystem::temp_directory_path() /

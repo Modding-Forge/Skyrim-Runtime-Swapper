@@ -8,24 +8,19 @@ if(NOT CONFIGURATION MATCHES "^(Debug|Release)$")
 endif()
 
 get_filename_component(REPOSITORY_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
-get_filename_component(WORKSPACE_ROOT "${REPOSITORY_ROOT}/.." ABSOLUTE)
 include("${REPOSITORY_ROOT}/cmake/runtime_profiles.cmake")
 
-if(NOT DEFINED ASSET_MANIFEST OR ASSET_MANIFEST STREQUAL "")
-  set(REPOSITORY_ASSET_MANIFEST
-    "${REPOSITORY_ROOT}/assets/runtime/1.7.104-to-1.6.1170/manifest.json")
-  if(EXISTS "${REPOSITORY_ASSET_MANIFEST}")
-    set(ASSET_MANIFEST "${REPOSITORY_ASSET_MANIFEST}")
-  else()
-    set(ASSET_MANIFEST
-      "${WORKSPACE_ROOT}/Skyrim-Runtime-Patch-Creator/processed/1.7.104-to-1.6.1170-full/manifest.json")
-  endif()
+if(DEFINED ASSET_MANIFEST AND NOT ASSET_MANIFEST STREQUAL "")
+  get_filename_component(ASSET_MANIFEST "${ASSET_MANIFEST}" ABSOLUTE)
+  set(ASSET_MANIFESTS "${ASSET_MANIFEST}")
+else()
+  file(GLOB ASSET_MANIFESTS LIST_DIRECTORIES false
+    "${REPOSITORY_ROOT}/assets/runtime/*/manifest.json")
+  list(SORT ASSET_MANIFESTS)
 endif()
-get_filename_component(ASSET_MANIFEST "${ASSET_MANIFEST}" ABSOLUTE)
-if(NOT EXISTS "${ASSET_MANIFEST}")
-  message(FATAL_ERROR "The bidirectional asset manifest was not found: ${ASSET_MANIFEST}")
+if(NOT ASSET_MANIFESTS)
+  message(FATAL_ERROR "No bidirectional asset manifests were found under assets/runtime")
 endif()
-get_filename_component(ASSET_ROOT "${ASSET_MANIFEST}" DIRECTORY)
 
 file(READ "${REPOSITORY_ROOT}/vcpkg.json" RELEASE_MANIFEST_JSON)
 string(JSON RELEASE_VERSION GET "${RELEASE_MANIFEST_JSON}" version-string)
@@ -36,127 +31,142 @@ if(ROOT_VERSION_POSITION EQUAL -1)
   message(FATAL_ERROR "The CMake project version does not match ${RELEASE_VERSION}")
 endif()
 
-file(READ "${ASSET_MANIFEST}" ASSET_JSON)
-string(JSON PATCH_FORMAT GET "${ASSET_JSON}" format)
-string(JSON PATCH_ALGORITHM GET "${ASSET_JSON}" algorithm)
-string(JSON HDIFF_VERSION GET "${ASSET_JSON}" hdiffPatchVersion)
-string(JSON SOURCE_VERSION GET "${ASSET_JSON}" sourceVersion)
-string(JSON TARGET_VERSION GET "${ASSET_JSON}" targetVersion)
-if(NOT PATCH_FORMAT EQUAL 3 OR NOT PATCH_ALGORITHM STREQUAL "hdiffpatch-hdiffw26-zstd")
-  message(FATAL_ERROR "The asset catalog must use format 3 HDIFFW26 Zstandard patches")
-endif()
-if(NOT SOURCE_VERSION STREQUAL "1.7.104" OR NOT TARGET_VERSION STREQUAL "1.6.1170")
-  message(FATAL_ERROR "The asset catalog must describe Skyrim 1.7.104 <-> 1.6.1170")
-endif()
-if(NOT HDIFF_VERSION STREQUAL "5.1.3")
-  message(FATAL_ERROR "The native patch library requires HDiffPatch 5.1.3 assets")
-endif()
-
 string(TIMESTAMP BUILD_ID "%Y%m%d-%H%M%S")
 set(RELEASE_ROOT "${REPOSITORY_ROOT}/dist/builds/${RELEASE_VERSION}/${BUILD_ID}")
 get_filename_component(CMAKE_BIN_DIRECTORY "${CMAKE_COMMAND}" DIRECTORY)
 find_program(CTEST_COMMAND ctest HINTS "${CMAKE_BIN_DIRECTORY}" REQUIRED)
 
-foreach(PROFILE bobw boaw)
-  runtime_profile_files("${PROFILE}" PROFILE_FILES)
-  runtime_profile_name("${PROFILE}" PROFILE_NAME)
-  set(SLUG "${PROFILE_NAME}-${SOURCE_VERSION}-to-${TARGET_VERSION}")
-  set(BUILD_ROOT "${REPOSITORY_ROOT}/build/${PROFILE}")
-  set(BINARY_ROOT "${BUILD_ROOT}/${CONFIGURATION}")
-  set(OUTPUT_ROOT "${RELEASE_ROOT}/Skyrim-Runtime-Swapper-v${RELEASE_VERSION}-${SLUG}")
-  set(ARCHIVE_PATH "${OUTPUT_ROOT}.zip")
-
-  file(REMOVE_RECURSE "${OUTPUT_ROOT}")
-  file(REMOVE "${ARCHIVE_PATH}")
-  message(STATUS "Building ${PROFILE_NAME}")
-
-  execute_process(
-    COMMAND "${CMAKE_COMMAND}"
-      -S "${REPOSITORY_ROOT}"
-      -B "${BUILD_ROOT}"
-      -A x64
-      "-DSKYRIM_RUNTIME_PATCH_MANIFEST=${ASSET_MANIFEST}"
-      "-DSKYRIM_RUNTIME_BUILD_PROFILE=${PROFILE}"
-    RESULT_VARIABLE CONFIGURE_RESULT
-  )
-  if(NOT CONFIGURE_RESULT EQUAL 0)
-    message(FATAL_ERROR "CMake configuration failed for ${PROFILE_NAME}")
+foreach(ASSET_MANIFEST IN LISTS ASSET_MANIFESTS)
+  if(NOT EXISTS "${ASSET_MANIFEST}")
+    message(FATAL_ERROR "The bidirectional asset manifest was not found: ${ASSET_MANIFEST}")
+  endif()
+  get_filename_component(ASSET_ROOT "${ASSET_MANIFEST}" DIRECTORY)
+  file(READ "${ASSET_MANIFEST}" ASSET_JSON)
+  string(JSON PATCH_FORMAT GET "${ASSET_JSON}" format)
+  string(JSON PATCH_ALGORITHM GET "${ASSET_JSON}" algorithm)
+  string(JSON HDIFF_VERSION GET "${ASSET_JSON}" hdiffPatchVersion)
+  string(JSON SOURCE_VERSION GET "${ASSET_JSON}" sourceVersion)
+  string(JSON TARGET_VERSION GET "${ASSET_JSON}" targetVersion)
+  if(NOT PATCH_FORMAT EQUAL 3 OR NOT PATCH_ALGORITHM STREQUAL "hdiffpatch-hdiffw26-zstd")
+    message(FATAL_ERROR "The asset catalog must use format 3 HDIFFW26 Zstandard patches")
+  endif()
+  if(NOT SOURCE_VERSION STREQUAL "1.7.104" OR
+     NOT TARGET_VERSION MATCHES "^(1\.6\.1170|1\.5\.97)$")
+    message(FATAL_ERROR
+      "The asset catalog must describe Skyrim 1.7.104 <-> 1.6.1170/1.5.97")
+  endif()
+  if(NOT HDIFF_VERSION STREQUAL "5.1.3")
+    message(FATAL_ERROR "The native patch library requires HDiffPatch 5.1.3 assets")
   endif()
 
-  execute_process(
-    COMMAND "${CMAKE_COMMAND}" --build "${BUILD_ROOT}" --config "${CONFIGURATION}" --parallel
-    RESULT_VARIABLE BUILD_RESULT
-  )
-  if(NOT BUILD_RESULT EQUAL 0)
-    message(FATAL_ERROR "Compilation failed for ${PROFILE_NAME}")
-  endif()
+  foreach(PROFILE bobw boaw)
+    runtime_profile_files("${PROFILE}" "${TARGET_VERSION}" PROFILE_FILES)
+    runtime_profile_name("${PROFILE}" PROFILE_NAME)
+    set(SLUG "${PROFILE_NAME}-${SOURCE_VERSION}-to-${TARGET_VERSION}")
+    set(BUILD_ROOT "${REPOSITORY_ROOT}/build/${TARGET_VERSION}/${PROFILE}")
+    set(BINARY_ROOT "${BUILD_ROOT}/${CONFIGURATION}")
+    set(OUTPUT_ROOT "${RELEASE_ROOT}/Skyrim-Runtime-Swapper-v${RELEASE_VERSION}-${SLUG}")
+    set(ARCHIVE_PATH "${OUTPUT_ROOT}.zip")
 
-  execute_process(
-    COMMAND "${CTEST_COMMAND}" --test-dir "${BUILD_ROOT}" -C "${CONFIGURATION}"
-      --output-on-failure
-    RESULT_VARIABLE TEST_RESULT
-  )
-  if(NOT TEST_RESULT EQUAL 0)
-    message(FATAL_ERROR "Tests failed for ${PROFILE_NAME}")
-  endif()
+    file(REMOVE_RECURSE "${OUTPUT_ROOT}")
+    file(REMOVE "${ARCHIVE_PATH}")
+    message(STATUS "Building ${PROFILE_NAME} for Skyrim ${TARGET_VERSION}")
 
-  foreach(BINARY_NAME version.dll SkyrimRuntimeSwapper.exe)
-    if(NOT EXISTS "${BINARY_ROOT}/${BINARY_NAME}")
-      message(FATAL_ERROR "Missing release binary: ${BINARY_ROOT}/${BINARY_NAME}")
+    execute_process(
+      COMMAND "${CMAKE_COMMAND}"
+        -S "${REPOSITORY_ROOT}"
+        -B "${BUILD_ROOT}"
+        -A x64
+        "-DSKYRIM_RUNTIME_PATCH_MANIFEST=${ASSET_MANIFEST}"
+        "-DSKYRIM_RUNTIME_BUILD_PROFILE=${PROFILE}"
+      RESULT_VARIABLE CONFIGURE_RESULT
+    )
+    if(NOT CONFIGURE_RESULT EQUAL 0)
+      message(FATAL_ERROR "CMake configuration failed for ${PROFILE_NAME} ${TARGET_VERSION}")
     endif()
-  endforeach()
 
-  set(PATCH_OUTPUT "${OUTPUT_ROOT}/RuntimeSwap/patches")
-  file(MAKE_DIRECTORY "${PATCH_OUTPUT}")
-  file(COPY_FILE "${BINARY_ROOT}/version.dll" "${OUTPUT_ROOT}/version.dll")
-  file(COPY_FILE "${BINARY_ROOT}/SkyrimRuntimeSwapper.exe"
-    "${OUTPUT_ROOT}/SkyrimRuntimeSwapper.exe")
-
-  set(SELECTED_ENTRIES "")
-  set(FOUND_PROFILE_FILES "")
-  string(JSON ASSET_FILE_COUNT LENGTH "${ASSET_JSON}" files)
-  math(EXPR ASSET_FILE_LAST "${ASSET_FILE_COUNT} - 1")
-  foreach(INDEX RANGE 0 ${ASSET_FILE_LAST})
-    string(JSON RELATIVE_FILE GET "${ASSET_JSON}" files ${INDEX} path)
-    if(NOT RELATIVE_FILE IN_LIST PROFILE_FILES)
-      continue()
+    execute_process(
+      COMMAND "${CMAKE_COMMAND}" --build "${BUILD_ROOT}" --config "${CONFIGURATION}" --parallel
+      RESULT_VARIABLE BUILD_RESULT
+    )
+    if(NOT BUILD_RESULT EQUAL 0)
+      message(FATAL_ERROR "Compilation failed for ${PROFILE_NAME} ${TARGET_VERSION}")
     endif()
-    list(APPEND FOUND_PROFILE_FILES "${RELATIVE_FILE}")
-    string(JSON ENTRY_JSON GET "${ASSET_JSON}" files ${INDEX})
-    if(NOT SELECTED_ENTRIES STREQUAL "")
-      string(APPEND SELECTED_ENTRIES ",\n")
-    endif()
-    string(APPEND SELECTED_ENTRIES "    ${ENTRY_JSON}")
 
-    foreach(DIRECTION forward reverse)
-      string(JSON PATCH_NAME GET "${ASSET_JSON}" files ${INDEX} ${DIRECTION}Patch)
-      string(JSON EXPECTED_PATCH_HASH GET "${ASSET_JSON}" files ${INDEX}
-        ${DIRECTION}PatchSha256)
-      set(PATCH_SOURCE "${ASSET_ROOT}/${PATCH_NAME}")
-      if(NOT EXISTS "${PATCH_SOURCE}")
-        message(FATAL_ERROR "Missing ${PROFILE_NAME} patch asset: ${PATCH_SOURCE}")
+    execute_process(
+      COMMAND "${CTEST_COMMAND}" --test-dir "${BUILD_ROOT}" -C "${CONFIGURATION}"
+        --output-on-failure
+      RESULT_VARIABLE TEST_RESULT
+    )
+    if(NOT TEST_RESULT EQUAL 0)
+      message(FATAL_ERROR "Tests failed for ${PROFILE_NAME} ${TARGET_VERSION}")
+    endif()
+
+    foreach(BINARY_NAME version.dll SkyrimRuntimeSwapper.exe)
+      if(NOT EXISTS "${BINARY_ROOT}/${BINARY_NAME}")
+        message(FATAL_ERROR "Missing release binary: ${BINARY_ROOT}/${BINARY_NAME}")
       endif()
-      file(SHA256 "${PATCH_SOURCE}" ACTUAL_PATCH_HASH)
-      if(NOT ACTUAL_PATCH_HASH STREQUAL EXPECTED_PATCH_HASH)
-        message(FATAL_ERROR "Patch hash mismatch: ${PATCH_SOURCE}")
-      endif()
-      get_filename_component(PATCH_DIRECTORY "${PATCH_OUTPUT}/${PATCH_NAME}" DIRECTORY)
-      file(MAKE_DIRECTORY "${PATCH_DIRECTORY}")
-      file(COPY_FILE "${PATCH_SOURCE}" "${PATCH_OUTPUT}/${PATCH_NAME}")
     endforeach()
-  endforeach()
 
-  foreach(REQUIRED_FILE IN LISTS PROFILE_FILES)
-    if(NOT REQUIRED_FILE IN_LIST FOUND_PROFILE_FILES)
-      message(FATAL_ERROR "The asset catalog is missing required ${PROFILE_NAME} file: ${REQUIRED_FILE}")
+    set(PATCH_OUTPUT "${OUTPUT_ROOT}/RuntimeSwap/patches")
+    file(MAKE_DIRECTORY "${PATCH_OUTPUT}")
+    file(COPY_FILE "${BINARY_ROOT}/version.dll" "${OUTPUT_ROOT}/version.dll")
+    file(COPY_FILE "${BINARY_ROOT}/SkyrimRuntimeSwapper.exe"
+      "${OUTPUT_ROOT}/SkyrimRuntimeSwapper.exe")
+
+    set(SELECTED_ENTRIES "")
+    set(FOUND_PROFILE_FILES "")
+    string(JSON ASSET_FILE_COUNT LENGTH "${ASSET_JSON}" files)
+    math(EXPR ASSET_FILE_LAST "${ASSET_FILE_COUNT} - 1")
+    foreach(INDEX RANGE 0 ${ASSET_FILE_LAST})
+      string(JSON RELATIVE_FILE GET "${ASSET_JSON}" files ${INDEX} path)
+      if(NOT RELATIVE_FILE IN_LIST PROFILE_FILES)
+        continue()
+      endif()
+      list(APPEND FOUND_PROFILE_FILES "${RELATIVE_FILE}")
+      string(JSON ENTRY_JSON GET "${ASSET_JSON}" files ${INDEX})
+      if(NOT SELECTED_ENTRIES STREQUAL "")
+        string(APPEND SELECTED_ENTRIES ",\n")
+      endif()
+      string(APPEND SELECTED_ENTRIES "    ${ENTRY_JSON}")
+
+      foreach(DIRECTION forward reverse)
+        string(JSON PATCH_NAME GET "${ASSET_JSON}" files ${INDEX} ${DIRECTION}Patch)
+        string(JSON EXPECTED_PATCH_HASH GET "${ASSET_JSON}" files ${INDEX}
+          ${DIRECTION}PatchSha256)
+        set(PATCH_SOURCE "${ASSET_ROOT}/${PATCH_NAME}")
+        if(NOT EXISTS "${PATCH_SOURCE}")
+          message(FATAL_ERROR "Missing ${PROFILE_NAME} patch asset: ${PATCH_SOURCE}")
+        endif()
+        file(SHA256 "${PATCH_SOURCE}" ACTUAL_PATCH_HASH)
+        if(NOT ACTUAL_PATCH_HASH STREQUAL EXPECTED_PATCH_HASH)
+          message(FATAL_ERROR "Patch hash mismatch: ${PATCH_SOURCE}")
+        endif()
+        get_filename_component(PATCH_DIRECTORY "${PATCH_OUTPUT}/${PATCH_NAME}" DIRECTORY)
+        file(MAKE_DIRECTORY "${PATCH_DIRECTORY}")
+        file(COPY_FILE "${PATCH_SOURCE}" "${PATCH_OUTPUT}/${PATCH_NAME}")
+      endforeach()
+    endforeach()
+
+    foreach(REQUIRED_FILE IN LISTS PROFILE_FILES)
+      if(NOT REQUIRED_FILE IN_LIST FOUND_PROFILE_FILES)
+        message(FATAL_ERROR
+          "The asset catalog is missing required ${PROFILE_NAME} file: ${REQUIRED_FILE}")
+      endif()
+    endforeach()
+
+    string(JSON GAME_ID GET "${ASSET_JSON}" gameId)
+    string(JSON APP_ID GET "${ASSET_JSON}" appId)
+    string(JSON SOURCE_MANIFESTS GET "${ASSET_JSON}" sourceManifests)
+    string(JSON TARGET_MANIFESTS GET "${ASSET_JSON}" targetManifests)
+    set(DATA_BASELINE_FIELDS "")
+    if(TARGET_VERSION STREQUAL "1.5.97")
+      string(JSON DATA_BASELINE_VERSION GET "${ASSET_JSON}" dataBaselineVersion)
+      string(JSON DATA_BASELINE_MANIFESTS GET "${ASSET_JSON}" dataBaselineManifests)
+      set(DATA_BASELINE_FIELDS
+        "  \"dataBaselineVersion\": \"${DATA_BASELINE_VERSION}\",\n  \"dataBaselineManifests\": ${DATA_BASELINE_MANIFESTS},\n")
     endif()
-  endforeach()
-
-  string(JSON GAME_ID GET "${ASSET_JSON}" gameId)
-  string(JSON APP_ID GET "${ASSET_JSON}" appId)
-  string(JSON SOURCE_MANIFESTS GET "${ASSET_JSON}" sourceManifests)
-  string(JSON TARGET_MANIFESTS GET "${ASSET_JSON}" targetManifests)
-  set(RELEASE_MANIFEST
+    set(RELEASE_MANIFEST
 "{
   \"format\": 3,
   \"algorithm\": \"${PATCH_ALGORITHM}\",
@@ -166,6 +176,7 @@ foreach(PROFILE bobw boaw)
   \"appId\": \"${APP_ID}\",
   \"sourceVersion\": \"${SOURCE_VERSION}\",
   \"targetVersion\": \"${TARGET_VERSION}\",
+${DATA_BASELINE_FIELDS}
   \"sourceManifests\": ${SOURCE_MANIFESTS},
   \"targetManifests\": ${TARGET_MANIFESTS},
   \"thirdParty\": {
@@ -181,19 +192,20 @@ ${SELECTED_ENTRIES}
   ]
 }
 ")
-  file(WRITE "${OUTPUT_ROOT}/RuntimeSwap/manifest.json" "${RELEASE_MANIFEST}")
+    file(WRITE "${OUTPUT_ROOT}/RuntimeSwap/manifest.json" "${RELEASE_MANIFEST}")
 
-  execute_process(
-    COMMAND "${CMAKE_COMMAND}" -E tar cf "${ARCHIVE_PATH}" --format=zip
-      version.dll SkyrimRuntimeSwapper.exe RuntimeSwap
-    WORKING_DIRECTORY "${OUTPUT_ROOT}"
-    RESULT_VARIABLE ARCHIVE_RESULT
-  )
-  if(NOT ARCHIVE_RESULT EQUAL 0 OR NOT EXISTS "${ARCHIVE_PATH}")
-    message(FATAL_ERROR "Archive creation failed for ${PROFILE_NAME}")
-  endif()
-  file(SHA256 "${ARCHIVE_PATH}" ARCHIVE_HASH)
-  file(SIZE "${ARCHIVE_PATH}" ARCHIVE_SIZE)
-  message(STATUS "Created ${ARCHIVE_PATH}")
-  message(STATUS "SHA-256 ${ARCHIVE_HASH} (${ARCHIVE_SIZE} bytes)")
+    execute_process(
+      COMMAND "${CMAKE_COMMAND}" -E tar cf "${ARCHIVE_PATH}" --format=zip
+        version.dll SkyrimRuntimeSwapper.exe RuntimeSwap
+      WORKING_DIRECTORY "${OUTPUT_ROOT}"
+      RESULT_VARIABLE ARCHIVE_RESULT
+    )
+    if(NOT ARCHIVE_RESULT EQUAL 0 OR NOT EXISTS "${ARCHIVE_PATH}")
+      message(FATAL_ERROR "Archive creation failed for ${PROFILE_NAME} ${TARGET_VERSION}")
+    endif()
+    file(SHA256 "${ARCHIVE_PATH}" ARCHIVE_HASH)
+    file(SIZE "${ARCHIVE_PATH}" ARCHIVE_SIZE)
+    message(STATUS "Created ${ARCHIVE_PATH}")
+    message(STATUS "SHA-256 ${ARCHIVE_HASH} (${ARCHIVE_SIZE} bytes)")
+  endforeach()
 endforeach()

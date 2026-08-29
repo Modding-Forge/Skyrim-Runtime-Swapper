@@ -19,6 +19,10 @@ enum class ExitCode : int {
   internal_error = 30,
   watcher_start_failed = 31,
   restore_failed = 32,
+  unsupported_filesystem = 33,
+  journal_corrupt = 34,
+  recovery_failed = 35,
+  creation_club_cleanup_failed = 36,
 };
 
 }  // namespace runtime_swapper

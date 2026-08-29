@@ -18,6 +18,11 @@ struct DowngradeResult {
 [[nodiscard]] DowngradeResult downgrade_runtime(const std::filesystem::path& game_root,
                                                 const std::filesystem::path& patch_root);
 
+[[nodiscard]] DowngradeResult downgrade_runtime_after_recovery(
+    const std::filesystem::path& game_root, const std::filesystem::path& patch_root);
+
 [[nodiscard]] DowngradeResult restore_runtime(const std::filesystem::path& game_root);
+
+[[nodiscard]] DowngradeResult recover_runtime(const std::filesystem::path& game_root);
 
 }  // namespace runtime_swapper

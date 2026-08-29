@@ -18,6 +18,7 @@ struct CommandLineOptions {
   bool watch{};
   bool restore_runtime_after_session{};
   bool restore_content_catalog_after_session{};
+  bool restore_creation_club_after_session{};
 };
 
 [[nodiscard]] CommandLineOptions parse_command_line(int argc, wchar_t** argv);
