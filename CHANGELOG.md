@@ -22,3 +22,4 @@ All notable changes to Skyrim Runtime Swapper are documented in this file.
 - Strict native Windows NTFS validation and Wine or Proton best-effort support.
 - Atomic, verified first-downgrade backups containing only files managed by the selected profile.
 - Journaled same-volume Creation Club quarantine and recovery for the 1.5.97 Best of All Worlds profile.
+- Native manual control panel for persistent target-runtime switching and explicit 1.7.104 restoration.

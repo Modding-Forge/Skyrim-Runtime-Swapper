@@ -25,4 +25,10 @@ struct DowngradeResult {
 
 [[nodiscard]] DowngradeResult recover_runtime(const std::filesystem::path& game_root);
 
+[[nodiscard]] bool target_runtime_is_active(
+    const std::filesystem::path& game_root) noexcept;
+
+[[nodiscard]] DowngradeResult finalize_fixed_target_runtime(
+    const std::filesystem::path& game_root);
+
 }  // namespace runtime_swapper

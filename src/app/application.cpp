@@ -4,6 +4,8 @@
 #include "content_catalog.hpp"
 #include "creation_club.hpp"
 #include "diagnostics.hpp"
+#include "fixed_runtime.hpp"
+#include "manual_gui.hpp"
 #include "runtime_labels.hpp"
 #include "runtime_version_reader.hpp"
 #include "session.hpp"
@@ -61,6 +63,7 @@ class MutexLock {
 
 int run(int argc, wchar_t** argv) {
   const auto options = parse_command_line(argc, argv);
+  if (argc == 1) return run_manual_gui(options.helper_path);
   if (!options.game_root) {
     return finish(ExitCode::invalid_arguments, L"The game directory was not specified.",
                   MB_ICONERROR, options.quiet);
@@ -102,7 +105,30 @@ int run(int argc, wchar_t** argv) {
   const auto backend_probe = transaction_backend().probe(*options.game_root);
   log_diagnostic(L"Backend: " + backend_probe.description);
 
-  const auto recovered = recover_runtime(*options.game_root);
+  const auto fixed_runtime = inspect_fixed_runtime(*options.game_root);
+  if (fixed_runtime == FixedRuntimeState::invalid) {
+    mutex_lock.unlock();
+    return finish(ExitCode::commit_failed,
+                  L"The persistent runtime marker is invalid. Open "
+                  L"SkyrimRuntimeSwapper.exe and restore Skyrim 1.7.104.",
+                  MB_ICONERROR, options.quiet);
+  }
+  const bool fixed_target = fixed_runtime == FixedRuntimeState::active;
+  bool reused_fixed_target = false;
+  DowngradeResult recovered;
+  if (fixed_target) {
+    const auto finalized = finalize_fixed_target_runtime(*options.game_root);
+    if (finalized.success()) {
+      recovered = finalized;
+      reused_fixed_target = true;
+    } else if (finalized.code == ExitCode::source_hash_mismatch) {
+      recovered = recover_runtime(*options.game_root);
+    } else {
+      recovered = finalized;
+    }
+  } else {
+    recovered = recover_runtime(*options.game_root);
+  }
   log_diagnostic(L"Runtime recovery: " + recovered.message);
   if (!recovered.success()) {
     mutex_lock.unlock();
@@ -152,7 +178,14 @@ int run(int argc, wchar_t** argv) {
   }
 
   const auto patch_root = *options.game_root / L"RuntimeSwap\\patches";
-  const auto result = downgrade_runtime_after_recovery(*options.game_root, patch_root);
+  auto result = reused_fixed_target
+                    ? DowngradeResult{ExitCode::success, false,
+                                      L"The verified fixed target runtime is already active."}
+                    : downgrade_runtime_after_recovery(*options.game_root, patch_root);
+  if (result.success() && fixed_target && !reused_fixed_target) {
+    const auto finalized = finalize_fixed_target_runtime(*options.game_root);
+    if (!finalized.success()) result = finalized;
+  }
   log_diagnostic(L"Runtime prepare: " + result.message);
   ContentCatalogResult catalog_cleanup{true, false, {}};
   CreationClubResult creation_club_cleanup{true, false, {}};
@@ -172,7 +205,8 @@ int run(int argc, wchar_t** argv) {
   }
 
   const auto session_plan = make_session_plan(
-      options.from_skse_loader, result.changed_files, catalog_cleanup.changed,
+      options.from_skse_loader, result.changed_files && !fixed_target,
+      catalog_cleanup.changed,
       creation_club_cleanup.changed);
   bool watcher_started = true;
   std::optional<DowngradeResult> safety_restore;
@@ -190,7 +224,9 @@ int run(int argc, wchar_t** argv) {
   }
   if (result.success() &&
       (!catalog_cleanup.success || !creation_club_cleanup.success || !watcher_started)) {
-    if (result.changed_files) safety_restore = restore_runtime(*options.game_root);
+    if (result.changed_files && !fixed_target) {
+      safety_restore = restore_runtime(*options.game_root);
+    }
     if (creation_club_cleanup.changed) {
       safety_creation_club_restored =
           recover_creation_club_content(*options.game_root).success;
@@ -207,11 +243,13 @@ int run(int argc, wchar_t** argv) {
   }
   if (!watcher_started) {
     std::wstring recovery_message;
-    if (result.changed_files) {
+    if (result.changed_files && !fixed_target) {
       recovery_message = safety_restore && safety_restore->success()
                              ? L" Skyrim " + source_version() +
                                    L" was restored as a safety precaution."
                              : L" Automatic runtime restoration also failed.";
+    } else if (fixed_target) {
+      recovery_message = L" The fixed target runtime remains active.";
     } else {
       recovery_message = L" The installed game files were not modified.";
     }

@@ -238,6 +238,8 @@ add_executable(runtime_swapper_helper WIN32
   src/app/content_catalog.cpp
   src/app/creation_club.cpp
   src/app/diagnostics.cpp
+  src/app/fixed_runtime.cpp
+  src/app/manual_gui.cpp
   src/app/runtime_version_reader.cpp
   src/app/session.cpp
 )
@@ -330,6 +332,21 @@ if(BUILD_TESTING)
   add_test(NAME creation_club_tests COMMAND creation_club_tests)
   add_windows_version_resource(creation_club_tests "creation_club_tests.exe"
     "Skyrim Runtime Swapper Creation Club Tests" "creation_club_tests" "VFT_APP")
+
+  add_executable(fixed_runtime_tests
+    src/tests/fixed_runtime_tests.cpp
+    src/app/fixed_runtime.cpp
+  )
+  target_include_directories(fixed_runtime_tests PRIVATE src/app)
+  target_compile_definitions(fixed_runtime_tests PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_link_libraries(fixed_runtime_tests PRIVATE runtime_swapper_core)
+  if(MSVC)
+    target_compile_options(fixed_runtime_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+  endif()
+  add_test(NAME fixed_runtime_tests COMMAND fixed_runtime_tests)
+  add_windows_version_resource(fixed_runtime_tests "fixed_runtime_tests.exe"
+    "Skyrim Runtime Swapper Fixed Runtime Tests" "fixed_runtime_tests" "VFT_APP")
 
   add_executable(preload_probe src/tests/preload_probe.cpp)
   target_compile_definitions(preload_probe PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)

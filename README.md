@@ -24,6 +24,8 @@ Other source files, stores, and runtimes are rejected without modification.
 
 Do not combine multiple target archives in one installation.
 
+`SkyrimRuntimeSwapper.exe` can also be opened directly from the Skyrim game directory. Its manual control panel can switch to the packaged target runtime and keep that runtime active for external tools, or restore Skyrim 1.7.104 at any time. The first fixed switch creates the same verified profile-scoped fallback backup as an automatic launch. While a fixed target is active, launches through `skse64_loader.exe` validate and reuse it instead of scheduling a runtime restore. Restoring 1.7.104 disables the fixed marker and returns subsequent SKSE launches to automatic detection and session-based swapping.
+
 ## How it works
 
 The native `version.dll` proxy is loaded by `skse64_loader.exe` before SKSE checks `SkyrimSE.exe`. It forwards all 17 exports provided by the Windows system DLL and starts `SkyrimRuntimeSwapper.exe` only for the Skyrim runtime check.
@@ -39,6 +41,8 @@ Visible Runtime Swapper errors include buttons to copy the Runtime Swapper and n
 A detached watcher locates the exact `SkyrimSE.exe` process and waits on its process handle without polling during gameplay. When the process exits, it applies the verified reverse patches and restores the source runtime. If the target runtime was already installed, game binaries remain untouched and only a temporarily removed `ContentCatalog.txt` is restored.
 
 A session barrier remains active until restoration is complete. If SKSE is launched again immediately after Skyrim exits, the new launch waits for the previous watcher before it inspects or swaps any runtime files.
+
+The persistent manual mode applies only to the files managed by the selected runtime profile. `ContentCatalog.txt` and Creation Club quarantine remain session-scoped when Skyrim is launched, so they are still restored after the game exits.
 
 On the first actual downgrade, the helper creates a persistent verified fallback under `.skyrim-runtime-swapper\backups\1.7.104`. It contains only the original 1.7.104 files managed by the selected profile. Best of Both Worlds therefore backs up only its patch set, while Best of All Worlds also includes its additional managed interface and master files. Target-only files are not backed up. Normal restoration still uses temporary originals or reverse patches. The persistent copies are used only when those paths cannot produce a valid 1.7.104 hash.
 

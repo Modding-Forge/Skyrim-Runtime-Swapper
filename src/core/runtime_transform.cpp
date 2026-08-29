@@ -98,7 +98,8 @@ struct WorkItem {
 }
 
 [[nodiscard]] DowngradeResult recover_to_source(const std::filesystem::path& game_root,
-                                                const std::filesystem::path& patch_root) {
+                                                const std::filesystem::path& patch_root,
+                                                bool restore_clean_target = false) {
   auto& backend = transaction_backend();
   const auto backend_result = probe_backend(game_root);
   if (!backend_result.success()) return backend_result;
@@ -163,7 +164,8 @@ struct WorkItem {
   if (!transaction_present && !mixed_runtime && source_count == patch_plan.size()) {
     return {ExitCode::success, false, L"Skyrim " + source_version() + L" is already active."};
   }
-  if (!transaction_present && !mixed_runtime && target_count == patch_plan.size()) {
+  if (!restore_clean_target && !transaction_present && !mixed_runtime &&
+      target_count == patch_plan.size()) {
     return {ExitCode::success, false, L"Skyrim " + target_version() + L" is already active."};
   }
   if (!transaction_present && unknown_count == 0 && source_count == 0 &&
@@ -317,11 +319,55 @@ DowngradeResult recover_runtime_transaction(const std::filesystem::path& game_ro
   }
 }
 
+bool target_runtime_is_active_internal(
+    const std::filesystem::path& game_root) noexcept {
+  try {
+    for (const auto& plan : patch_plan) {
+      if (!matches_state(game_root / utf8_path(plan.relative_file), plan.target_present,
+                         plan.target_sha256)) {
+        return false;
+      }
+    }
+    return true;
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+
+DowngradeResult finalize_fixed_target_runtime_internal(
+    const std::filesystem::path& game_root) {
+  try {
+    const auto backend_result = probe_backend(game_root);
+    if (!backend_result.success()) return backend_result;
+    if (!target_runtime_is_active_internal(game_root)) {
+      return {ExitCode::source_hash_mismatch, false,
+              L"The managed target runtime is incomplete or modified."};
+    }
+    auto& backend = transaction_backend();
+    const auto marker = session_marker(game_root);
+    std::error_code error;
+    if (std::filesystem::is_regular_file(marker, error) &&
+        !backend.durable_remove(marker)) {
+      return {ExitCode::commit_failed, false,
+              L"The temporary runtime session marker could not be removed."};
+    }
+    if (error || !clean_transaction_tree(game_root)) {
+      return {ExitCode::commit_failed, false,
+              L"The fixed target runtime could not be finalized."};
+    }
+    return {ExitCode::success, false,
+            L"Skyrim " + target_version() + L" is fixed as the active runtime."};
+  } catch (const std::exception&) {
+    return {ExitCode::internal_error, false,
+            L"An unexpected error occurred while finalizing the fixed runtime."};
+  }
+}
+
 DowngradeResult transform_runtime(const std::filesystem::path& game_root,
                                   const std::filesystem::path& patch_root,
                                   bool to_target, bool recover_first) {
   try {
-    if (!to_target) return recover_to_source(game_root, patch_root);
+    if (!to_target) return recover_to_source(game_root, patch_root, true);
 
     if (recover_first) {
       const auto recovered = recover_to_source(game_root, patch_root);

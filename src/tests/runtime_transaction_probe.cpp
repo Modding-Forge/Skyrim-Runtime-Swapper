@@ -57,13 +57,18 @@ int wmain(int argc, wchar_t** argv) {
       return 5;
     }
   }
+  const auto finalized = runtime_swapper::finalize_fixed_target_runtime(game_root);
+  if (!finalized.success() || !runtime_swapper::target_runtime_is_active(game_root)) {
+    std::wcerr << L"The fixed target runtime could not be finalized.\n";
+    return 6;
+  }
 
   const auto corruptible = std::ranges::find_if(
       runtime_swapper::patch_plan,
       [](const auto& plan) { return plan.source_present && plan.target_present; });
   if (corruptible == runtime_swapper::patch_plan.end()) {
     std::wcerr << L"The patch plan has no file suitable for the fallback test.\n";
-    return 6;
+    return 7;
   }
   std::ofstream corrupted(game_root / plan_path(corruptible->relative_file),
                           std::ios::binary | std::ios::trunc);
@@ -71,19 +76,19 @@ int wmain(int argc, wchar_t** argv) {
   corrupted.close();
   if (!corrupted) {
     std::wcerr << L"The fallback test could not corrupt its isolated game file.\n";
-    return 7;
+    return 8;
   }
 
   const auto restored = runtime_swapper::restore_runtime(game_root);
   if (!restored.success()) {
     std::wcerr << restored.message << L"\n";
-    return 8;
+    return 9;
   }
   const auto restored_hash =
       runtime_swapper::sha256_file(game_root / plan_path(corruptible->relative_file));
   if (!restored_hash.has_value() || *restored_hash != corruptible->source_sha256) {
     std::wcerr << L"The fallback backup did not restore the source file.\n";
-    return 9;
+    return 10;
   }
   std::wcout << downgraded.message << L"\n" << restored.message << L"\n";
   return 0;
