@@ -4,9 +4,11 @@
 #include <bcrypt.h>
 
 #include <array>
+#include <cstddef>
 #include <fstream>
 #include <iomanip>
 #include <memory>
+#include <limits>
 #include <sstream>
 #include <vector>
 
@@ -32,13 +34,38 @@ struct HashCloser {
 
 namespace runtime_swapper {
 
-std::optional<std::string> sha256_file(const std::filesystem::path& file) {
+namespace {
+
+[[nodiscard]] std::optional<std::string> finish_hash(
+    BCRYPT_HASH_HANDLE raw_hash) {
+  std::array<UCHAR, 32> digest{};
+  if (!BCRYPT_SUCCESS(
+          BCryptFinishHash(raw_hash, digest.data(), static_cast<ULONG>(digest.size()), 0))) {
+    return std::nullopt;
+  }
+
+  std::ostringstream output;
+  output << std::hex << std::setfill('0');
+  for (const auto byte : digest) {
+    output << std::setw(2) << static_cast<unsigned>(byte);
+  }
+  return output.str();
+}
+
+struct HashState {
+  std::unique_ptr<void, AlgorithmCloser> algorithm;
+  std::vector<UCHAR> object;
+  std::unique_ptr<void, HashCloser> hash;
+};
+
+[[nodiscard]] std::optional<HashState> begin_hash() {
   BCRYPT_ALG_HANDLE raw_algorithm{};
   if (!BCRYPT_SUCCESS(
           BCryptOpenAlgorithmProvider(&raw_algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0))) {
     return std::nullopt;
   }
-  std::unique_ptr<void, AlgorithmCloser> algorithm(raw_algorithm);
+  HashState state;
+  state.algorithm.reset(raw_algorithm);
 
   DWORD object_size{};
   DWORD bytes_written{};
@@ -47,14 +74,22 @@ std::optional<std::string> sha256_file(const std::filesystem::path& file) {
                                         &bytes_written, 0))) {
     return std::nullopt;
   }
-
-  std::vector<UCHAR> hash_object(object_size);
+  state.object.resize(object_size);
   BCRYPT_HASH_HANDLE raw_hash{};
-  if (!BCRYPT_SUCCESS(BCryptCreateHash(raw_algorithm, &raw_hash, hash_object.data(), object_size,
+  if (!BCRYPT_SUCCESS(BCryptCreateHash(raw_algorithm, &raw_hash, state.object.data(), object_size,
                                        nullptr, 0, 0))) {
     return std::nullopt;
   }
-  std::unique_ptr<void, HashCloser> hash(raw_hash);
+  state.hash.reset(raw_hash);
+  return state;
+}
+
+}  // namespace
+
+std::optional<std::string> sha256_file(const std::filesystem::path& file) {
+  auto state = begin_hash();
+  if (!state) return std::nullopt;
+  const auto raw_hash = static_cast<BCRYPT_HASH_HANDLE>(state->hash.get());
 
   std::ifstream stream(file, std::ios::binary);
   if (!stream) {
@@ -75,18 +110,24 @@ std::optional<std::string> sha256_file(const std::filesystem::path& file) {
     return std::nullopt;
   }
 
-  std::array<UCHAR, 32> digest{};
-  if (!BCRYPT_SUCCESS(
-          BCryptFinishHash(raw_hash, digest.data(), static_cast<ULONG>(digest.size()), 0))) {
+  return finish_hash(raw_hash);
+}
+
+std::optional<std::string> sha256_bytes(std::span<const std::byte> bytes) {
+  auto state = begin_hash();
+  if (!state || bytes.size() > (std::numeric_limits<ULONG>::max)()) return std::nullopt;
+  const auto raw_hash = static_cast<BCRYPT_HASH_HANDLE>(state->hash.get());
+  if (!bytes.empty() &&
+      !BCRYPT_SUCCESS(BCryptHashData(
+          raw_hash, reinterpret_cast<PUCHAR>(const_cast<std::byte*>(bytes.data())),
+          static_cast<ULONG>(bytes.size()), 0))) {
     return std::nullopt;
   }
+  return finish_hash(raw_hash);
+}
 
-  std::ostringstream output;
-  output << std::hex << std::setfill('0');
-  for (const auto byte : digest) {
-    output << std::setw(2) << static_cast<unsigned>(byte);
-  }
-  return output.str();
+std::optional<std::string> sha256_string(std::string_view bytes) {
+  return sha256_bytes(std::as_bytes(std::span(bytes.data(), bytes.size())));
 }
 
 }  // namespace runtime_swapper

@@ -23,6 +23,7 @@ enum class ExitCode : int {
   journal_corrupt = 34,
   recovery_failed = 35,
   creation_club_cleanup_failed = 36,
+  user_cancelled = 37,
 };
 
 }  // namespace runtime_swapper

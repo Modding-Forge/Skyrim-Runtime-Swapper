@@ -1,0 +1,11 @@
+#pragma once
+
+#include <string_view>
+
+namespace runtime_swapper {
+
+inline constexpr std::string_view posix_sidecar_sha256 =
+    "@SKYRIM_RUNTIME_POSIX_SIDECAR_SHA256@";
+inline constexpr std::string_view posix_sidecar_protocol = "1";
+
+}  // namespace runtime_swapper

@@ -2,7 +2,9 @@
 
 #include <runtime_swapper/sha256.hpp>
 
+#if defined(_WIN32)
 #include <windows.h>
+#endif
 
 #include <filesystem>
 #include <system_error>
@@ -23,9 +25,15 @@ std::wstring quote_path(const std::filesystem::path& path) {
 }
 
 bool has_minimum_free_space(const std::filesystem::path& root, std::uint64_t required_bytes) {
+#if defined(_WIN32)
   ULARGE_INTEGER available{};
   return GetDiskFreeSpaceExW(root.c_str(), &available, nullptr, nullptr) != FALSE &&
          available.QuadPart >= required_bytes;
+#else
+  std::error_code error;
+  const auto info = std::filesystem::space(root, error);
+  return !error && info.available >= required_bytes;
+#endif
 }
 
 }  // namespace runtime_swapper::core

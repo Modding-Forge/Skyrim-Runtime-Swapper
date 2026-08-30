@@ -1,6 +1,8 @@
 #include <runtime_swapper/hdiff_patch.hpp>
 
+#if defined(_WIN32)
 #include <windows.h>
+#endif
 
 #include <filesystem>
 #include <string>
@@ -13,6 +15,7 @@ namespace runtime_swapper {
 namespace {
 
 [[nodiscard]] bool to_utf8(const std::filesystem::path& path, std::string& output) {
+#if defined(_WIN32)
   const auto wide = path.wstring();
   const int required = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide.c_str(),
                                            -1, nullptr, 0, nullptr, nullptr);
@@ -25,6 +28,11 @@ namespace {
   }
   output.pop_back();
   return true;
+#else
+  const auto value = path.generic_u8string();
+  output.assign(reinterpret_cast<const char*>(value.data()), value.size());
+  return !output.empty();
+#endif
 }
 
 }  // namespace

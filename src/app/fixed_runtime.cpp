@@ -4,6 +4,12 @@
 #include <runtime_swapper/runtime_version.hpp>
 #include <runtime_swapper/transaction_backend.hpp>
 
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <sys/stat.h>
+#endif
+
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -25,6 +31,33 @@ namespace {
          std::string(build_profile_label) + "\n";
 }
 
+[[nodiscard]] bool safe_regular_marker(const std::filesystem::path& path) {
+#if defined(_WIN32)
+  const HANDLE file = CreateFileW(
+      path.c_str(), GENERIC_READ,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+      nullptr);
+  if (file == INVALID_HANDLE_VALUE) return false;
+  FILE_ATTRIBUTE_TAG_INFO tag{};
+  FILE_STANDARD_INFO standard{};
+  const bool safe =
+      GetFileInformationByHandleEx(file, FileAttributeTagInfo, &tag,
+                                   sizeof(tag)) &&
+      GetFileInformationByHandleEx(file, FileStandardInfo, &standard,
+                                   sizeof(standard)) &&
+      (tag.FileAttributes &
+       (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) == 0 &&
+      standard.NumberOfLinks == 1;
+  CloseHandle(file);
+  return safe;
+#else
+  struct stat status {};
+  return ::lstat(path.c_str(), &status) == 0 && S_ISREG(status.st_mode) &&
+         status.st_nlink == 1;
+#endif
+}
+
 }  // namespace
 
 FixedRuntimeState inspect_fixed_runtime(
@@ -34,7 +67,10 @@ FixedRuntimeState inspect_fixed_runtime(
     const auto marker = marker_path(game_root);
     const auto status = inspect_regular_file(marker, error);
     if (status == RegularFileStatus::missing) return FixedRuntimeState::inactive;
-    if (status != RegularFileStatus::regular || error) return FixedRuntimeState::invalid;
+    if (status != RegularFileStatus::regular || error ||
+        !safe_regular_marker(marker)) {
+      return FixedRuntimeState::invalid;
+    }
     std::ifstream stream(marker, std::ios::binary);
     if (!stream) return FixedRuntimeState::invalid;
     const std::string contents(std::istreambuf_iterator<char>(stream), {});
@@ -48,7 +84,15 @@ FixedRuntimeState inspect_fixed_runtime(
 
 FixedRuntimeResult enable_fixed_runtime(
     const std::filesystem::path& game_root) {
-  if (!transaction_backend().write_atomic(marker_path(game_root), marker_contents())) {
+  const auto marker = marker_path(game_root);
+  std::error_code error;
+  const auto status = inspect_regular_file(marker, error);
+  if (error || (status != RegularFileStatus::missing &&
+                (status != RegularFileStatus::regular ||
+                 !safe_regular_marker(marker)))) {
+    return {false, L"The existing persistent runtime marker is unsafe."};
+  }
+  if (!transaction_backend().write_atomic(marker, marker_contents())) {
     return {false, L"The persistent runtime marker could not be written."};
   }
   if (inspect_fixed_runtime(game_root) != FixedRuntimeState::active) {
@@ -63,9 +107,10 @@ FixedRuntimeResult disable_fixed_runtime(
   if (state == FixedRuntimeState::inactive) return {true, {}};
   if (state == FixedRuntimeState::invalid) {
     std::error_code error;
-    if (inspect_regular_file(marker_path(game_root), error) !=
+    const auto marker = marker_path(game_root);
+    if (inspect_regular_file(marker, error) !=
             RegularFileStatus::regular ||
-        error) {
+        error || !safe_regular_marker(marker)) {
       return {false, L"The invalid persistent runtime marker is not a regular file."};
     }
   }

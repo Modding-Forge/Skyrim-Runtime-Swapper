@@ -1,5 +1,8 @@
 #include "content_catalog.hpp"
 
+#include <runtime_swapper/sha256.hpp>
+#include <runtime_swapper/transaction_backend.hpp>
+
 #include <windows.h>
 
 #include <filesystem>
@@ -34,6 +37,13 @@ class TestEnvironment {
   ~TestEnvironment() {
     SetEnvironmentVariableW(L"LOCALAPPDATA", previous_.empty() ? nullptr : previous_.data());
     std::error_code error;
+    const auto probe = runtime_swapper::transaction_backend().probe(root_ / L"game");
+    if (probe.vault_path.filename().native().starts_with(L"skyrimse-") &&
+        probe.vault_path.wstring().find(L"Skyrim Runtime Swapper") !=
+            std::wstring::npos) {
+      std::filesystem::remove_all(probe.vault_path, error);
+      error.clear();
+    }
     std::filesystem::remove_all(root_, error);
   }
 
@@ -70,10 +80,21 @@ int main() {
   const auto legacy = game_root / L".skyrim-runtime-swapper" / L"backups" / L"1.7.104" /
                       L"ContentCatalog.txt";
   write_file(legacy, "catalog-v1");
+  write_file(catalog, "legacy-conflict");
   const auto legacy_recovery = recover_content_catalog(game_root);
   if (!legacy_recovery.success || !legacy_recovery.changed ||
       read_file(catalog) != "catalog-v1" || std::filesystem::exists(legacy)) {
     return 1;
+  }
+  const auto legacy_conflict_hash =
+      runtime_swapper::sha256_string("legacy-conflict");
+  const auto vault = runtime_swapper::transaction_backend().probe(game_root);
+  if (!legacy_conflict_hash || !vault.success() ||
+      !std::filesystem::is_regular_file(
+          vault.vault_path / L"conflicts" / L"content-catalog-legacy" /
+          std::filesystem::path(legacy_conflict_hash->begin(),
+                                legacy_conflict_hash->end()))) {
+    return 9;
   }
 
   const auto removed = remove_incompatible_content_catalog(game_root);
@@ -101,6 +122,11 @@ int main() {
   const auto conflict = recover_content_catalog();
   if (conflict.success || read_file(catalog) != "conflict" || !std::filesystem::exists(hold)) {
     return 7;
+  }
+  const auto preserved_conflict = recover_content_catalog(game_root);
+  if (!preserved_conflict.success || read_file(catalog) != "catalog-v1" ||
+      std::filesystem::exists(hold)) {
+    return 8;
   }
   return 0;
 }

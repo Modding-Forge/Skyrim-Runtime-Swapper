@@ -3,6 +3,8 @@
 #include <filesystem>
 #include <string>
 
+#include <runtime_swapper/transaction_backend.hpp>
+
 namespace runtime_swapper::app {
 
 struct ContentCatalogResult {
@@ -15,9 +17,13 @@ struct ContentCatalogResult {
     const std::filesystem::path& game_root = {});
 
 [[nodiscard]] ContentCatalogResult remove_incompatible_content_catalog(
-    const std::filesystem::path& game_root);
+    const std::filesystem::path& game_root, bool persistent = false);
 
 [[nodiscard]] ContentCatalogResult restore_content_catalog(
+    const std::filesystem::path& game_root);
+
+[[nodiscard]] BackendProbeResult probe_content_catalog_storage();
+[[nodiscard]] ContentCatalogResult verify_persistent_content_catalog(
     const std::filesystem::path& game_root);
 
 }  // namespace runtime_swapper::app

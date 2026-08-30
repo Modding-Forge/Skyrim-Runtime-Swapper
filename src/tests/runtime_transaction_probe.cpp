@@ -2,6 +2,7 @@
 #include <runtime_swapper/patch_plan.hpp>
 #include <runtime_swapper/runtime_version.hpp>
 #include <runtime_swapper/sha256.hpp>
+#include <runtime_swapper/transaction_backend.hpp>
 
 #include <filesystem>
 #include <fstream>
@@ -20,9 +21,11 @@ namespace {
 
 [[nodiscard]] bool backup_matches(const std::filesystem::path& game_root,
                                   const runtime_swapper::PatchPlanEntry& plan) {
-  const auto backup = game_root / L".skyrim-runtime-swapper" / L"backups" /
-                      std::wstring(runtime_swapper::source_version_label) /
-                      plan_path(plan.relative_file);
+  const auto probe = runtime_swapper::transaction_backend().probe(game_root);
+  if (!probe.success()) return false;
+  const auto backup = probe.vault_path / L"objects" /
+                      std::filesystem::path(plan.source_sha256.begin(),
+                                            plan.source_sha256.end());
   if (!plan.source_present) {
     std::error_code error;
     return !std::filesystem::exists(backup, error) && !error;
@@ -33,14 +36,8 @@ namespace {
 
 }  // namespace
 
-int wmain(int argc, wchar_t** argv) {
-  if (argc != 3) {
-    std::wcerr << L"Usage: RuntimeTransactionProbe <game-root> <patch-root>\n";
-    return 2;
-  }
-
-  const auto game_root = std::filesystem::absolute(argv[1]);
-  const auto patch_root = std::filesystem::absolute(argv[2]);
+[[nodiscard]] int run_probe(const std::filesystem::path& game_root,
+                            const std::filesystem::path& patch_root) {
   const auto recovered = runtime_swapper::recover_runtime(game_root);
   if (!recovered.success()) {
     std::wcerr << recovered.message << L"\n";
@@ -93,3 +90,23 @@ int wmain(int argc, wchar_t** argv) {
   std::wcout << downgraded.message << L"\n" << restored.message << L"\n";
   return 0;
 }
+
+#if defined(_WIN32)
+int wmain(int argc, wchar_t** argv) {
+  if (argc != 3) {
+    std::wcerr << L"Usage: RuntimeTransactionProbe <game-root> <patch-root>\n";
+    return 2;
+  }
+  return run_probe(std::filesystem::absolute(argv[1]),
+                   std::filesystem::absolute(argv[2]));
+}
+#else
+int main(int argc, char** argv) {
+  if (argc != 3) {
+    std::cerr << "Usage: RuntimeTransactionProbe <game-root> <patch-root>\n";
+    return 2;
+  }
+  return run_probe(std::filesystem::absolute(argv[1]),
+                   std::filesystem::absolute(argv[2]));
+}
+#endif

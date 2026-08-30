@@ -9,6 +9,8 @@
 
 namespace runtime_swapper::app {
 
+class UniqueHandle;
+
 struct SessionResult {
   ExitCode code{ExitCode::success};
   std::wstring message;
@@ -18,6 +20,8 @@ struct SessionResult {
 
 [[nodiscard]] std::wstring operation_mutex_name();
 [[nodiscard]] std::wstring session_complete_event_name();
+[[nodiscard]] UniqueHandle acquire_transaction_lock(
+    const std::filesystem::path& game_root);
 
 [[nodiscard]] bool launch_session_watcher(
     const std::filesystem::path& helper, const std::filesystem::path& game_root,

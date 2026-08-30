@@ -74,17 +74,37 @@ foreach(ASSET_MANIFEST IN LISTS ASSET_MANIFESTS)
     set(OUTPUT_ROOT "${RELEASE_ROOT}/Skyrim-Runtime-Swapper-v${RELEASE_VERSION}-${SLUG}")
     set(ARCHIVE_PATH "${OUTPUT_ROOT}.zip")
 
+    set(CURRENT_NATIVE_SIDECAR "")
+    if(DEFINED NATIVE_SIDECAR_ROOT AND NOT NATIVE_SIDECAR_ROOT STREQUAL "")
+      get_filename_component(NATIVE_SIDECAR_ROOT "${NATIVE_SIDECAR_ROOT}" ABSOLUTE)
+      set(CURRENT_NATIVE_SIDECAR
+        "${NATIVE_SIDECAR_ROOT}/${TARGET_VERSION}/${PROFILE}/SkyrimRuntimeSwapper.Native")
+      if(NOT EXISTS "${CURRENT_NATIVE_SIDECAR}")
+        message(FATAL_ERROR
+          "Missing profile-specific native sidecar: ${CURRENT_NATIVE_SIDECAR}")
+      endif()
+    elseif(DEFINED NATIVE_SIDECAR AND NOT NATIVE_SIDECAR STREQUAL "")
+      message(FATAL_ERROR
+        "A single NATIVE_SIDECAR cannot safely serve multiple patch profiles. Use NATIVE_SIDECAR_ROOT/<target>/<profile>/SkyrimRuntimeSwapper.Native")
+    endif()
+
     file(REMOVE_RECURSE "${OUTPUT_ROOT}")
     file(REMOVE "${ARCHIVE_PATH}")
     message(STATUS "Building ${PROFILE_NAME} for Skyrim ${TARGET_VERSION}")
 
+    set(CONFIGURE_ARGUMENTS
+      -S "${REPOSITORY_ROOT}"
+      -B "${BUILD_ROOT}"
+      -A x64
+      "-DSKYRIM_RUNTIME_PATCH_MANIFEST=${ASSET_MANIFEST}"
+      "-DSKYRIM_RUNTIME_BUILD_PROFILE=${PROFILE}"
+    )
+    if(NOT CURRENT_NATIVE_SIDECAR STREQUAL "")
+      list(APPEND CONFIGURE_ARGUMENTS
+        "-DSKYRIM_RUNTIME_POSIX_SIDECAR=${CURRENT_NATIVE_SIDECAR}")
+    endif()
     execute_process(
-      COMMAND "${CMAKE_COMMAND}"
-        -S "${REPOSITORY_ROOT}"
-        -B "${BUILD_ROOT}"
-        -A x64
-        "-DSKYRIM_RUNTIME_PATCH_MANIFEST=${ASSET_MANIFEST}"
-        "-DSKYRIM_RUNTIME_BUILD_PROFILE=${PROFILE}"
+      COMMAND "${CMAKE_COMMAND}" ${CONFIGURE_ARGUMENTS}
       RESULT_VARIABLE CONFIGURE_RESULT
     )
     if(NOT CONFIGURE_RESULT EQUAL 0)
@@ -119,6 +139,12 @@ foreach(ASSET_MANIFEST IN LISTS ASSET_MANIFESTS)
     file(COPY_FILE "${BINARY_ROOT}/version.dll" "${OUTPUT_ROOT}/version.dll")
     file(COPY_FILE "${BINARY_ROOT}/SkyrimRuntimeSwapper.exe"
       "${OUTPUT_ROOT}/SkyrimRuntimeSwapper.exe")
+    set(PACKAGED_NATIVE_SIDECAR "")
+    if(EXISTS "${BINARY_ROOT}/SkyrimRuntimeSwapper.Native")
+      file(COPY_FILE "${BINARY_ROOT}/SkyrimRuntimeSwapper.Native"
+        "${OUTPUT_ROOT}/SkyrimRuntimeSwapper.Native")
+      set(PACKAGED_NATIVE_SIDECAR SkyrimRuntimeSwapper.Native)
+    endif()
     file(COPY_FILE "${VORTEX_OVERRIDE_FILE}"
       "${OUTPUT_ROOT}/vortex_override_instructions.json")
 
@@ -204,7 +230,7 @@ ${SELECTED_ENTRIES}
 
     execute_process(
       COMMAND "${CMAKE_COMMAND}" -E tar cf "${ARCHIVE_PATH}" --format=zip
-        version.dll SkyrimRuntimeSwapper.exe RuntimeSwap
+        version.dll SkyrimRuntimeSwapper.exe ${PACKAGED_NATIVE_SIDECAR} RuntimeSwap
         vortex_override_instructions.json
       WORKING_DIRECTORY "${OUTPUT_ROOT}"
       RESULT_VARIABLE ARCHIVE_RESULT

@@ -3,14 +3,13 @@
 #include "internal/file_operations.hpp"
 #include "internal/runtime_backup.hpp"
 #include "internal/transaction_journal.hpp"
+#include "internal/vault_store.hpp"
 
 #include <runtime_swapper/hdiff_patch.hpp>
 #include <runtime_swapper/file_status.hpp>
 #include <runtime_swapper/patch_plan.hpp>
 #include <runtime_swapper/runtime_version.hpp>
 #include <runtime_swapper/transaction_backend.hpp>
-
-#include <windows.h>
 
 #include <cstdint>
 #include <filesystem>
@@ -52,7 +51,8 @@ struct WorkItem {
   return work_root(game_root) / L"transaction";
 }
 
-[[nodiscard]] std::filesystem::path journal_path(const std::filesystem::path& game_root) {
+[[nodiscard]] std::filesystem::path legacy_journal_path(
+    const std::filesystem::path& game_root) {
   return active_root(game_root) / L"runtime.journal";
 }
 
@@ -85,12 +85,23 @@ struct WorkItem {
 [[nodiscard]] bool clean_transaction_tree(const std::filesystem::path& game_root) {
   auto& backend = transaction_backend();
   const auto active = active_root(game_root);
-  const auto journal = journal_path(game_root);
-  const auto recovery_journal = active / L"recovery.journal";
+  const auto legacy_journal = legacy_journal_path(game_root);
   bool success = true;
-  if (std::filesystem::is_regular_file(journal)) success = backend.durable_remove(journal);
-  if (std::filesystem::is_regular_file(recovery_journal)) {
-    success = backend.durable_remove(recovery_journal) && success;
+  const auto vault = resolve_vault_layout(game_root);
+  if (vault) {
+    const auto journal = runtime_journal_path(*vault);
+    const auto recovery_journal = recovery_journal_path(*vault);
+    if (std::filesystem::is_regular_file(journal)) {
+      success = backend.durable_remove(journal) && success;
+    }
+    if (std::filesystem::is_regular_file(recovery_journal)) {
+      success = backend.durable_remove(recovery_journal) && success;
+    }
+  } else {
+    success = false;
+  }
+  if (std::filesystem::is_regular_file(legacy_journal)) {
+    success = backend.durable_remove(legacy_journal) && success;
   }
   std::error_code error;
   std::filesystem::remove_all(active, error);
@@ -104,10 +115,21 @@ struct WorkItem {
   const auto backend_result = probe_backend(game_root);
   if (!backend_result.success()) return backend_result;
 
+  std::wstring vault_error;
+  const auto vault = resolve_vault_layout(game_root, 0, &vault_error);
+  if (!vault) {
+    return {ExitCode::recovery_failed, false,
+            L"The recovery vault is unavailable: " + vault_error};
+  }
+
   const auto active = active_root(game_root);
-  const auto journal = journal_path(game_root);
+  const auto journal = runtime_journal_path(*vault);
+  const auto legacy_journal = legacy_journal_path(game_root);
   const auto marker = session_marker(game_root);
-  const auto journal_state = read_transaction_journal(journal);
+  auto journal_state = read_transaction_journal(journal);
+  if (journal_state.status == JournalReadStatus::missing) {
+    journal_state = read_transaction_journal(legacy_journal);
+  }
   std::error_code error;
   const auto marker_status = inspect_regular_file(marker, error);
   if (marker_status != RegularFileStatus::missing &&
@@ -151,14 +173,13 @@ struct WorkItem {
   }
 
   const bool mixed_runtime = source_count != 0 && target_count != 0;
-  const DWORD active_attributes = GetFileAttributesW(active.c_str());
-  const DWORD active_error = active_attributes == INVALID_FILE_ATTRIBUTES ? GetLastError() : 0;
-  if (active_attributes == INVALID_FILE_ATTRIBUTES && active_error != ERROR_FILE_NOT_FOUND &&
-      active_error != ERROR_PATH_NOT_FOUND) {
+  const auto active_status = std::filesystem::symlink_status(active, error);
+  if (error && error != std::errc::no_such_file_or_directory) {
     return {ExitCode::recovery_failed, false,
             L"The runtime transaction directory could not be inspected."};
   }
-  const bool active_exists = active_attributes != INVALID_FILE_ATTRIBUTES;
+  error.clear();
+  const bool active_exists = std::filesystem::exists(active_status);
   const bool transaction_present = journal_state.status != JournalReadStatus::missing ||
                                    marker_exists || active_exists;
   if (!transaction_present && !mixed_runtime && source_count == patch_plan.size()) {
@@ -196,13 +217,13 @@ struct WorkItem {
     return {ExitCode::recovery_failed, false,
             L"The runtime recovery directory could not be created."};
   }
-  const auto recovery_journal_path = active / L"recovery.journal";
-  if (std::filesystem::is_regular_file(recovery_journal_path) &&
-      !backend.durable_remove(recovery_journal_path)) {
+  const auto recovery_path = recovery_journal_path(*vault);
+  if (std::filesystem::is_regular_file(recovery_path) &&
+      !backend.durable_remove(recovery_path)) {
     return {ExitCode::recovery_failed, false,
             L"A stale runtime recovery journal could not be replaced."};
   }
-  TransactionJournal recovery(recovery_journal_path, make_transaction_id(),
+  TransactionJournal recovery(recovery_path, make_transaction_id(),
                               profile_fingerprint(), false);
   if (!recovery.append(JournalPhase::recovery_started,
                        std::numeric_limits<std::uint32_t>::max())) {
@@ -217,6 +238,13 @@ struct WorkItem {
     const auto live = game_root / utf8_path(plan.relative_file);
     const auto rollback = active / L"rollback" / std::to_wstring(index);
     if (states[index] == FileState::source) continue;
+
+    if (states[index] == FileState::unknown &&
+        !preserve_conflict(*vault, live, recovery.transaction_id())) {
+      return {ExitCode::recovery_failed, changed,
+              L"An unknown live file could not be preserved in the recovery vault: " +
+                  quote_path(live)};
+    }
 
     if (!plan.source_present) {
       if (!recovery.append(JournalPhase::replace_pending,
@@ -285,6 +313,12 @@ struct WorkItem {
       return {ExitCode::recovery_failed, changed,
               L"Final source-runtime verification failed: " + quote_path(live)};
     }
+  }
+  const auto backup_result = ensure_source_backups(game_root);
+  if (!backup_result.success()) {
+    return {ExitCode::recovery_failed, changed,
+            L"The source runtime was recovered, but its complete recovery-vault "
+            L"manifest could not be committed: " + backup_result.message};
   }
   if (!recovery.append(JournalPhase::recovery_completed,
                        std::numeric_limits<std::uint32_t>::max())) {
@@ -365,7 +399,8 @@ DowngradeResult finalize_fixed_target_runtime_internal(
 
 DowngradeResult transform_runtime(const std::filesystem::path& game_root,
                                   const std::filesystem::path& patch_root,
-                                  bool to_target, bool recover_first) {
+                                  bool to_target, bool recover_first,
+                                  bool risk_accepted) {
   try {
     if (!to_target) return recover_to_source(game_root, patch_root, true);
 
@@ -432,8 +467,14 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
       return {backup_result.code, false, backup_result.message};
     }
 
-    TransactionJournal journal(journal_path(game_root), make_transaction_id(),
-                               profile_fingerprint(), true);
+    const auto vault = resolve_vault_layout(game_root);
+    if (!vault || !runtime_manifest_matches(*vault)) {
+      (void)clean_transaction_tree(game_root);
+      return {ExitCode::backup_failed, false,
+              L"The verified recovery-vault manifest became unavailable."};
+    }
+    TransactionJournal journal(runtime_journal_path(*vault), make_transaction_id(),
+                               profile_fingerprint(), true, risk_accepted);
     if (!journal.append(JournalPhase::begin,
                         std::numeric_limits<std::uint32_t>::max())) {
       (void)clean_transaction_tree(game_root);

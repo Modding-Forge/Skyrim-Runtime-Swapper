@@ -45,14 +45,25 @@ int main() {
       runtime_swapper::app::inspect_fixed_runtime(root) != FixedRuntimeState::active) {
     return 2;
   }
+  const auto marker = root / L".skyrim-runtime-swapper" / L"fixed-runtime";
+  const auto marker_link = root / L"fixed-runtime-link";
+  if (!CreateHardLinkW(marker_link.c_str(), marker.c_str(), nullptr) ||
+      runtime_swapper::app::inspect_fixed_runtime(root) !=
+          FixedRuntimeState::invalid ||
+      runtime_swapper::app::disable_fixed_runtime(root).success) {
+    return 6;
+  }
+  std::filesystem::remove(marker_link);
+  if (runtime_swapper::app::inspect_fixed_runtime(root) !=
+      FixedRuntimeState::active) {
+    return 7;
+  }
   const auto disabled = runtime_swapper::app::disable_fixed_runtime(root);
   if (!disabled.success ||
       runtime_swapper::app::inspect_fixed_runtime(root) !=
           FixedRuntimeState::inactive) {
     return 3;
   }
-
-  const auto marker = root / L".skyrim-runtime-swapper" / L"fixed-runtime";
   std::ofstream(marker, std::ios::binary | std::ios::trunc) << "corrupt";
   if (runtime_swapper::app::inspect_fixed_runtime(root) !=
       FixedRuntimeState::invalid) {

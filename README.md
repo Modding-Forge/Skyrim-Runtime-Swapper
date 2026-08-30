@@ -1,12 +1,12 @@
 # Skyrim Runtime Swapper
 
-Skyrim Runtime Swapper lets a Skyrim mod collection built for an older runtime start through the unmodified `skse64_loader.exe`. The original Steam runtime is restored automatically after every game session.
+Skyrim Runtime Swapper lets a Skyrim mod collection built for an older runtime start through the unmodified `skse64_loader.exe`. On trusted internal filesystems it restores the original Steam runtime automatically after every game session. On external, removable, exFAT, or otherwise uncertain local storage it offers a recoverable persistent downgrade instead.
 
 Current release: `1.1.0`.
 
 ## Profiles
 
-Both profiles are available for Skyrim `1.6.1170` and `1.5.97`. They switch an installed `1.7.104` runtime before launch and restore `1.7.104` after the game exits.
+Both profiles are available for Skyrim `1.6.1170` and `1.5.97`. They switch an installed `1.7.104` runtime before launch. Automatic mode restores `1.7.104` after the game exits; persistent mode keeps the target active until the user restores it through the GUI.
 
 | Patcher type | Target game version: `1.6.1170` | Target game version: `1.5.97` |
 | --- | --- | --- |
@@ -19,22 +19,22 @@ Other source files, stores, and runtimes are rejected without modification.
 
 1. Choose the archive matching the runtime required by the collection.
 2. Install it as a normal root mod through the mod manager and deploy it.
-3. Verify that `version.dll`, `SkyrimRuntimeSwapper.exe`, and `RuntimeSwap\patches` exist in the Skyrim game directory.
+3. Verify that `version.dll`, `SkyrimRuntimeSwapper.exe`, and `RuntimeSwap\patches` exist in the Skyrim game directory. Wine and Proton packages must also contain the build-specific, hash-pinned `SkyrimRuntimeSwapper.Native` ELF helper.
 4. Launch the unmodified `skse64_loader.exe` selected by the collection.
 
 Do not combine multiple target archives in one installation.
 
-`SkyrimRuntimeSwapper.exe` can also be opened directly from the Skyrim game directory. Its manual control panel can switch to the packaged target runtime and keep that runtime active for external tools, or restore Skyrim 1.7.104 at any time. The first fixed switch creates the same verified profile-scoped fallback backup as an automatic launch. While a fixed target is active, launches through `skse64_loader.exe` validate and reuse it instead of scheduling a runtime restore. Restoring 1.7.104 disables the fixed marker and returns subsequent SKSE launches to automatic detection and session-based swapping.
+`SkyrimRuntimeSwapper.exe` can also be opened directly from the Skyrim game directory. Its manual control panel uses the same persistent transaction as the SKSE start dialog. It can keep the packaged target active for external tools or restore Skyrim 1.7.104 together with all persistently handled Creation Club and ContentCatalog files. The recovery vault is always selected by the program. There is no path field, browse button, configuration value, or command-line override.
 
 ## How it works
 
 The native `version.dll` proxy is loaded by `skse64_loader.exe` before SKSE checks `SkyrimSE.exe`. It forwards all 17 exports provided by the Windows system DLL and starts `SkyrimRuntimeSwapper.exe` only for the Skyrim runtime check.
 
-The helper validates the runtime, patch assets, and game files with SHA-256. HDiffPatch 5.1.3, Zstandard, and XXH128 support are linked statically into the helper. It applies HDIFFW26 patches to staged files and commits the transaction only after every result is verified. A flushed append-only journal records every staging, replacement, commit, and recovery boundary. Unknown, modified, or incomplete files fail closed.
+The helper validates the runtime, patch assets, and game files with SHA-256. HDiffPatch 5.1.3, Zstandard, and XXH128 support are linked statically into the helper. It applies HDIFFW26 patches to staged files and commits the transaction only after every result is verified. A flushed append-only journal with sequence numbers, record lengths, and CRCs records every staging, replacement, commit, and recovery boundary. Torn tails are repaired before the next append, damaged committed records fail closed, and recovery is idempotent.
 
-Every SKSE launch checks the current user's `ContentCatalog.txt`, including launches where Skyrim already uses the target runtime. An incompatible catalog is held in a separate same-volume transaction, removed for the game session, and restored afterward.
+Every SKSE launch checks the current user's `ContentCatalog.txt`, including launches where Skyrim already uses the target runtime. Its own volume is classified independently. A catalog on storage without automatic durability is committed to the recovery vault and remains persistent until the GUI restore. Conflicting regenerated catalogs are preserved before the original is restored.
 
-For the 1.5.97 Best of All Worlds profile, official Creation Club files with the `cc` filename prefix and a `.bsa`, `.esl`, `.esm`, or `.esp` extension are handled separately. Before any file moves, a verified inventory containing each filename, size, and SHA-256 hash is committed under `.skyrim-runtime-swapper\backups\1.7.104\CreationClub`. Each file is then atomically moved there on the same volume. No file data is copied. Skyrim starts only after every quarantined file matches the recorded hash. The watcher moves all files back after the session, and startup recovery resolves an interrupted move before any new launch.
+For the 1.5.97 Best of All Worlds profile, official Creation Club files with the `cc` filename prefix and a `.bsa`, `.esl`, `.esm`, or `.esp` extension are handled separately. Before a persistent move, every original and the checksummed inventory are committed to the independent vault. The same-volume quarantine remains an optimization, not the only recovery source. Unicode names are stored portably, Windows case collisions are rejected, and conflicting live files are preserved before recovery.
 
 Visible Runtime Swapper errors include buttons to copy the Runtime Swapper and newest SKSE logs or open Steam's file verification action.
 
@@ -42,13 +42,13 @@ A detached watcher locates the exact `SkyrimSE.exe` process and waits on its pro
 
 A session barrier remains active until restoration is complete. If SKSE is launched again immediately after Skyrim exits, the new launch waits for the previous watcher before it inspects or swaps any runtime files.
 
-The persistent manual mode applies only to the files managed by the selected runtime profile. `ContentCatalog.txt` and Creation Club quarantine remain session-scoped when Skyrim is launched, so they are still restored after the game exits.
+Originals are content-addressed under `objects/<sha256>` in an automatically selected per-installation vault. Windows uses Local AppData. Linux and Proton use `$XDG_STATE_HOME`, or `$HOME/.local/state` when it is unset. The vault must be local, owned by the current user, free of symlink or reparse traversal, permission-restricted, large enough for the objects plus reserve, and on a storage backend with native file and directory synchronization.
 
-On the first actual downgrade, the helper creates a persistent verified fallback under `.skyrim-runtime-swapper\backups\1.7.104`. It contains only the original 1.7.104 files managed by the selected profile. Best of Both Worlds therefore backs up only its patch set, while Best of All Worlds also includes its additional managed interface and master files. Target-only files are not backed up. Normal restoration still uses temporary originals or reverse patches. The persistent copies are used only when those paths cannot produce a valid 1.7.104 hash.
+Internal NTFS on Windows and internal ext4, XFS, or Btrfs on Linux use automatic per-session restoration. External or removable volumes and exFAT use persistent-only mode with a vault on another durable volume. Unknown but stable local storage requires an explicit warning confirmation. Network storage, unsafe paths, missing recovery storage, missing native helpers, and unrecognized source files are hard blocked. A hard block exposes no downgrade action.
 
-Backup files are copied atomically and verified before the downgrade begins. The first downgrade therefore requires additional disk space equal to the managed source files. Recovery runs before the executable and runtime checks and resolves an interrupted or mixed transaction to Skyrim 1.7.104.
+Under Wine and Proton the Windows process translates paths and coordinates a native ELF sidecar through a one-shot, nonce-authenticated, length-prefixed pipe protocol. The ELF SHA-256 is embedded into the Windows binary and verified before launch. Only the native helper mutates managed files, so Linux filesystem synchronization and rename semantics are used directly.
 
-On native Windows, file changes require a local fixed NTFS volume without reparse-point traversal. Under Wine or Proton, the same journal, hash verification, and recovery logic is used in best-effort mode. Host filesystem durability cannot be guaranteed through Wine's Windows API translation, so power-loss guarantees apply only to the native Windows NTFS backend.
+The vault intent is synchronized before the game volume changes. Each live result is hashed again after replacement. Persistent markers are committed in the vault first and then in the game directory. If the active vault disappears or another device appears at a reused path, the transaction remains pending and launch is blocked instead of silently selecting a replacement vault.
 
 The bootstrap does not use CommonLibSSE, Address Library, or the SKSE plugin API. It runs before regular SKSE plugins and before the Engine Fixes preloader.
 
@@ -56,9 +56,10 @@ The bootstrap does not use CommonLibSSE, Address Library, or the SKSE plugin API
 
 Requirements:
 
-- Windows x64
-- Visual Studio with the Desktop development with C++ workload
+- Windows x64 with Visual Studio and the Desktop development with C++ workload for the proxy and GUI
+- A Linux C++20 toolchain for the native ELF sidecar
 - CMake 3.25 or newer
+- Python 3 for the sidecar protocol test
 - Git with recursive submodule support
 
 The pipeline consumes verified format 3 asset catalogs. Each catalog is a profile superset. CMake selects the exact files, validates both patch directions, builds and tests separate binaries, and creates four complete archives under `dist/builds/<version>/<build-id>/`.
@@ -73,10 +74,13 @@ build.bat Release D:\Assets\manifest.json
 
 The build fails if the asset format, algorithm, HDiffPatch version, runtime pair, required profile files, or patch hashes do not match. Bethesda game files are never included.
 
+The normal CTest suite covers journal migration, torn records, risk acceptance, vault corruption, unknown-file preservation, Unicode names, ContentCatalog conflicts, and transaction cut points. Additional guarded release-gate runners live under `tools/tests` for Windows VHDX classification and detach recovery, Linux loop filesystems, `dm-log-writes` replay, `dm-flakey` failures, WSL shutdowns, sidecar protocol rejection, and full runtime crash recovery with a locally supplied clean Skyrim fixture. The destructive storage runners create and validate isolated temporary images only, require explicit administrator or root execution, and never select a physical disk.
+
 ## Source layout
 
-- `src/app` owns command-line parsing, user-facing diagnostics, ContentCatalog handling, and the game-session watcher.
-- `src/core` owns hashing, patch application, validation, and transactional runtime file operations.
+- `src/app` owns user-facing diagnostics, the shared session and persistent operations, ContentCatalog and Creation Club handling, and the game-session watcher.
+- `src/core` owns hashing, automatic vault resolution, storage classification, journals, patch application, validation, and recoverable runtime transactions.
+- `src/sidecar` contains the native Linux and Proton transaction entry point.
 - `src/proxy` contains the minimal Windows `version.dll` proxy and bootstrap.
 - `src/include/runtime_swapper` contains the core interfaces shared by executables and tests.
 - `src/tools` and `src/tests` contain build-time validation and focused native tests.

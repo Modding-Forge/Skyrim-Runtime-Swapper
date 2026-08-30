@@ -1,0 +1,105 @@
+name: Storage safety
+
+on:
+  push:
+    branches: [master, feat/1-portable-storage-backends]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-linux:
+    name: Native Linux ${{ matrix.target }} ${{ matrix.profile }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [1.6.1170, 1.5.97]
+        profile: [bobw, boaw]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install filesystem test tools
+        run: sudo apt-get update && sudo apt-get install -y btrfs-progs dosfstools exfatprogs xfsprogs
+      - name: Configure
+        run: >-
+          cmake -S . -B build/native -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DSKYRIM_RUNTIME_PATCH_MANIFEST=${{ github.workspace }}/assets/runtime/1.7.104-to-${{ matrix.target }}/manifest.json
+          -DSKYRIM_RUNTIME_BUILD_PROFILE=${{ matrix.profile }}
+      - name: Build
+        run: cmake --build build/native --parallel
+      - name: Unit and protocol tests
+        run: ctest --test-dir build/native --output-on-failure
+      - name: Real filesystem matrix
+        if: matrix.target == '1.6.1170' && matrix.profile == 'bobw'
+        run: sudo bash tools/tests/run-linux-filesystem-matrix.sh build/native/storage_backend_probe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.target }}-${{ matrix.profile }}
+          path: build/native/SkyrimRuntimeSwapper.Native
+          if-no-files-found: error
+
+  windows:
+    name: Windows ${{ matrix.target }} ${{ matrix.profile }}
+    needs: native-linux
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [1.6.1170, 1.5.97]
+        profile: [bobw, boaw]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-${{ matrix.target }}-${{ matrix.profile }}
+          path: native
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -S . -B build/windows -A x64 `
+            "-DSKYRIM_RUNTIME_PATCH_MANIFEST=${{ github.workspace }}/assets/runtime/1.7.104-to-${{ matrix.target }}/manifest.json" `
+            "-DSKYRIM_RUNTIME_BUILD_PROFILE=${{ matrix.profile }}" `
+            "-DSKYRIM_RUNTIME_POSIX_SIDECAR=${{ github.workspace }}/native/SkyrimRuntimeSwapper.Native"
+      - name: Build
+        run: cmake --build build/windows --config Release --parallel
+      - name: Unit tests
+        run: ctest --test-dir build/windows -C Release --output-on-failure
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wine-bridge-${{ matrix.target }}-${{ matrix.profile }}
+          path: |
+            build/windows/Release/WineSidecarProbe.exe
+            build/windows/Release/SkyrimRuntimeSwapper.Native
+          if-no-files-found: error
+
+  wine-stable:
+    name: Wine Stable ${{ matrix.target }} ${{ matrix.profile }}
+    needs: windows
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [1.6.1170, 1.5.97]
+        profile: [bobw, boaw]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wine-bridge-${{ matrix.target }}-${{ matrix.profile }}
+          path: bridge
+      - name: Install Wine
+        run: sudo dpkg --add-architecture i386 && sudo apt-get update && sudo apt-get install -y wine64
+      - name: Verify native ELF launch through Wine
+        env:
+          WINEDEBUG: -all
+          WINEPREFIX: ${{ runner.temp }}/wine-prefix
+        run: |
+          mkdir -p /tmp/srs-wine-game
+          chmod 0644 bridge/SkyrimRuntimeSwapper.Native
+          wine bridge/WineSidecarProbe.exe 'Z:\tmp\srs-wine-game'

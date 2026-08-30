@@ -4,9 +4,12 @@
 #include "creation_club.hpp"
 #include "diagnostics.hpp"
 #include "runtime_labels.hpp"
+#include "storage_operations.hpp"
 #include "unique_handle.hpp"
+#include "wine_sidecar.hpp"
 
 #include <runtime_swapper/downgrade.hpp>
+#include <runtime_swapper/transaction_backend.hpp>
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -31,6 +34,25 @@ namespace {
   return CompareStringOrdinal(left_text.data(), static_cast<int>(left_text.size()),
                               right_text.data(), static_cast<int>(right_text.size()), TRUE) ==
          CSTR_EQUAL;
+}
+
+[[nodiscard]] bool path_has_reparse_component(
+    const std::filesystem::path& path) {
+  std::error_code error;
+  const auto absolute = std::filesystem::absolute(path, error);
+  if (error || !absolute.is_absolute()) return true;
+  auto current = absolute.root_path();
+  for (const auto& component : absolute.relative_path()) {
+    current /= component;
+    const DWORD attributes = GetFileAttributesW(current.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+      const DWORD code = GetLastError();
+      if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) continue;
+      return true;
+    }
+    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) return true;
+  }
+  return false;
 }
 
 [[nodiscard]] UniqueHandle find_process_by_image(
@@ -64,6 +86,37 @@ std::wstring operation_mutex_name() {
 
 std::wstring session_complete_event_name() {
   return operation_mutex_name() + L"-SessionComplete";
+}
+
+UniqueHandle acquire_transaction_lock(
+    const std::filesystem::path& game_root) {
+  const auto lock_path =
+      game_root / L".skyrim-runtime-swapper" / L"transaction.lock";
+  if (path_has_reparse_component(game_root) ||
+      path_has_reparse_component(lock_path.parent_path())) {
+    return {};
+  }
+  std::error_code error;
+  std::filesystem::create_directories(lock_path.parent_path(), error);
+  if (error || path_has_reparse_component(lock_path.parent_path())) return {};
+  UniqueHandle lock(CreateFileW(
+      lock_path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS,
+      FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_WRITE_THROUGH |
+          FILE_FLAG_OPEN_REPARSE_POINT,
+      nullptr));
+  if (!lock) return {};
+  FILE_ATTRIBUTE_TAG_INFO attributes{};
+  FILE_STANDARD_INFO standard{};
+  if (!GetFileInformationByHandleEx(lock.get(), FileAttributeTagInfo,
+                                    &attributes, sizeof(attributes)) ||
+      !GetFileInformationByHandleEx(lock.get(), FileStandardInfo, &standard,
+                                    sizeof(standard)) ||
+      (attributes.FileAttributes &
+       (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0 ||
+      standard.NumberOfLinks != 1) {
+    return {};
+  }
+  return lock;
 }
 
 bool launch_session_watcher(const std::filesystem::path& helper,
@@ -176,18 +229,28 @@ SessionResult watch_session_and_restore(const std::filesystem::path& game_root,
     }
   } mutex_release{mutex.get()};
 
-  const auto transaction_lock_path =
-      game_root / L".skyrim-runtime-swapper" / L"transaction.lock";
-  std::error_code lock_error;
-  std::filesystem::create_directories(transaction_lock_path.parent_path(), lock_error);
-  UniqueHandle transaction_lock(
-      lock_error ? INVALID_HANDLE_VALUE
-                 : CreateFileW(transaction_lock_path.c_str(), GENERIC_READ | GENERIC_WRITE, 0,
-                               nullptr, OPEN_ALWAYS,
-                               FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_WRITE_THROUGH, nullptr));
-  if (!transaction_lock) {
-    return {ExitCode::another_instance_failed,
-            L"The watcher could not acquire the durable runtime transaction lock."};
+  UniqueHandle transaction_lock;
+  if (!is_wine_environment()) {
+    const auto probed = probe_installation_storage(game_root);
+    if (!probed.success()) {
+      return {probed.code, probed.message};
+    }
+    transaction_lock = acquire_transaction_lock(game_root);
+    if (!transaction_lock) {
+      return {ExitCode::another_instance_failed,
+              L"The watcher could not acquire the durable runtime transaction lock."};
+    }
+  }
+
+  if (is_wine_environment() &&
+      (restore_runtime_after_session || restore_content_catalog_after_session ||
+       restore_creation_club_after_session)) {
+    const auto restored =
+        run_wine_sidecar(WineSidecarOperation::recover, game_root);
+    log_diagnostic(L"Native sidecar session recovery: " + restored.message);
+    return restored.success()
+               ? SessionResult{}
+               : SessionResult{restored.code, restored.message};
   }
 
   if (restore_runtime_after_session) {

@@ -14,4 +14,10 @@ DowngradeResult downgrade_runtime_after_recovery(
   return core::transform_runtime(game_root, patch_root, true, false);
 }
 
+DowngradeResult downgrade_runtime_persistent_after_recovery(
+    const std::filesystem::path& game_root,
+    const std::filesystem::path& patch_root, bool risk_accepted) {
+  return core::transform_runtime(game_root, patch_root, true, false, risk_accepted);
+}
+
 }  // namespace runtime_swapper

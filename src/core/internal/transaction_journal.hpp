@@ -26,6 +26,7 @@ struct JournalRecordView {
   std::uint32_t file_index{};
   JournalPhase phase{};
   bool to_target{};
+  bool risk_accepted{};
   std::string transaction_id;
   std::string profile;
   std::string sha256;
@@ -42,7 +43,8 @@ struct JournalReadResult {
 class TransactionJournal {
  public:
   TransactionJournal(std::filesystem::path path, std::string transaction_id,
-                     std::string profile, bool to_target);
+                     std::string profile, bool to_target,
+                     bool risk_accepted = false);
 
   [[nodiscard]] bool append(JournalPhase phase, std::uint32_t file_index,
                             std::string_view sha256 = {});
@@ -55,6 +57,8 @@ class TransactionJournal {
   std::string transaction_id_;
   std::string profile_;
   bool to_target_{};
+  bool risk_accepted_{};
+  bool usable_{true};
   std::uint64_t sequence_{};
 };
 

@@ -1,6 +1,8 @@
 #include "creation_club.hpp"
 
 #include <runtime_swapper/file_status.hpp>
+#include <runtime_swapper/downgrade.hpp>
+#include <runtime_swapper/recovery_vault.hpp>
 #include <runtime_swapper/runtime_version.hpp>
 #include <runtime_swapper/sha256.hpp>
 #include <runtime_swapper/transaction_backend.hpp>
@@ -21,7 +23,9 @@
 namespace runtime_swapper::app {
 namespace {
 
-constexpr std::string_view journal_magic = "SRS-CC-QUARANTINE-1\n";
+constexpr std::string_view legacy_journal_magic = "SRS-CC-QUARANTINE-1\n";
+constexpr std::string_view journal_magic = "SRS-CC-QUARANTINE-2\n";
+constexpr std::string_view vault_metadata_name = "creation-club";
 
 struct CreationClubFile {
   std::filesystem::path name;
@@ -56,6 +60,19 @@ struct CreationClubFile {
          extension == L".esp";
 }
 
+[[nodiscard]] bool same_windows_filename(const std::filesystem::path& left,
+                                         const std::filesystem::path& right) {
+  const auto left_text = left.filename().wstring();
+  const auto right_text = right.filename().wstring();
+  if (left_text.size() != right_text.size()) return false;
+  for (std::size_t index = 0; index < left_text.size(); ++index) {
+    if (lower_ascii(left_text[index]) != lower_ascii(right_text[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 [[nodiscard]] char hex_digit(unsigned value) {
   return static_cast<char>(value < 10 ? '0' + value : 'a' + value - 10);
 }
@@ -81,14 +98,13 @@ struct CreationClubFile {
 }
 
 [[nodiscard]] std::string encode_name(const std::filesystem::path& name) {
-  const auto text = name.wstring();
+  const auto text = name.generic_u8string();
   std::string encoded;
-  encoded.reserve(text.size() * 4);
-  for (const wchar_t character : text) {
-    const auto value = static_cast<std::uint16_t>(character);
-    for (unsigned shift : std::array{12U, 8U, 4U, 0U}) {
-      encoded.push_back(hex_digit((value >> shift) & 0x0fU));
-    }
+  encoded.reserve(text.size() * 2);
+  for (const char8_t character : text) {
+    const auto value = static_cast<std::uint8_t>(character);
+    encoded.push_back(hex_digit(value >> 4U));
+    encoded.push_back(hex_digit(value & 0x0fU));
   }
   return encoded;
 }
@@ -100,7 +116,8 @@ struct CreationClubFile {
   return std::nullopt;
 }
 
-[[nodiscard]] std::optional<std::filesystem::path> decode_name(std::string_view encoded) {
+[[nodiscard]] std::optional<std::filesystem::path> decode_legacy_name(
+    std::string_view encoded) {
   if (encoded.empty() || encoded.size() % 4 != 0) return std::nullopt;
   std::wstring text;
   text.reserve(encoded.size() / 4);
@@ -112,6 +129,27 @@ struct CreationClubFile {
       value = static_cast<std::uint16_t>((value << 4U) | *decoded);
     }
     text.push_back(static_cast<wchar_t>(value));
+  }
+  const std::filesystem::path name(text);
+  if (name.empty() || name != name.filename() || name == L"." || name == L".." ||
+      !is_creation_club_name(name)) {
+    return std::nullopt;
+  }
+  return name;
+}
+
+[[nodiscard]] std::optional<std::filesystem::path> decode_name(
+    std::string_view encoded) {
+  if (encoded.empty() || encoded.size() % 2 != 0) return std::nullopt;
+  std::u8string text;
+  text.reserve(encoded.size() / 2);
+  for (std::size_t offset = 0; offset < encoded.size(); offset += 2) {
+    const auto high = hex_value(encoded[offset]);
+    const auto low = hex_value(encoded[offset + 1]);
+    if (!high || !low) return std::nullopt;
+    const auto value = static_cast<unsigned char>((*high << 4U) | *low);
+    if (value == 0) return std::nullopt;
+    text.push_back(static_cast<char8_t>(value));
   }
   const std::filesystem::path name(text);
   if (name.empty() || name != name.filename() || name == L"." || name == L".." ||
@@ -138,13 +176,17 @@ struct CreationClubFile {
          body;
 }
 
-[[nodiscard]] std::optional<std::vector<CreationClubFile>> read_journal(
-    const std::filesystem::path& path) {
-  std::ifstream stream(path, std::ios::binary);
-  if (!stream) return std::nullopt;
-  std::string contents(std::istreambuf_iterator<char>(stream), {});
-  if (stream.bad() || !contents.starts_with(journal_magic)) return std::nullopt;
-  contents.erase(0, journal_magic.size());
+[[nodiscard]] std::optional<std::vector<CreationClubFile>> parse_journal(
+    std::string contents) {
+  bool legacy = false;
+  if (contents.starts_with(journal_magic)) {
+    contents.erase(0, journal_magic.size());
+  } else if (contents.starts_with(legacy_journal_magic)) {
+    contents.erase(0, legacy_journal_magic.size());
+    legacy = true;
+  } else {
+    return std::nullopt;
+  }
 
   const auto checksum_end = contents.find('\n');
   if (checksum_end == std::string::npos) return std::nullopt;
@@ -186,7 +228,9 @@ struct CreationClubFile {
     if (first_separator != 64 || second_separator == std::string_view::npos) {
       return std::nullopt;
     }
-    const auto name = decode_name(line.substr(second_separator + 1));
+    const auto encoded_name = line.substr(second_separator + 1);
+    const auto name = legacy ? decode_legacy_name(encoded_name)
+                             : decode_name(encoded_name);
     std::uint64_t size{};
     if (!name || !parse_unsigned(line.substr(first_separator + 1,
                                              second_separator - first_separator - 1),
@@ -200,13 +244,23 @@ struct CreationClubFile {
     std::ranges::transform(hash, hash.begin(), [](char value) {
       return value >= 'A' && value <= 'F' ? static_cast<char>(value + ('a' - 'A')) : value;
     });
-    if (std::ranges::find(files, *name, &CreationClubFile::name) != files.end()) {
+    if (std::ranges::any_of(files, [&](const CreationClubFile& existing) {
+          return same_windows_filename(existing.name, *name);
+        })) {
       return std::nullopt;
     }
     files.push_back({*name, std::move(hash), size});
   }
   if (files.size() != expected_count) return std::nullopt;
   return files;
+}
+
+[[nodiscard]] std::optional<std::vector<CreationClubFile>> read_journal(
+    const std::filesystem::path& path) {
+  std::ifstream stream(path, std::ios::binary);
+  if (!stream) return std::nullopt;
+  std::string contents(std::istreambuf_iterator<char>(stream), {});
+  return stream.bad() ? std::nullopt : parse_journal(std::move(contents));
 }
 
 [[nodiscard]] bool matches(const std::filesystem::path& path,
@@ -252,6 +306,14 @@ struct CreationClubFile {
                       iterator->path().wstring();
       return std::nullopt;
     }
+    if (std::ranges::any_of(files, [&](const CreationClubFile& existing) {
+          return same_windows_filename(existing.name, name);
+        })) {
+      error_message =
+          L"Creation Club filenames collide under Windows case rules: " +
+          name.wstring();
+      return std::nullopt;
+    }
     files.push_back({name, *hash, size});
   }
   if (error) {
@@ -277,6 +339,42 @@ CreationClubResult recover_creation_club_content(
   std::error_code error;
   const auto journal_status = inspect_regular_file(journal, error);
   if (journal_status == RegularFileStatus::missing) {
+    const auto vault_journal = read_recovery_metadata(game_root, vault_metadata_name);
+    if (vault_journal) {
+      const auto files = parse_journal(*vault_journal);
+      if (!files) {
+        return {false, false,
+                L"The Creation Club recovery metadata in the vault is invalid."};
+      }
+      bool changed = false;
+      for (const auto& file : *files) {
+        const auto live = game_root / L"Data" / file.name;
+        if (matches(live, file)) continue;
+        const auto live_status = inspect_regular_file(live, error);
+        if (error) return {false, changed, L"A Creation Club file is unreadable."};
+        if (live_status == RegularFileStatus::regular &&
+            (!preserve_recovery_conflict(game_root, live,
+                                         "creation-club-recovery") ||
+             !backend.durable_remove(live))) {
+          return {false, changed,
+                  L"A conflicting Creation Club file could not be preserved."};
+        }
+        if (!restore_recovery_file(game_root, file.hash, file.size, live) ||
+            !matches(live, file)) {
+          return {false, changed,
+                  L"A Creation Club file could not be restored from the vault: " +
+                      live.wstring()};
+        }
+        changed = true;
+      }
+      if (!remove_recovery_metadata(game_root, vault_metadata_name)) {
+        return {false, changed,
+                L"Creation Club recovery completed, but vault metadata remains."};
+      }
+      std::filesystem::remove_all(root, error);
+      return {!error, changed,
+              error ? L"The Creation Club quarantine could not be cleaned up." : L""};
+    }
     if (!std::filesystem::exists(root, error)) return {!error, false, {}};
     if (error || !std::filesystem::is_directory(root, error) || error) {
       return {false, false, L"The Creation Club quarantine could not be inspected."};
@@ -337,10 +435,37 @@ CreationClubResult recover_creation_club_content(
       changed = true;
       continue;
     }
+    if (live_status == RegularFileStatus::missing &&
+        restore_recovery_file(game_root, file.hash, file.size, live) &&
+        matches(live, file)) {
+      if (held_status == RegularFileStatus::regular) {
+        (void)backend.durable_remove(held);
+      }
+      changed = true;
+      continue;
+    }
     if (live_valid && held_valid) {
       if (!backend.durable_remove(held)) {
         return {false, changed,
                 L"A duplicate Creation Club quarantine file could not be removed."};
+      }
+      changed = true;
+      continue;
+    }
+    if (live_status == RegularFileStatus::regular &&
+        (held_valid || read_recovery_metadata(game_root, vault_metadata_name))) {
+      if (!preserve_recovery_conflict(game_root, live,
+                                      "creation-club-conflict") ||
+          !backend.durable_remove(live)) {
+        return {false, changed,
+                L"A conflicting Creation Club file could not be preserved."};
+      }
+      const bool restored = held_valid
+                                ? backend.move_atomic(held, live)
+                                : restore_recovery_file(game_root, file.hash, file.size, live);
+      if (!restored || !matches(live, file)) {
+        return {false, changed,
+                L"A Creation Club file could not be restored after preserving a conflict."};
       }
       changed = true;
       continue;
@@ -354,6 +479,11 @@ CreationClubResult recover_creation_club_content(
     return {false, changed,
             L"The completed Creation Club transaction journal could not be removed."};
   }
+  if (read_recovery_metadata(game_root, vault_metadata_name) &&
+      !remove_recovery_metadata(game_root, vault_metadata_name)) {
+    return {false, changed,
+            L"The completed Creation Club vault metadata could not be removed."};
+  }
   if (!cleanup_empty_quarantine(game_root)) {
     return {false, changed,
             L"The empty Creation Club quarantine could not be cleaned up."};
@@ -362,7 +492,7 @@ CreationClubResult recover_creation_club_content(
 }
 
 CreationClubResult quarantine_creation_club_content(
-    const std::filesystem::path& game_root) {
+    const std::filesystem::path& game_root, bool persistent) {
   if constexpr (!quarantines_creation_club_content) return {true, false, {}};
 
   const auto recovered = recover_creation_club_content(game_root);
@@ -381,7 +511,21 @@ CreationClubResult quarantine_creation_club_content(
     return {false, false,
             L"The Creation Club quarantine directory could not be created."};
   }
-  if (!backend.write_atomic(journal_path(game_root), make_journal(*files))) {
+  const auto journal_text = make_journal(*files);
+  if (persistent) {
+    for (const auto& file : *files) {
+      if (!commit_recovery_file(game_root, game_root / L"Data" / file.name,
+                                file.hash, file.size)) {
+        return {false, false,
+                L"A Creation Club original could not be committed to the recovery vault."};
+      }
+    }
+    if (!write_recovery_metadata(game_root, vault_metadata_name, journal_text)) {
+      return {false, false,
+              L"Creation Club recovery metadata could not be committed to the vault."};
+    }
+  }
+  if (!backend.write_atomic(journal_path(game_root), journal_text)) {
     const auto rollback = recover_creation_club_content(game_root);
     return {false, false,
             rollback.success
@@ -404,6 +548,55 @@ CreationClubResult quarantine_creation_club_content(
     changed = true;
   }
   return {true, changed, {}};
+}
+
+CreationClubResult verify_persistent_creation_club_content(
+    const std::filesystem::path& game_root) {
+  if constexpr (!quarantines_creation_club_content) return {true, false, {}};
+
+  const auto journal = journal_path(game_root);
+  std::error_code error;
+  const auto status = inspect_regular_file(journal, error);
+  const auto vault_journal = read_recovery_metadata(game_root, vault_metadata_name);
+  if (status == RegularFileStatus::missing && !vault_journal) return {true, false, {}};
+  if ((status != RegularFileStatus::regular &&
+       status != RegularFileStatus::missing) ||
+      error) {
+    return {false, false,
+            L"The persistent Creation Club journal could not be inspected."};
+  }
+  if (!vault_journal) {
+    return {false, false,
+            L"The persistent Creation Club recovery metadata is missing from the vault."};
+  }
+  const auto vault_files = parse_journal(*vault_journal);
+  if (!vault_files) {
+    return {false, false,
+            L"The persistent Creation Club recovery metadata is invalid."};
+  }
+  if (status == RegularFileStatus::regular) {
+    const auto local_files = read_journal(journal);
+    if (!local_files || make_journal(*local_files) != make_journal(*vault_files)) {
+      return {false, false,
+              L"The persistent Creation Club journals do not agree."};
+    }
+  }
+  const auto root = quarantine_root(game_root);
+  for (const auto& file : *vault_files) {
+    const auto live = game_root / L"Data" / file.name;
+    const auto held = root / file.name;
+    const auto live_status = inspect_regular_file(live, error);
+    if (error || live_status != RegularFileStatus::missing || !matches(held, file)) {
+      return {false, false,
+              L"Persistent Creation Club quarantine requires recovery: " +
+                  live.wstring()};
+    }
+    if (!commit_recovery_file(game_root, held, file.hash, file.size)) {
+      return {false, false,
+              L"A persistent Creation Club recovery object is unavailable."};
+    }
+  }
+  return {true, false, {}};
 }
 
 }  // namespace runtime_swapper::app
