@@ -36,25 +36,6 @@ namespace {
          CSTR_EQUAL;
 }
 
-[[nodiscard]] bool path_has_reparse_component(
-    const std::filesystem::path& path) {
-  std::error_code error;
-  const auto absolute = std::filesystem::absolute(path, error);
-  if (error || !absolute.is_absolute()) return true;
-  auto current = absolute.root_path();
-  for (const auto& component : absolute.relative_path()) {
-    current /= component;
-    const DWORD attributes = GetFileAttributesW(current.c_str());
-    if (attributes == INVALID_FILE_ATTRIBUTES) {
-      const DWORD code = GetLastError();
-      if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) continue;
-      return true;
-    }
-    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) return true;
-  }
-  return false;
-}
-
 [[nodiscard]] UniqueHandle find_process_by_image(
     const std::filesystem::path& expected_image) {
   UniqueHandle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
@@ -92,13 +73,13 @@ UniqueHandle acquire_transaction_lock(
     const std::filesystem::path& game_root) {
   const auto lock_path =
       game_root / L".skyrim-runtime-swapper" / L"transaction.lock";
-  if (path_has_reparse_component(game_root) ||
-      path_has_reparse_component(lock_path.parent_path())) {
+  if (!managed_path_is_safe(game_root) ||
+      !managed_path_is_safe(lock_path.parent_path())) {
     return {};
   }
   std::error_code error;
   std::filesystem::create_directories(lock_path.parent_path(), error);
-  if (error || path_has_reparse_component(lock_path.parent_path())) return {};
+  if (error || !managed_path_is_safe(lock_path.parent_path())) return {};
   UniqueHandle lock(CreateFileW(
       lock_path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS,
       FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_WRITE_THROUGH |

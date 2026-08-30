@@ -71,6 +71,14 @@ struct BackendProbeResult {
                                           const VolumeIdentity& vault,
                                           bool different_volume) noexcept;
 [[nodiscard]] std::wstring safety_mode_label(SafetyMode mode);
+// Accepts native paths and verified volume mount points, but rejects symbolic
+// links, directory junctions, and all other path redirections.
+[[nodiscard]] bool managed_path_is_safe(
+    const std::filesystem::path& path) noexcept;
+// Returns true for a symbolic link, junction, mount point, or any other
+// redirecting path entry. Uninspectable entries are treated as redirected.
+[[nodiscard]] bool managed_path_entry_is_redirected(
+    const std::filesystem::path& path) noexcept;
 
 class TransactionBackend {
  public:

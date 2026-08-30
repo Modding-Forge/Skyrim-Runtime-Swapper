@@ -263,5 +263,18 @@ int main() {
       read_file(installed) != "installed" || std::filesystem::exists(install_staged)) {
     return 12;
   }
+  const auto read_only = temporary.path() / L"cleanup" / L"read-only.bin";
+  const auto read_only_alias = temporary.path() / L"cleanup" / L"read-only.alias";
+  write_file(read_only, "durable-cleanup");
+  const DWORD attributes = GetFileAttributesW(read_only.c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES ||
+      !SetFileAttributesW(read_only.c_str(), attributes | FILE_ATTRIBUTE_READONLY) ||
+      !CreateHardLinkW(read_only_alias.c_str(), read_only.c_str(), nullptr) ||
+      !backend.durable_remove(read_only) || std::filesystem::exists(read_only) ||
+      !std::filesystem::is_regular_file(read_only_alias) ||
+      (GetFileAttributesW(read_only_alias.c_str()) & FILE_ATTRIBUTE_READONLY) == 0) {
+    return 32;
+  }
+  SetFileAttributesW(read_only_alias.c_str(), FILE_ATTRIBUTE_NORMAL);
   return 0;
 }

@@ -34,6 +34,11 @@ struct WorkItem {
   std::filesystem::path rollback;
 };
 
+struct CleanupResult {
+  bool success{};
+  std::wstring detail;
+};
+
 [[nodiscard]] std::wstring source_version() { return std::wstring(source_version_label); }
 [[nodiscard]] std::wstring target_version() { return std::wstring(target_version_label); }
 
@@ -82,30 +87,138 @@ struct WorkItem {
   return {ExitCode::success, false, probe.description};
 }
 
-[[nodiscard]] bool clean_transaction_tree(const std::filesystem::path& game_root) {
+[[nodiscard]] CleanupResult cleanup_failure(
+    std::wstring_view action, const std::filesystem::path& path,
+    const std::error_code& error = {}) {
+  std::wstring detail(action);
+  detail += L": ";
+  detail += quote_path(path);
+  if (error) {
+    detail += L" (";
+    const auto message = error.message();
+    detail.append(message.begin(), message.end());
+    detail += L")";
+  }
+  return {false, std::move(detail)};
+}
+
+[[nodiscard]] CleanupResult remove_transaction_file(
+    const std::filesystem::path& path) {
+  std::error_code error;
+  const auto status = std::filesystem::symlink_status(path, error);
+  if (error == std::errc::no_such_file_or_directory) return {true, {}};
+  if (error) return cleanup_failure(L"Could not inspect transaction file", path, error);
+  if (!std::filesystem::exists(status)) return {true, {}};
+  if (!std::filesystem::is_regular_file(status) ||
+      managed_path_entry_is_redirected(path)) {
+    return cleanup_failure(L"Refused to remove an unsafe transaction entry", path);
+  }
+  if (!transaction_backend().durable_remove(path)) {
+    return cleanup_failure(L"Could not durably remove transaction file", path);
+  }
+  return {true, {}};
+}
+
+[[nodiscard]] CleanupResult remove_transaction_directory(
+    const std::filesystem::path& root) {
+  std::error_code error;
+  const auto root_status = std::filesystem::symlink_status(root, error);
+  if (error == std::errc::no_such_file_or_directory) return {true, {}};
+  if (error) {
+    return cleanup_failure(L"Could not inspect transaction directory", root, error);
+  }
+  if (!std::filesystem::exists(root_status)) return {true, {}};
+  if (!std::filesystem::is_directory(root_status) ||
+      managed_path_entry_is_redirected(root)) {
+    return cleanup_failure(L"Refused to traverse an unsafe transaction directory",
+                           root);
+  }
+
+  std::vector<std::filesystem::path> files;
+  std::vector<std::filesystem::path> directories;
+  std::filesystem::recursive_directory_iterator iterator(
+      root, std::filesystem::directory_options::none, error);
+  const std::filesystem::recursive_directory_iterator end;
+  if (error) {
+    return cleanup_failure(L"Could not enumerate transaction directory", root, error);
+  }
+  while (iterator != end) {
+    const auto entry = iterator->path();
+    const auto status = iterator->symlink_status(error);
+    if (error) {
+      return cleanup_failure(L"Could not inspect transaction entry", entry, error);
+    }
+    if (managed_path_entry_is_redirected(entry)) {
+      iterator.disable_recursion_pending();
+      return cleanup_failure(L"Refused to traverse an unsafe transaction entry", entry);
+    }
+    if (std::filesystem::is_directory(status)) {
+      directories.push_back(entry);
+    } else if (std::filesystem::is_regular_file(status)) {
+      files.push_back(entry);
+    } else {
+      return cleanup_failure(L"Refused to remove an unsupported transaction entry",
+                             entry);
+    }
+    iterator.increment(error);
+    if (error) {
+      return cleanup_failure(L"Could not enumerate transaction directory", root, error);
+    }
+  }
+
+  for (const auto& file : files) {
+    const auto removed = remove_transaction_file(file);
+    if (!removed.success) return removed;
+  }
   auto& backend = transaction_backend();
+  directories.insert(directories.begin(), root);
+  for (auto directory = directories.rbegin(); directory != directories.rend();
+       ++directory) {
+    error.clear();
+    const auto current_status = std::filesystem::symlink_status(*directory, error);
+    if (error == std::errc::no_such_file_or_directory ||
+        (!error && !std::filesystem::exists(current_status))) {
+      continue;
+    }
+    if (error || !std::filesystem::is_directory(current_status) ||
+        managed_path_entry_is_redirected(*directory)) {
+      return cleanup_failure(L"Refused to remove an unsafe transaction directory",
+                             *directory, error);
+    }
+    const bool removed = std::filesystem::remove(*directory, error);
+    if (error) {
+      return cleanup_failure(L"Could not remove transaction directory", *directory,
+                             error);
+    }
+    if (!removed) {
+      const auto status = std::filesystem::symlink_status(*directory, error);
+      if (error != std::errc::no_such_file_or_directory &&
+          (error || std::filesystem::exists(status))) {
+        return cleanup_failure(L"Transaction directory was not empty", *directory,
+                               error);
+      }
+    }
+    if (removed && !backend.sync_parent(*directory)) {
+      return cleanup_failure(L"Could not synchronize transaction cleanup", *directory);
+    }
+  }
+  return {true, {}};
+}
+
+[[nodiscard]] CleanupResult clean_transaction_tree(
+    const std::filesystem::path& game_root) {
   const auto active = active_root(game_root);
   const auto legacy_journal = legacy_journal_path(game_root);
-  bool success = true;
   const auto vault = resolve_vault_layout(game_root);
-  if (vault) {
-    const auto journal = runtime_journal_path(*vault);
-    const auto recovery_journal = recovery_journal_path(*vault);
-    if (std::filesystem::is_regular_file(journal)) {
-      success = backend.durable_remove(journal) && success;
-    }
-    if (std::filesystem::is_regular_file(recovery_journal)) {
-      success = backend.durable_remove(recovery_journal) && success;
-    }
-  } else {
-    success = false;
+  if (!vault) {
+    return {false, L"The recovery vault could not be resolved during cleanup."};
   }
-  if (std::filesystem::is_regular_file(legacy_journal)) {
-    success = backend.durable_remove(legacy_journal) && success;
+  for (const auto& journal : {runtime_journal_path(*vault),
+                              recovery_journal_path(*vault), legacy_journal}) {
+    const auto removed = remove_transaction_file(journal);
+    if (!removed.success) return removed;
   }
-  std::error_code error;
-  std::filesystem::remove_all(active, error);
-  return success && !error;
+  return remove_transaction_directory(active);
 }
 
 [[nodiscard]] DowngradeResult recover_to_source(const std::filesystem::path& game_root,
@@ -325,13 +438,17 @@ struct WorkItem {
     return {ExitCode::recovery_failed, changed,
             L"The completed recovery could not be recorded."};
   }
-  if (std::filesystem::is_regular_file(marker) && !backend.durable_remove(marker)) {
+  const auto marker_cleanup = remove_transaction_file(marker);
+  if (!marker_cleanup.success) {
     return {ExitCode::recovery_failed, changed,
-            L"The stale runtime session marker could not be removed."};
+            L"The stale runtime session marker could not be removed.\n\n" +
+                marker_cleanup.detail};
   }
-  if (!clean_transaction_tree(game_root)) {
+  const auto cleanup = clean_transaction_tree(game_root);
+  if (!cleanup.success) {
     return {ExitCode::recovery_failed, changed,
-            L"Runtime recovery completed, but transaction cleanup failed."};
+            L"Runtime recovery completed, but transaction cleanup failed.\n\n" +
+                cleanup.detail};
   }
   return {ExitCode::success, changed,
           changed ? L"Skyrim " + source_version() + L" was recovered successfully." +
@@ -377,17 +494,18 @@ DowngradeResult finalize_fixed_target_runtime_internal(
       return {ExitCode::source_hash_mismatch, false,
               L"The managed target runtime is incomplete or modified."};
     }
-    auto& backend = transaction_backend();
     const auto marker = session_marker(game_root);
-    std::error_code error;
-    if (std::filesystem::is_regular_file(marker, error) &&
-        !backend.durable_remove(marker)) {
+    const auto marker_cleanup = remove_transaction_file(marker);
+    if (!marker_cleanup.success) {
       return {ExitCode::commit_failed, false,
-              L"The temporary runtime session marker could not be removed."};
+              L"The temporary runtime session marker could not be removed.\n\n" +
+                  marker_cleanup.detail};
     }
-    if (error || !clean_transaction_tree(game_root)) {
+    const auto cleanup = clean_transaction_tree(game_root);
+    if (!cleanup.success) {
       return {ExitCode::commit_failed, false,
-              L"The fixed target runtime could not be finalized."};
+              L"The fixed target runtime could not be finalized.\n\n" +
+                  cleanup.detail};
     }
     return {ExitCode::success, false,
             L"Skyrim " + target_version() + L" is fixed as the active runtime."};

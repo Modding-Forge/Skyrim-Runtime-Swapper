@@ -56,8 +56,16 @@ namespace {
   }
   const auto finalized = runtime_swapper::finalize_fixed_target_runtime(game_root);
   if (!finalized.success() || !runtime_swapper::target_runtime_is_active(game_root)) {
-    std::wcerr << L"The fixed target runtime could not be finalized.\n";
+    std::wcerr << finalized.message << L"\n";
     return 6;
+  }
+  const auto finalized_again =
+      runtime_swapper::finalize_fixed_target_runtime(game_root);
+  if (!finalized_again.success() ||
+      !runtime_swapper::target_runtime_is_active(game_root)) {
+    std::wcerr << L"Repeated finalization was not idempotent: "
+               << finalized_again.message << L"\n";
+    return 11;
   }
 
   const auto corruptible = std::ranges::find_if(

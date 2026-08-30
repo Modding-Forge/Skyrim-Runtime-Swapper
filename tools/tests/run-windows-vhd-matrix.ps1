@@ -14,6 +14,7 @@ if (-not $resolvedRoot.StartsWith($resolvedTemp, [System.StringComparison]::Ordi
 }
 New-Item -ItemType Directory -Path $resolvedRoot | Out-Null
 $mounted = [System.Collections.Generic.List[string]]::new()
+$accessPaths = [System.Collections.Generic.List[object]]::new()
 
 function New-TestVolume {
     param([string]$Name, [string]$FileSystem)
@@ -39,6 +40,33 @@ try {
     if ($ntfsMode -notin @('persistent_only', 'persistent_with_warning')) {
         throw "A detachable VHDX was classified unsafely: $ntfsMode"
     }
+
+    $ntfsPartition = Get-Partition -DriveLetter $ntfs.Substring(0, 1)
+    $mountPath = Join-Path $resolvedRoot 'ntfs-volume-mount'
+    New-Item -ItemType Directory -Path $mountPath | Out-Null
+    $mountAccessPath = $mountPath.TrimEnd('\') + '\'
+    Add-PartitionAccessPath -DiskNumber $ntfsPartition.DiskNumber `
+        -PartitionNumber $ntfsPartition.PartitionNumber -AccessPath $mountAccessPath
+    $accessPaths.Add([pscustomobject]@{
+        DiskNumber = $ntfsPartition.DiskNumber
+        PartitionNumber = $ntfsPartition.PartitionNumber
+        AccessPath = $mountAccessPath
+    })
+    $mountedGame = Join-Path $mountPath 'mounted-game'
+    New-Item -ItemType Directory -Path $mountedGame | Out-Null
+    $mountedMode = ((& $probePath $mountedGame |
+        Select-String '^mode=').Line -replace '^mode=', '')
+    if ($mountedMode -notin @('persistent_only', 'persistent_with_warning')) {
+        throw "A verified NTFS volume mount point was rejected: $mountedMode"
+    }
+    $driveIdentity = (& $probePath (Join-Path $ntfs 'mounted-game') |
+        Select-String '^installation=').Line
+    $mountIdentity = (& $probePath $mountedGame |
+        Select-String '^installation=').Line
+    if ($driveIdentity -ne $mountIdentity) {
+        throw 'Installation identity changed through the NTFS volume mount point'
+    }
+
     & $probePath (Join-Path $exfat 'game') persistent_only
     if ($LASTEXITCODE -ne 0) { throw 'exFAT VHD classification failed' }
 
@@ -61,6 +89,11 @@ try {
     if ($before -ne $after) { throw 'Installation identity changed after VHD remount' }
 }
 finally {
+    foreach ($accessPath in @($accessPaths)) {
+        Remove-PartitionAccessPath -DiskNumber $accessPath.DiskNumber `
+            -PartitionNumber $accessPath.PartitionNumber `
+            -AccessPath $accessPath.AccessPath -ErrorAction SilentlyContinue
+    }
     foreach ($vhdPath in @($mounted)) {
         Dismount-VHD -Path $vhdPath -ErrorAction SilentlyContinue
     }

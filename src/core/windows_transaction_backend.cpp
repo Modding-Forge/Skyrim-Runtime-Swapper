@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cwctype>
 #include <filesystem>
 #include <fstream>
@@ -43,6 +44,19 @@ struct HandleCloser {
 
 using UniqueHandle = std::unique_ptr<void, HandleCloser>;
 
+struct MountPointReparseData {
+  DWORD reparse_tag{};
+  WORD reparse_data_length{};
+  WORD reserved{};
+  WORD substitute_name_offset{};
+  WORD substitute_name_length{};
+  WORD print_name_offset{};
+  WORD print_name_length{};
+  wchar_t path_buffer[1]{};
+};
+
+static_assert(offsetof(MountPointReparseData, path_buffer) == 16);
+
 [[nodiscard]] bool equal_ordinal(std::wstring_view left,
                                  std::wstring_view right) noexcept {
   return CompareStringOrdinal(left.data(), static_cast<int>(left.size()), right.data(),
@@ -60,10 +74,97 @@ using UniqueHandle = std::unique_ptr<void, HandleCloser>;
          equal_ordinal(left_volume.data(), right_volume.data());
 }
 
-[[nodiscard]] bool path_has_reparse_component(const std::filesystem::path& path) {
+[[nodiscard]] std::wstring trim_trailing_separators(std::wstring value) {
+  while (value.size() > 3 && (value.back() == L'\\' || value.back() == L'/')) {
+    value.pop_back();
+  }
+  return value;
+}
+
+[[nodiscard]] bool verified_volume_mount_point(
+    const std::filesystem::path& component,
+    std::wstring_view expected_volume_root) {
+  const auto component_text = trim_trailing_separators(component.wstring());
+  const auto root_text = trim_trailing_separators(
+      std::wstring(expected_volume_root));
+  if (!equal_ordinal(component_text, root_text)) return false;
+
+  std::wstring root_with_separator(expected_volume_root);
+  if (root_with_separator.empty() ||
+      (root_with_separator.back() != L'\\' &&
+       root_with_separator.back() != L'/')) {
+    root_with_separator.push_back(L'\\');
+  }
+  std::array<wchar_t, MAX_PATH> volume_guid{};
+  if (!GetVolumeNameForVolumeMountPointW(
+          root_with_separator.c_str(), volume_guid.data(),
+          static_cast<DWORD>(volume_guid.size()))) {
+    return false;
+  }
+
+  UniqueHandle handle(CreateFileW(
+      component.c_str(), 0,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+      OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+  if (handle.get() == INVALID_HANDLE_VALUE) return false;
+  std::array<std::byte, MAXIMUM_REPARSE_DATA_BUFFER_SIZE> storage{};
+  DWORD returned{};
+  if (!DeviceIoControl(handle.get(), FSCTL_GET_REPARSE_POINT, nullptr, 0,
+                       storage.data(), static_cast<DWORD>(storage.size()),
+                       &returned, nullptr) ||
+      returned < offsetof(MountPointReparseData, path_buffer)) {
+    return false;
+  }
+  const auto* data =
+      reinterpret_cast<const MountPointReparseData*>(storage.data());
+  if (data->reparse_tag != IO_REPARSE_TAG_MOUNT_POINT) return false;
+  const auto substitute_offset =
+      static_cast<std::size_t>(data->substitute_name_offset) /
+      sizeof(wchar_t);
+  const auto substitute_length =
+      static_cast<std::size_t>(data->substitute_name_length) /
+      sizeof(wchar_t);
+  const auto path_characters =
+      (returned - offsetof(MountPointReparseData, path_buffer)) /
+      sizeof(wchar_t);
+  if (substitute_offset > path_characters ||
+      substitute_length > path_characters - substitute_offset) {
+    return false;
+  }
+  std::wstring substitute(data->path_buffer + substitute_offset,
+                          substitute_length);
+  std::wstring expected(volume_guid.data());
+  if (expected.starts_with(L"\\\\?\\")) {
+    expected.replace(0, 4, L"\\??\\");
+  }
+  return equal_ordinal(trim_trailing_separators(std::move(substitute)),
+                       trim_trailing_separators(std::move(expected)));
+}
+
+[[nodiscard]] bool path_has_unsupported_reparse_component(
+    const std::filesystem::path& path) {
   std::error_code error;
   const auto absolute = std::filesystem::absolute(path, error);
   if (error || !absolute.is_absolute()) return true;
+
+  auto anchor = absolute;
+  for (;;) {
+    const DWORD attributes = GetFileAttributesW(anchor.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES) break;
+    const DWORD code = GetLastError();
+    if (code != ERROR_FILE_NOT_FOUND && code != ERROR_PATH_NOT_FOUND) {
+      return true;
+    }
+    if (anchor == anchor.root_path()) return true;
+    anchor = anchor.parent_path();
+  }
+  std::array<wchar_t, 32768> volume_root{};
+  if (!GetVolumePathNameW(anchor.c_str(), volume_root.data(),
+                          static_cast<DWORD>(volume_root.size()))) {
+    return true;
+  }
+
   auto current = absolute.root_path();
   for (const auto& component : absolute.relative_path()) {
     current /= component;
@@ -73,7 +174,10 @@ using UniqueHandle = std::unique_ptr<void, HandleCloser>;
       if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) continue;
       return true;
     }
-    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) return true;
+    if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
+        !verified_volume_mount_point(current, volume_root.data())) {
+      return true;
+    }
   }
   return false;
 }
@@ -218,7 +322,8 @@ using UniqueHandle = std::unique_ptr<void, HandleCloser>;
 
 [[nodiscard]] std::wstring volume_device_path(std::wstring volume_root,
                                                std::wstring volume_guid) {
-  if (volume_root.size() >= 2 && volume_root[1] == L':') {
+  if (volume_root.size() == 3 && volume_root[1] == L':' &&
+      (volume_root[2] == L'\\' || volume_root[2] == L'/')) {
     return L"\\\\.\\" + volume_root.substr(0, 2);
   }
   if (!volume_guid.empty() && volume_guid.back() == L'\\') volume_guid.pop_back();
@@ -478,13 +583,15 @@ class WindowsTransactionBackend final : public TransactionBackend {
 
     std::error_code error;
     const auto requested = std::filesystem::absolute(managed_root, error);
-    if (error || !requested.is_absolute() || path_has_reparse_component(requested)) {
+    if (error || !requested.is_absolute() ||
+        path_has_unsupported_reparse_component(requested)) {
       return blocked(L"unsafe-target-path",
                      L"The managed path is not an absolute local path or contains a "
                      L"symlink, junction, or reparse point.");
     }
     const auto absolute = std::filesystem::weakly_canonical(requested, error);
-    if (error || !absolute.is_absolute() || path_has_reparse_component(absolute)) {
+    if (error || !absolute.is_absolute() ||
+        path_has_unsupported_reparse_component(absolute)) {
       return blocked(L"unsafe-target-path",
                      L"The managed path could not be resolved without reparse traversal.");
     }
@@ -524,7 +631,7 @@ class WindowsTransactionBackend final : public TransactionBackend {
     }
     error.clear();
     const bool vault_exists = std::filesystem::is_directory(vault_path, error) && !error;
-    if (path_has_reparse_component(vault_path.parent_path())) {
+    if (path_has_unsupported_reparse_component(vault_path.parent_path())) {
       return blocked(L"vault-parent-reparse",
                      L"The automatic recovery-vault path contains a junction or reparse "
                      L"point.", *target, {}, vault_path, *id);
@@ -588,7 +695,7 @@ class WindowsTransactionBackend final : public TransactionBackend {
     }
 
     std::filesystem::create_directories(vault_path, error);
-    if (error || path_has_reparse_component(vault_path)) {
+    if (error || path_has_unsupported_reparse_component(vault_path)) {
       return blocked(L"vault-create-failed",
                      L"The automatic recovery vault could not be created safely.", *target,
                      {}, vault_path, *id);
@@ -638,7 +745,7 @@ class WindowsTransactionBackend final : public TransactionBackend {
 
   bool flush_file(const std::filesystem::path& file) override {
     if (core::fault_injected("file.before-flush")) return false;
-    if (path_has_reparse_component(file)) return false;
+    if (path_has_unsupported_reparse_component(file)) return false;
     const bool flushed = flush_existing_file(file);
     return flushed && !core::fault_injected("file.after-flush");
   }
@@ -649,9 +756,9 @@ class WindowsTransactionBackend final : public TransactionBackend {
     if (core::fault_injected("replace.before")) return false;
     std::error_code error;
     std::filesystem::create_directories(rollback.parent_path(), error);
-    if (error || path_has_reparse_component(live) ||
-        path_has_reparse_component(staged) ||
-        path_has_reparse_component(rollback.parent_path()) ||
+    if (error || path_has_unsupported_reparse_component(live) ||
+        path_has_unsupported_reparse_component(staged) ||
+        path_has_unsupported_reparse_component(rollback.parent_path()) ||
         !same_volume(live, staged) || !same_volume(live, rollback)) return false;
     std::filesystem::remove(rollback, error);
     error.clear();
@@ -684,8 +791,8 @@ class WindowsTransactionBackend final : public TransactionBackend {
     std::error_code error;
     std::filesystem::create_directories(live.parent_path(), error);
     if (error || std::filesystem::exists(live, error) || error ||
-        path_has_reparse_component(staged) ||
-        path_has_reparse_component(live.parent_path()) ||
+        path_has_unsupported_reparse_component(staged) ||
+        path_has_unsupported_reparse_component(live.parent_path()) ||
         !same_volume(staged, live)) {
       return false;
     }
@@ -696,11 +803,11 @@ class WindowsTransactionBackend final : public TransactionBackend {
   bool restore_file(const std::filesystem::path& rollback,
                     const std::filesystem::path& live) override {
     if (!std::filesystem::is_regular_file(rollback) ||
-        path_has_reparse_component(rollback) ||
-        path_has_reparse_component(live.parent_path())) return false;
+        path_has_unsupported_reparse_component(rollback) ||
+        path_has_unsupported_reparse_component(live.parent_path())) return false;
     std::error_code error;
     std::filesystem::create_directories(live.parent_path(), error);
-    if (error || path_has_reparse_component(live) ||
+    if (error || path_has_unsupported_reparse_component(live) ||
         !same_volume(rollback, live)) return false;
     if (std::filesystem::is_regular_file(live, error) && !error) {
       if (!ReplaceFileW(live.c_str(), rollback.c_str(), nullptr, REPLACEFILE_WRITE_THROUGH,
@@ -722,9 +829,9 @@ class WindowsTransactionBackend final : public TransactionBackend {
     if (!std::filesystem::is_regular_file(source)) return false;
     std::error_code error;
     std::filesystem::create_directories(destination.parent_path(), error);
-    if (error || path_has_reparse_component(source) ||
-        path_has_reparse_component(destination.parent_path()) ||
-        path_has_reparse_component(destination)) return false;
+    if (error || path_has_unsupported_reparse_component(source) ||
+        path_has_unsupported_reparse_component(destination.parent_path()) ||
+        path_has_unsupported_reparse_component(destination)) return false;
 
     auto temporary = destination;
     temporary += L".copy-" + std::to_wstring(GetCurrentProcessId());
@@ -749,8 +856,8 @@ class WindowsTransactionBackend final : public TransactionBackend {
     std::error_code error;
     if (!std::filesystem::is_regular_file(source, error) || error) return false;
     std::filesystem::create_directories(destination.parent_path(), error);
-    if (error || path_has_reparse_component(source) ||
-        path_has_reparse_component(destination.parent_path()) ||
+    if (error || path_has_unsupported_reparse_component(source) ||
+        path_has_unsupported_reparse_component(destination.parent_path()) ||
         std::filesystem::exists(destination, error) || error ||
         !same_volume(source, destination) || !flush_existing_file(source)) {
       return false;
@@ -765,10 +872,57 @@ class WindowsTransactionBackend final : public TransactionBackend {
 
   bool durable_remove(const std::filesystem::path& path) override {
     if (core::fault_injected("remove.before")) return false;
-    if (path_has_reparse_component(path)) return false;
-    std::error_code error;
-    if (!std::filesystem::exists(path, error)) return !error;
-    if (error || !std::filesystem::remove(path, error) || error) return false;
+    if (path_has_unsupported_reparse_component(path)) return false;
+    UniqueHandle file(CreateFileW(
+        path.c_str(), DELETE | FILE_READ_ATTRIBUTES, FILE_SHARE_READ |
+        FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    if (file.get() == INVALID_HANDLE_VALUE) {
+      const DWORD error = GetLastError();
+      return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+    }
+    FILE_ATTRIBUTE_TAG_INFO tag{};
+    FILE_STANDARD_INFO standard{};
+    if (!GetFileInformationByHandleEx(file.get(), FileAttributeTagInfo, &tag,
+                                      sizeof(tag)) ||
+        !GetFileInformationByHandleEx(file.get(), FileStandardInfo, &standard,
+                                      sizeof(standard)) ||
+        (tag.FileAttributes &
+         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+      return false;
+    }
+
+    FILE_DISPOSITION_INFO_EX disposition{
+        FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS |
+        FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE};
+    bool removed = SetFileInformationByHandle(
+        file.get(), FileDispositionInfoEx, &disposition, sizeof(disposition));
+    if (!removed) {
+      const DWORD disposition_error = GetLastError();
+      if (disposition_error != ERROR_INVALID_PARAMETER &&
+          disposition_error != ERROR_NOT_SUPPORTED &&
+          disposition_error != ERROR_INVALID_FUNCTION) {
+        return false;
+      }
+      file.reset();
+      const DWORD original_attributes = tag.FileAttributes;
+      const bool read_only =
+          (original_attributes & FILE_ATTRIBUTE_READONLY) != 0;
+      // Legacy filesystems cannot unlink a read-only hard link without
+      // changing the attributes of every remaining link.
+      if (read_only && standard.NumberOfLinks != 1) return false;
+      if (read_only &&
+          !SetFileAttributesW(path.c_str(),
+                              original_attributes & ~FILE_ATTRIBUTE_READONLY)) {
+        return false;
+      }
+      removed = DeleteFileW(path.c_str());
+      if (!removed && read_only) {
+        (void)SetFileAttributesW(path.c_str(), original_attributes);
+      }
+    }
+    file.reset();
+    if (!removed) return false;
     if (core::fault_injected("remove.after-unlink")) return false;
     return attempt_directory_flush(path.parent_path()) &&
            !core::fault_injected("remove.after-sync");
@@ -778,8 +932,8 @@ class WindowsTransactionBackend final : public TransactionBackend {
     if (core::fault_injected("write.before")) return false;
     std::error_code error;
     std::filesystem::create_directories(path.parent_path(), error);
-    if (error || path_has_reparse_component(path.parent_path()) ||
-        path_has_reparse_component(path)) return false;
+    if (error || path_has_unsupported_reparse_component(path.parent_path()) ||
+        path_has_unsupported_reparse_component(path)) return false;
     auto temporary = path;
     temporary += L".tmp-" + std::to_wstring(GetCurrentProcessId());
     std::filesystem::remove(temporary, error);
@@ -811,6 +965,21 @@ class WindowsTransactionBackend final : public TransactionBackend {
 };
 
 }  // namespace
+
+bool managed_path_is_safe(const std::filesystem::path& path) noexcept {
+  try {
+    return !path_has_unsupported_reparse_component(path);
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+
+bool managed_path_entry_is_redirected(
+    const std::filesystem::path& path) noexcept {
+  const DWORD attributes = GetFileAttributesW(path.c_str());
+  return attributes == INVALID_FILE_ATTRIBUTES ||
+         (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+}
 
 SafetyMode classify_storage(const VolumeIdentity& target,
                             const VolumeIdentity& vault,

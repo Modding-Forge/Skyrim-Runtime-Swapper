@@ -705,6 +705,26 @@ class PosixTransactionBackend final : public TransactionBackend {
 
 }  // namespace
 
+bool managed_path_is_safe(const std::filesystem::path& path) noexcept {
+  try {
+    return !has_symlink_component(path);
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+
+bool managed_path_entry_is_redirected(
+    const std::filesystem::path& path) noexcept {
+  struct stat status {};
+  if (::lstat(path.c_str(), &status) != 0 || S_ISLNK(status.st_mode)) return true;
+  std::error_code error;
+  const auto absolute = std::filesystem::absolute(path, error).lexically_normal();
+  if (error || !absolute.is_absolute()) return true;
+  const auto mount = find_mount(absolute);
+  if (!mount) return true;
+  return mount->mount_point.lexically_normal() == absolute;
+}
+
 SafetyMode classify_storage(const VolumeIdentity& target,
                             const VolumeIdentity& vault,
                             bool different_volume) noexcept {
