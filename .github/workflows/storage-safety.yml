@@ -36,7 +36,9 @@ jobs:
         run: ctest --test-dir build/native --output-on-failure
       - name: Real filesystem matrix
         if: matrix.target == '1.6.1170' && matrix.profile == 'bobw'
-        run: sudo bash tools/tests/run-linux-filesystem-matrix.sh build/native/storage_backend_probe
+        run: >-
+          sudo bash tools/tests/run-linux-filesystem-matrix.sh
+          build/native/storage_backend_probe --allow-missing-filesystems
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.target }}-${{ matrix.profile }}

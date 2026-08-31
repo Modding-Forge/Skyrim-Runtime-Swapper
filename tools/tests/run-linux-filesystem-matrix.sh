@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 1 ]]; then
-  echo "usage: run-linux-filesystem-matrix.sh <storage_backend_probe>" >&2
+allow_missing_filesystems=false
+if [[ $# -eq 2 && "$2" == --allow-missing-filesystems ]]; then
+  allow_missing_filesystems=true
+elif [[ $# -ne 1 ]]; then
+  echo "usage: run-linux-filesystem-matrix.sh <storage_backend_probe> [--allow-missing-filesystems]" >&2
   exit 2
 fi
 probe="$(realpath "$1")"
@@ -104,10 +107,25 @@ run_case() {
   [[ -d "$created" && ! -L "$created" && "$(stat -c '%a' "$created")" == 700 ]]
 }
 
+kernel_filesystem_available() {
+  local filesystem="$1"
+  grep -qw "$filesystem" /proc/filesystems && return 0
+  command -v modprobe >/dev/null && modprobe "$filesystem" 2>/dev/null || true
+  grep -qw "$filesystem" /proc/filesystems
+}
+
+exfat_available=true
+if "$allow_missing_filesystems" && ! kernel_filesystem_available exfat; then
+  exfat_available=false
+  echo "SKIP: this runner kernel does not provide exFAT mounts"
+fi
+
 run_case ext4 automatic
 run_case xfs automatic
 run_case btrfs automatic
-run_case exfat persistent_only
+if "$exfat_available"; then
+  run_case exfat persistent_only
+fi
 run_case vfat persistent_with_warning
 run_case ext2 persistent_with_warning
 run_case ntfs3g persistent_with_warning
@@ -131,11 +149,13 @@ if [[ -z "$original_id" || "$bind_id" != "$original_id" ]]; then
   exit 1
 fi
 
-make_volume same-exfat exfat 1024
-same_mount="$created_mount"
-mkdir -p "$same_mount/game" "$same_mount/state"
-XDG_STATE_HOME="$same_mount/state" HOME="$test_root/home" \
-  "$probe" "$same_mount/game" hard_blocked
+if "$exfat_available"; then
+  make_volume same-exfat exfat 1024
+  same_mount="$created_mount"
+  mkdir -p "$same_mount/game" "$same_mount/state"
+  XDG_STATE_HOME="$same_mount/state" HOME="$test_root/home" \
+    "$probe" "$same_mount/game" hard_blocked
+fi
 
 first_target="${mounts[1]}/game"
 make_volume undersized-vault ext4 128
