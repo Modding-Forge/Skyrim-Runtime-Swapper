@@ -2,6 +2,13 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.2.0-rc5 - 2026-08-31
+
+- Added platform-neutral support for managed file links whose verified targets remain inside the locked Skyrim installation and on the same volume.
+- Preserved managed links while atomically switching and restoring their regular-file targets.
+- Bound every runtime journal to the complete resolved file layout so retargeted links block recovery before any write.
+- Added internal-link, external-target, retargeting, Btrfs transaction, and interrupted-recovery coverage.
+
 ## 1.2.0-rc4 - 2026-08-31
 
 - Added portable storage classification and automatically selected recovery vaults for Windows, Linux, Wine, and Proton.

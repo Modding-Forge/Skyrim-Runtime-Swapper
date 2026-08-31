@@ -72,18 +72,29 @@ SourceBackupResult ensure_source_backups(const std::filesystem::path& game_root)
         vault_object_matches(*vault, plan.source_sha256, plan.source_size)) {
       continue;
     }
-    const auto live = game_root / utf8_path(plan.relative_file);
+    std::wstring path_error;
+    const auto managed = resolve_managed_file(
+        game_root, utf8_path(plan.relative_file), &path_error);
+    if (!managed) {
+      return {ExitCode::backup_failed, changed,
+              L"A managed source-runtime path is unsafe: " + path_error};
+    }
+    const auto& live = managed->effective;
     const auto legacy = legacy_backup_path(game_root, plan);
     const auto source = hash_matches(live, plan.source_sha256) ? live : legacy;
     if (!hash_matches(source, plan.source_sha256)) {
       return {ExitCode::backup_failed, changed,
               L"A verified source file is unavailable for the recovery vault: " +
-                  quote_path(live)};
+                  quote_path(managed->logical)};
     }
     if (!commit_vault_object(*vault, source, plan.source_sha256, plan.source_size)) {
       return {ExitCode::backup_failed, changed,
               L"A source-runtime object could not be committed and verified in: " +
-                  quote_path(vault->probe.vault_path)};
+                  quote_path(vault->probe.vault_path) + L"\n\nManaged file: " +
+                  quote_path(managed->logical) +
+                  (managed->redirected
+                       ? L"\nResolved target: " + quote_path(managed->effective)
+                       : L"")};
     }
     changed = true;
   }

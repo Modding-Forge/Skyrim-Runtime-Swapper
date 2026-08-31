@@ -1,4 +1,5 @@
 #include "internal/transaction_journal.hpp"
+#include "internal/file_operations.hpp"
 
 #include <runtime_swapper/sha256.hpp>
 #include <runtime_swapper/transaction_backend.hpp>
@@ -130,6 +131,40 @@ int main() {
   if (linked_probe.mode != SafetyMode::hard_blocked ||
       linked_probe.technical_reason != L"unsafe-target-path") {
     return 14;
+  }
+
+  const auto game = temporary.path() / "game";
+  const auto data = game / "Data";
+  const auto core = game / "Data_Core";
+  const auto first_target = core / "Update.esm";
+  const auto second_target = core / "Update-alternate.esm";
+  std::filesystem::create_directories(data);
+  write_file(first_target, "verified-source");
+  write_file(second_target, "alternate-source");
+  const auto managed_link = data / "Update.esm";
+  std::filesystem::create_symlink(first_target, managed_link);
+  const auto managed = resolve_managed_file(game, "Data/Update.esm");
+  if (!managed || !managed->redirected ||
+      managed->logical != managed_link ||
+      managed->effective != std::filesystem::canonical(first_target) ||
+      !managed_file_mapping_matches(game, *managed)) {
+    return 16;
+  }
+  std::filesystem::remove(managed_link);
+  std::filesystem::create_symlink(second_target, managed_link);
+  if (managed_file_mapping_matches(game, *managed)) return 17;
+
+  const auto outside = temporary.path() / "outside.esm";
+  write_file(outside, "outside");
+  std::filesystem::remove(managed_link);
+  std::filesystem::create_symlink(outside, managed_link);
+  if (resolve_managed_file(game, "Data/Update.esm")) return 18;
+
+  std::filesystem::remove(managed_link);
+  const auto missing = resolve_managed_file(game, "Data/new-runtime-file.bin");
+  if (!missing || missing->redirected ||
+      missing->effective != data / "new-runtime-file.bin") {
+    return 19;
   }
   return 0;
 }

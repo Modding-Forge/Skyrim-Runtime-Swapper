@@ -229,6 +229,41 @@ int main() {
       return 27;
     }
   }
+  const auto game = temporary.path() / L"managed-link-game";
+  const auto data = game / L"Data";
+  const auto data_core = game / L"Data_Core";
+  const auto core_file = data_core / L"Update.esm";
+  const auto alternate_file = data_core / L"Update-alternate.esm";
+  const auto managed_link = data / L"Update.esm";
+  write_file(core_file, "source");
+  write_file(alternate_file, "alternate");
+  std::filesystem::create_directories(data);
+  if (CreateSymbolicLinkW(managed_link.c_str(), core_file.c_str(),
+                          SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+    const auto managed = resolve_managed_file(game, L"Data/Update.esm");
+    std::error_code link_error;
+    if (!managed || !managed->redirected ||
+        !std::filesystem::equivalent(managed->effective, core_file, link_error) ||
+        link_error || !managed_file_mapping_matches(game, *managed)) {
+      return 33;
+    }
+    std::filesystem::remove(managed_link, link_error);
+    if (link_error ||
+        !CreateSymbolicLinkW(managed_link.c_str(), alternate_file.c_str(),
+                             SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) ||
+        managed_file_mapping_matches(game, *managed)) {
+      return 34;
+    }
+    const auto outside = temporary.path() / L"outside-managed-target.esm";
+    write_file(outside, "outside");
+    std::filesystem::remove(managed_link, link_error);
+    if (link_error ||
+        !CreateSymbolicLinkW(managed_link.c_str(), outside.c_str(),
+                             SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) ||
+        resolve_managed_file(game, L"Data/Update.esm")) {
+      return 35;
+    }
+  }
   const auto live = temporary.path() / L"replace" / L"live.bin";
   const auto staged = temporary.path() / L"replace" / L"staged.bin";
   const auto rollback = temporary.path() / L"replace" / L"rollback.bin";
