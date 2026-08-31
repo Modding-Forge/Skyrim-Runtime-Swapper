@@ -19,11 +19,29 @@ struct VaultLayout {
   std::filesystem::path persistent_marker;
 };
 
+struct TargetCacheLayout {
+  BackendProbeResult probe;
+  std::filesystem::path root;
+  std::filesystem::path objects;
+};
+
 enum class PersistentMarkerState { inactive, active, invalid };
 
 [[nodiscard]] std::optional<VaultLayout> resolve_vault_layout(
     const std::filesystem::path& game_root, std::uint64_t required_bytes = 0,
     std::wstring* error_message = nullptr, bool prepare_vault = true);
+[[nodiscard]] std::optional<TargetCacheLayout> resolve_target_cache_layout(
+    const std::filesystem::path& game_root);
+[[nodiscard]] bool target_cache_object_available(
+    const TargetCacheLayout& cache, std::string_view sha256,
+    std::uint64_t expected_size);
+[[nodiscard]] bool materialize_target_cache_object(
+    const TargetCacheLayout& cache, std::string_view sha256,
+    std::uint64_t expected_size, const std::filesystem::path& destination);
+[[nodiscard]] bool commit_target_cache_object(
+    const TargetCacheLayout& cache,
+    const std::filesystem::path& verified_source, std::string_view sha256,
+    std::uint64_t expected_size);
 
 [[nodiscard]] bool vault_object_matches(const VaultLayout& vault,
                                         std::string_view sha256,

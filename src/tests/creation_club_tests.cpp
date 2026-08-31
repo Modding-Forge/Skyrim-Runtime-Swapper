@@ -186,12 +186,24 @@ int main() {
   const auto persistent_verified =
       runtime_swapper::app::verify_persistent_creation_club_content(game_root);
   if (persistent_verified.success) return 11;
+  const auto unknown_quarantine_file = quarantine / L"user-note.txt";
+  write_file(unknown_quarantine_file, "preserve-me");
+  const auto blocked_cleanup =
+      runtime_swapper::app::recover_creation_club_content(game_root);
+  if (blocked_cleanup.success ||
+      read_file(unknown_quarantine_file) != "preserve-me" ||
+      !std::filesystem::is_regular_file(plugin) ||
+      !std::filesystem::is_regular_file(archive) ||
+      !std::filesystem::is_regular_file(unicode_plugin)) {
+    return 12;
+  }
+  std::filesystem::remove(unknown_quarantine_file);
   const auto persistent_restore =
       runtime_swapper::app::recover_creation_club_content(game_root);
   if (!persistent_restore.success || !std::filesystem::is_regular_file(plugin) ||
       !std::filesystem::is_regular_file(archive) ||
       !std::filesystem::is_regular_file(unicode_plugin)) {
-    return 12;
+    return 19;
   }
   return 0;
 }

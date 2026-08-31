@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 project(SkyrimRuntimeSwapper VERSION 1.2.0 LANGUAGES C CXX)
 
-set(SKYRIM_RUNTIME_RELEASE_VERSION "1.2.0-rc6")
+set(SKYRIM_RUNTIME_RELEASE_VERSION "1.2.0-rc8")
 if(SKYRIM_RUNTIME_RELEASE_VERSION MATCHES "-")
   set(SKYRIM_RUNTIME_VERSION_FLAGS "VS_FF_PRERELEASE")
 else()
@@ -130,8 +130,12 @@ list(LENGTH PROFILE_FILES PROFILE_FILE_COUNT)
 
 set(GENERATED_INCLUDE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${GENERATED_INCLUDE}/runtime_swapper")
+string(SHA256 SKYRIM_RUNTIME_PATCH_PLAN_HASH
+  "${PATCH_MANIFEST_JSON};${SKYRIM_RUNTIME_BUILD_PROFILE}")
 configure_file(cmake/runtime_version.hpp.in "${GENERATED_INCLUDE}/runtime_swapper/runtime_version.hpp" @ONLY)
 configure_file(cmake/patch_plan.hpp.in "${GENERATED_INCLUDE}/runtime_swapper/patch_plan.hpp" @ONLY)
+configure_file(cmake/release_version.hpp.in
+  "${GENERATED_INCLUDE}/runtime_swapper/release_version.hpp" @ONLY)
 
 set(SKYRIM_RUNTIME_POSIX_SIDECAR "" CACHE FILEPATH
   "Prebuilt native ELF sidecar whose SHA-256 is embedded in the Windows helper")
@@ -245,6 +249,7 @@ add_library(runtime_swapper_core STATIC
   src/core/hdiff_patch.cpp
   src/core/persistent_runtime.cpp
   src/core/recovery_vault.cpp
+  src/core/recovery_lifecycle.cpp
   src/core/restore.cpp
   src/core/runtime_backup.cpp
   src/core/runtime_transform.cpp
@@ -346,6 +351,17 @@ if(BUILD_TESTING)
     target_compile_options(runtime_version_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
   endif()
   add_test(NAME runtime_version_tests COMMAND runtime_version_tests)
+
+  add_executable(recovery_lifecycle_tests
+    src/tests/recovery_lifecycle_tests.cpp)
+  target_include_directories(recovery_lifecycle_tests BEFORE PRIVATE
+    "${GENERATED_INCLUDE}" src/include)
+  target_link_libraries(recovery_lifecycle_tests PRIVATE runtime_swapper_core)
+  if(MSVC)
+    target_compile_options(recovery_lifecycle_tests PRIVATE
+      /W4 /permissive- /EHsc /utf-8)
+  endif()
+  add_test(NAME recovery_lifecycle_tests COMMAND recovery_lifecycle_tests)
   add_windows_version_resource(runtime_version_tests "runtime_version_tests.exe"
     "Skyrim Runtime Swapper Runtime Version Tests" "runtime_version_tests" "VFT_APP")
 

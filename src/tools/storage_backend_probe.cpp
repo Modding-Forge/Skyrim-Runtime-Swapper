@@ -48,6 +48,9 @@ int main(int argc, char** argv) {
   std::cout << "mode=" << label(result.mode) << '\n'
             << "installation=" << result.installation_id << '\n'
             << "vault=" << result.vault_path.generic_string() << '\n'
+            << "targetCache=" << result.target_cache.value.generic_string() << '\n'
+            << "coordinationLock="
+            << result.coordination_lock.value.generic_string() << '\n'
             << "target_filesystem=" << ascii(result.target_volume.filesystem) << '\n'
             << "target_volume=" << ascii(result.target_volume.stable_id) << '\n'
             << "target_medium=" << static_cast<unsigned>(result.target_volume.medium)

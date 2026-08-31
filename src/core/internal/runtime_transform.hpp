@@ -15,6 +15,8 @@ namespace runtime_swapper::core {
 
 [[nodiscard]] bool target_runtime_is_active_internal(
     const std::filesystem::path& game_root) noexcept;
+[[nodiscard]] bool source_runtime_is_active_internal(
+    const std::filesystem::path& game_root) noexcept;
 
 [[nodiscard]] DowngradeResult finalize_fixed_target_runtime_internal(
     const std::filesystem::path& game_root);

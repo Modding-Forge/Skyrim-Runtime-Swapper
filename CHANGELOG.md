@@ -2,6 +2,21 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.2.0-rc8 - 2026-08-31
+
+- Retired orphaned RC5/RC6 recovery locators when the complete source state is independently verified.
+- Kept missing-vault recovery strictly blocked for active target runtimes, persistent state, pending ContentCatalog data, or unknown transaction metadata.
+- Added Bazzite-style stale-locator integration coverage for both the safe migration and fail-closed target-state cases.
+
+## 1.2.0-rc7 - 2026-08-31
+
+- Added a shared recovery lifecycle for automatic, persistent, interrupted, and cleanup-pending transactions.
+- Separated recovery storage, reusable target cache, and coordination locks into distinct typed locations.
+- Removed verified recovery vaults, locators, and empty Skyrim transaction metadata before the watcher exits.
+- Retained recovery data on incomplete verification, preserved conflicts, or interrupted cleanup and made cleanup idempotent.
+- Added safe non-following recovery-tree deletion primitives for Windows and Linux and retained RC5/RC6 manifest compatibility.
+- Unified watcher, GUI, and native sidecar restoration through the same complete installation recovery operation.
+
 ## 1.2.0-rc6 - 2026-08-31
 
 - Added a verified content-addressed target-runtime cache for automatic sessions, avoiding repeated HDiffPatch work after the first successful switch.

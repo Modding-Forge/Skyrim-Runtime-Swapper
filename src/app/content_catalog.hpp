@@ -23,6 +23,7 @@ struct ContentCatalogResult {
     const std::filesystem::path& game_root);
 
 [[nodiscard]] BackendProbeResult probe_content_catalog_storage();
+[[nodiscard]] ContentCatalogResult inspect_content_catalog_recovery_state();
 [[nodiscard]] ContentCatalogResult verify_persistent_content_catalog(
     const std::filesystem::path& game_root);
 

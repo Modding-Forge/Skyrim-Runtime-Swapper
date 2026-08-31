@@ -1,10 +1,12 @@
 #include <runtime_swapper/transaction_backend.hpp>
 
 #include <runtime_swapper/sha256.hpp>
+#include <runtime_swapper/release_version.hpp>
 
 #include "internal/fault_injection.hpp"
 
 #include <fcntl.h>
+#include <dirent.h>
 #include <linux/fs.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
@@ -44,6 +46,59 @@ struct FileDescriptor {
   FileDescriptor& operator=(const FileDescriptor&) = delete;
   explicit operator bool() const noexcept { return value >= 0; }
 };
+
+[[nodiscard]] bool remove_private_tree_at(int parent, const char* name) {
+  struct stat status {};
+  if (::fstatat(parent, name, &status, AT_SYMLINK_NOFOLLOW) != 0) {
+    return errno == ENOENT;
+  }
+  if (status.st_uid != ::geteuid() || !S_ISDIR(status.st_mode)) return false;
+
+  FileDescriptor directory(
+      ::openat(parent, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+  if (!directory) return false;
+  const int iteration_fd = ::dup(directory.value);
+  if (iteration_fd < 0) return false;
+  DIR* entries = ::fdopendir(iteration_fd);
+  if (entries == nullptr) {
+    ::close(iteration_fd);
+    return false;
+  }
+
+  bool success = true;
+  errno = 0;
+  while (success) {
+    dirent* entry = ::readdir(entries);
+    if (entry == nullptr) {
+      if (errno != 0) success = false;
+      break;
+    }
+    if (std::string_view(entry->d_name) == "." ||
+        std::string_view(entry->d_name) == "..") {
+      continue;
+    }
+    struct stat child {};
+    if (::fstatat(directory.value, entry->d_name, &child,
+                  AT_SYMLINK_NOFOLLOW) != 0 ||
+        child.st_uid != ::geteuid()) {
+      success = false;
+      break;
+    }
+    if (S_ISDIR(child.st_mode)) {
+      success = remove_private_tree_at(directory.value, entry->d_name);
+    } else if (S_ISREG(child.st_mode) && child.st_nlink == 1) {
+      success = ::unlinkat(directory.value, entry->d_name, 0) == 0;
+    } else {
+      // Recovery storage never creates links, devices, sockets, or FIFOs.
+      // Their presence is an identity violation, not content to follow/delete.
+      success = false;
+    }
+  }
+  ::closedir(entries);
+  if (!success || ::fsync(directory.value) != 0) return false;
+  if (::unlinkat(parent, name, AT_REMOVEDIR) != 0) return false;
+  return ::fsync(parent) == 0;
+}
 
 struct MountEntry {
   std::filesystem::path mount_point;
@@ -413,6 +468,37 @@ struct MountEntry {
   return !stream.bad() && text == locator_contents(id, vault, vault_volume);
 }
 
+[[nodiscard]] std::optional<std::filesystem::path> locator_vault_path(
+    const std::filesystem::path& locator, std::string_view id) {
+  std::ifstream stream(locator, std::ios::binary);
+  std::string magic;
+  std::string installation;
+  std::string vault;
+  if (!std::getline(stream, magic) || !std::getline(stream, installation) ||
+      !std::getline(stream, vault) || magic != "SRS-VAULT-LOCATOR-1" ||
+      installation != "installation=" + std::string(id) ||
+      !vault.starts_with("vault=")) {
+    return std::nullopt;
+  }
+  const auto encoded = vault.substr(6);
+  const std::u8string utf8(reinterpret_cast<const char8_t*>(encoded.data()),
+                           encoded.size());
+  auto path = std::filesystem::path(utf8);
+  return path.is_absolute() ? std::optional(path.lexically_normal())
+                            : std::nullopt;
+}
+
+[[nodiscard]] std::optional<std::filesystem::path> steam_library_root(
+    const std::filesystem::path& game_root) {
+  const auto common = game_root.parent_path();
+  const auto steamapps = common.parent_path();
+  if (common.filename() != "common" || steamapps.filename() != "steamapps" ||
+      steamapps.parent_path().empty()) {
+    return std::nullopt;
+  }
+  return steamapps.parent_path();
+}
+
 [[nodiscard]] bool vault_manifest_identity_matches(
     const std::filesystem::path& vault, std::string_view id,
     const VolumeIdentity& target_volume, const VolumeIdentity& vault_volume) {
@@ -478,6 +564,18 @@ struct MountEntry {
           StorageOperation::none};
 }
 
+[[nodiscard]] BackendProbeResult attach_storage_paths(
+    BackendProbeResult result, const std::filesystem::path& base,
+    std::string_view id) {
+  result.recovery_vault.value = result.vault_path;
+  result.target_cache.value =
+      base / "cache" /
+      std::filesystem::path(patch_plan_hash_utf8.substr(0, 16));
+  result.coordination_lock.value =
+      base / "locks" / (std::string(id) + ".lock");
+  return result;
+}
+
 class PosixTransactionBackend final : public TransactionBackend {
  public:
   BackendProbeResult probe(const std::filesystem::path& managed_root,
@@ -509,8 +607,18 @@ class PosixTransactionBackend final : public TransactionBackend {
                      L"XDG_STATE_HOME or HOME does not resolve to a safe absolute path.",
                      *target);
     }
-    const auto vault_path = *state / "modding-forge" /
-                            "skyrim-runtime-swapper" / "vaults" / *id;
+    const auto system_base = *state / "modding-forge" /
+                             "skyrim-runtime-swapper";
+    const auto local_base = target->medium == StorageMedium::internal &&
+                                    target->native_durability
+                                ? steam_library_root(absolute)
+                                : std::nullopt;
+    const auto storage_base = local_base
+                                  ? *local_base / ".runtime-swapper"
+                                  : system_base;
+    auto vault_path = local_base
+                          ? storage_base / "recovery" / *id / "active"
+                          : system_base / "vaults" / *id;
     const auto state_anchor = existing_directory_ancestor(*state);
     if (!state_anchor || !directory_controlled_by_user(*state_anchor)) {
       return blocked(L"state-home-not-controlled",
@@ -526,8 +634,33 @@ class PosixTransactionBackend final : public TransactionBackend {
                      L"The active recovery-vault locator could not be inspected.",
                      *target, {}, vault_path, *id);
     }
+    std::optional<std::filesystem::path> recorded_vault;
+    if (locator_exists) {
+      recorded_vault = locator_vault_path(locator, *id);
+      const auto& recorded = recorded_vault;
+      if (recorded) {
+        if (has_symlink_component(recorded->parent_path())) {
+          return blocked(L"active-vault-locator-invalid",
+                         L"The active recovery-vault locator is invalid.",
+                         *target, {}, vault_path, *id);
+        }
+        vault_path = *recorded;
+      }
+    }
     error.clear();
     const bool vault_exists = std::filesystem::is_directory(vault_path, error) && !error;
+    if (recorded_vault && !vault_exists) {
+      return blocked(L"active-vault-directory-missing",
+                     L"The recorded recovery-vault directory is missing.",
+                     *target, {}, vault_path, *id);
+    }
+    if (recorded_vault &&
+        !std::filesystem::is_regular_file(vault_path / "manifest.v2", error)) {
+      return blocked(L"active-vault-manifest-missing",
+                     L"The recorded recovery-vault manifest is missing.",
+                     *target, {}, vault_path, *id);
+    }
+    error.clear();
     if (has_symlink_component(vault_path.parent_path())) {
       return blocked(L"vault-parent-symlink",
                      L"The automatic vault path contains a symbolic link.", *target, {},
@@ -535,7 +668,7 @@ class PosixTransactionBackend final : public TransactionBackend {
     }
     const auto vault_anchor = vault_exists
                                   ? std::optional(vault_path)
-                                  : existing_directory_ancestor(*state);
+                                  : existing_directory_ancestor(storage_base);
     auto vault = vault_anchor ? inspect_volume(*vault_anchor) : std::nullopt;
     const bool locator_matches_vault =
         locator_exists && std::filesystem::is_regular_file(locator_status) &&
@@ -581,7 +714,7 @@ class PosixTransactionBackend final : public TransactionBackend {
                      *target, *vault, vault_path, *id);
     }
     if (!prepare_vault) {
-      return {ExitCode::success, candidate_mode, *target, *vault, vault_path, *id,
+      return attach_storage_paths({ExitCode::success, candidate_mode, *target, *vault, vault_path, *id,
               safety_mode_label(candidate_mode) + L": " + target->description,
               candidate_mode == SafetyMode::automatic
                   ? L"native-session-durability"
@@ -589,10 +722,14 @@ class PosixTransactionBackend final : public TransactionBackend {
               candidate_mode == SafetyMode::automatic
                   ? L"Native filesystem durability supports automatic restoration."
                   : L"Verified persistent recovery is required for this target.",
-              operations_for(candidate_mode)};
+              operations_for(candidate_mode)}, storage_base, *id);
     }
 
-    if (!secure_vault_hierarchy(*state, vault_path) ||
+    if (local_base) {
+      std::filesystem::create_directories(storage_base, error);
+    }
+    const auto secure_root = local_base ? storage_base : *state;
+    if (error || !secure_vault_hierarchy(secure_root, vault_path) ||
         has_symlink_component(vault_path)) {
       return blocked(L"vault-create-failed",
                      L"The automatic vault could not be created with mode 0700.", *target,
@@ -632,14 +769,14 @@ class PosixTransactionBackend final : public TransactionBackend {
                      L"The verified recovery vault was found, but its damaged locator "
                      L"could not be repaired.", *target, *vault, vault_path, *id);
     }
-    return {ExitCode::success, mode, *target, *vault, vault_path, *id,
+    return attach_storage_paths({ExitCode::success, mode, *target, *vault, vault_path, *id,
             safety_mode_label(mode) + L": " + target->description,
             mode == SafetyMode::automatic ? L"native-session-durability"
                                           : L"persistent-recovery-required",
             mode == SafetyMode::automatic
                 ? L"Native filesystem durability supports automatic restoration."
                 : L"Verified persistent recovery is required for this target.",
-            operations_for(mode)};
+            operations_for(mode)}, storage_base, *id);
   }
 
   bool flush_file(const std::filesystem::path& file) override {
@@ -777,6 +914,22 @@ class PosixTransactionBackend final : public TransactionBackend {
     if (core::fault_injected("remove.after-unlink")) return false;
     return fsync_directory(path.parent_path()) &&
            !core::fault_injected("remove.after-sync");
+  }
+
+  bool durable_remove_tree(const std::filesystem::path& root) override {
+    if (core::fault_injected("remove-tree.before") || root.empty() ||
+        root == root.root_path() || has_symlink_component(root.parent_path())) {
+      return false;
+    }
+    FileDescriptor parent(::open(root.parent_path().c_str(),
+                                 O_RDONLY | O_DIRECTORY | O_CLOEXEC |
+                                     O_NOFOLLOW));
+    if (!parent) return false;
+    const auto name = root.filename().native();
+    if (name.empty() || !remove_private_tree_at(parent.value, name.c_str())) {
+      return false;
+    }
+    return !core::fault_injected("remove-tree.after-sync");
   }
 
   bool write_atomic(const std::filesystem::path& path,

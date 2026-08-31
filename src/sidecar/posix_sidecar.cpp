@@ -27,7 +27,7 @@
 namespace {
 
 constexpr std::uint32_t protocol_magic = 0x50535253U;  // SRSP
-constexpr std::uint16_t protocol_version = 2;
+constexpr std::uint16_t protocol_version = 3;
 constexpr std::uint32_t maximum_payload = 1024U * 1024U;
 
 enum class Operation : std::uint16_t {
@@ -63,26 +63,28 @@ class NativeInstallationLock {
   NativeInstallationLock& operator=(const NativeInstallationLock&) = delete;
   ~NativeInstallationLock() {
     if (lock_ >= 0) ::close(lock_);
-    if (metadata_ >= 0) ::close(metadata_);
-    if (root_ >= 0) ::close(root_);
+    if (directory_ >= 0) ::close(directory_);
   }
 
-  [[nodiscard]] LockResult acquire(const std::filesystem::path& game_root) {
-    root_ = ::open(game_root.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (root_ < 0) return LockResult::unsafe;
-    if (::mkdirat(root_, ".skyrim-runtime-swapper", 0700) != 0 && errno != EEXIST) {
-      return LockResult::io_error;
-    }
-    metadata_ = ::openat(root_, ".skyrim-runtime-swapper",
-                         O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (metadata_ < 0) return LockResult::unsafe;
-    struct stat metadata_status {};
-    if (::fstat(metadata_, &metadata_status) != 0 ||
-        !S_ISDIR(metadata_status.st_mode) || metadata_status.st_uid != ::geteuid() ||
-        !restrict_target_mode(metadata_, 0700)) {
+  [[nodiscard]] LockResult acquire(
+      const runtime_swapper::CoordinationLockPath& resolved_lock) {
+    const auto& lock_path = resolved_lock.value;
+    if (lock_path.empty() || !lock_path.is_absolute()) return LockResult::unsafe;
+    std::error_code error;
+    std::filesystem::create_directories(lock_path.parent_path(), error);
+    if (error) return LockResult::io_error;
+    directory_ = ::open(lock_path.parent_path().c_str(),
+                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (directory_ < 0) return LockResult::unsafe;
+    struct stat directory_status {};
+    if (::fstat(directory_, &directory_status) != 0 ||
+        !S_ISDIR(directory_status.st_mode) ||
+        directory_status.st_uid != ::geteuid() ||
+        !restrict_target_mode(directory_, 0700)) {
       return LockResult::unsafe;
     }
-    lock_ = ::openat(metadata_, "transaction.lock",
+    const auto filename = lock_path.filename().native();
+    lock_ = ::openat(directory_, filename.c_str(),
                      O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (lock_ < 0) return LockResult::unsafe;
     struct stat lock_status {};
@@ -95,15 +97,14 @@ class NativeInstallationLock {
       return errno == EWOULDBLOCK || errno == EAGAIN ? LockResult::busy
                                                      : LockResult::io_error;
     }
-    if (!sync_directory(metadata_) || !sync_directory(root_)) {
+    if (!sync_directory(directory_)) {
       return LockResult::io_error;
     }
     return LockResult::acquired;
   }
 
  private:
-  int root_{-1};
-  int metadata_{-1};
+  int directory_{-1};
   int lock_{-1};
 };
 
@@ -302,8 +303,12 @@ void append_string(std::vector<std::byte>& bytes, std::string_view value) {
   append_integer(payload, flags);
   append_integer(payload,
                  static_cast<std::uint32_t>(result.backend.allowed_operations));
+  append_integer(payload, static_cast<std::uint32_t>(result.lifecycle_state));
+  append_integer(payload, static_cast<std::uint32_t>(result.lifecycle_phase));
   append_string(payload, result.backend.installation_id);
   append_string(payload, path_utf8(result.backend.vault_path));
+  append_string(payload, path_utf8(result.backend.target_cache.value));
+  append_string(payload, path_utf8(result.backend.coordination_lock.value));
   append_string(payload, text_utf8(result.backend.target_volume.stable_id));
   append_string(payload, text_utf8(result.backend.target_volume.filesystem));
   append_integer(payload,
@@ -323,6 +328,7 @@ void append_string(std::vector<std::byte>& bytes, std::string_view value) {
   append_string(payload, text_utf8(result.backend.target_volume.description));
   append_string(payload, text_utf8(result.backend.vault_volume.description));
   append_string(payload, text_utf8(result.backend.technical_reason));
+  append_string(payload, text_utf8(result.technical_detail));
   append_string(payload,
                 text_utf8(result.message.empty() ? result.backend.message
                                                  : result.message));
@@ -449,7 +455,8 @@ int main(int argc, char** argv) {
     result = runtime_swapper::app::probe_installation_storage(game_root);
     if (result.success()) {
       NativeInstallationLock installation_lock;
-      const auto locked = installation_lock.acquire(game_root);
+      const auto locked =
+          installation_lock.acquire(result.backend.coordination_lock);
       result = locked == LockResult::acquired
                    ? execute(operation, game_root, *risk != 0)
                    : lock_failure(std::move(result), locked);

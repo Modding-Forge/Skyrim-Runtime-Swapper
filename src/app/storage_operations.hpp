@@ -2,6 +2,7 @@
 
 #include <runtime_swapper/exit_code.hpp>
 #include <runtime_swapper/transaction_backend.hpp>
+#include <runtime_swapper/recovery_lifecycle.hpp>
 
 #include <filesystem>
 #include <string>
@@ -17,6 +18,10 @@ struct InstallationOperationResult {
   bool content_catalog_changed{};
   bool creation_club_changed{};
   bool content_catalog_persistent{};
+  RecoveryLifecycleState lifecycle_state{
+      RecoveryLifecycleState::cleanup_pending};
+  RecoveryLifecyclePhase lifecycle_phase{RecoveryLifecyclePhase::inspect};
+  std::wstring technical_detail;
   std::wstring message;
 
   [[nodiscard]] bool success() const noexcept { return code == ExitCode::success; }

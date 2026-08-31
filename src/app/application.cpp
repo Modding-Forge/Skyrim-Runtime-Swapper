@@ -187,7 +187,7 @@ int run(int argc, wchar_t** argv) {
       probe.mode == SafetyMode::automatic &&
       persistent_state == PersistentRuntimeState::inactive;
   if (!wine) {
-    transaction_lock = acquire_transaction_lock(*options.game_root);
+    transaction_lock = acquire_transaction_lock(probe.coordination_lock);
     if (!transaction_lock) {
       mutex_lock.unlock();
       return finish(ExitCode::another_instance_failed,

@@ -30,7 +30,7 @@ namespace runtime_swapper::app {
 namespace {
 
 constexpr std::uint32_t protocol_magic = 0x50535253U;
-constexpr std::uint16_t protocol_version = 2;
+constexpr std::uint16_t protocol_version = 3;
 constexpr std::uint32_t maximum_payload = 1024U * 1024U;
 
 #pragma pack(push, 1)
@@ -332,8 +332,12 @@ template <typename Value>
   const auto mode = take_integer<std::uint32_t>(payload);
   const auto flags = take_integer<std::uint32_t>(payload);
   const auto operations = take_integer<std::uint32_t>(payload);
+  const auto lifecycle_state = take_integer<std::uint32_t>(payload);
+  const auto lifecycle_phase = take_integer<std::uint32_t>(payload);
   const auto installation = take_string(payload);
   const auto vault = take_string(payload);
+  const auto target_cache = take_string(payload);
+  const auto coordination_lock = take_string(payload);
   const auto target_id = take_string(payload);
   const auto target_filesystem = take_string(payload);
   const auto target_medium = take_integer<std::uint32_t>(payload);
@@ -345,18 +349,27 @@ template <typename Value>
   const auto target_description = take_string(payload);
   const auto vault_description = take_string(payload);
   const auto technical = take_string(payload);
+  const auto technical_detail = take_string(payload);
   const auto message = take_string(payload);
   if (!code || !valid_exit_code(*code) || !mode ||
       *mode > static_cast<std::uint32_t>(SafetyMode::hard_blocked) ||
       !flags || (*flags & ~63U) != 0 || !operations ||
-      (*operations & ~15U) != 0 || !installation || !vault || !target_id ||
+      (*operations & ~15U) != 0 || !lifecycle_state ||
+      *lifecycle_state >
+          static_cast<std::uint32_t>(RecoveryLifecycleState::persistent) ||
+      !lifecycle_phase ||
+      *lifecycle_phase >
+          static_cast<std::uint32_t>(RecoveryLifecyclePhase::complete) ||
+      !installation || !vault || !target_cache ||
+      !coordination_lock || !target_id ||
       !target_filesystem || !target_medium ||
       *target_medium > static_cast<std::uint32_t>(StorageMedium::unknown) ||
       !target_flags || *target_flags > 7U || !vault_id || !vault_filesystem ||
       !vault_medium ||
       *vault_medium > static_cast<std::uint32_t>(StorageMedium::unknown) ||
       !vault_flags || *vault_flags > 7U || !target_description ||
-      !vault_description || !technical || !message || !payload.empty()) {
+      !vault_description || !technical || !technical_detail || !message ||
+      !payload.empty()) {
     return std::nullopt;
   }
   const auto target_wide = wide(*target_description);
@@ -366,10 +379,11 @@ template <typename Value>
   const auto vault_id_wide = wide(*vault_id);
   const auto vault_filesystem_wide = wide(*vault_filesystem);
   const auto technical_wide = wide(*technical);
+  const auto technical_detail_wide = wide(*technical_detail);
   const auto message_wide = wide(*message);
   if (!target_wide || !vault_wide || !target_id_wide ||
       !target_filesystem_wide || !vault_id_wide || !vault_filesystem_wide ||
-      !technical_wide || !message_wide) {
+      !technical_wide || !technical_detail_wide || !message_wide) {
     return std::nullopt;
   }
   InstallationOperationResult result;
@@ -377,11 +391,24 @@ template <typename Value>
   result.backend.code = result.code;
   result.backend.mode = static_cast<SafetyMode>(*mode);
   result.backend.allowed_operations = static_cast<StorageOperation>(*operations);
+  result.lifecycle_state =
+      static_cast<RecoveryLifecycleState>(*lifecycle_state);
+  result.lifecycle_phase =
+      static_cast<RecoveryLifecyclePhase>(*lifecycle_phase);
   result.backend.installation_id = *installation;
   try {
     const auto* vault_begin = reinterpret_cast<const char8_t*>(vault->data());
     result.backend.vault_path = std::filesystem::path(
         std::u8string(vault_begin, vault_begin + vault->size()));
+    const auto* cache_begin =
+        reinterpret_cast<const char8_t*>(target_cache->data());
+    result.backend.target_cache.value = std::filesystem::path(
+        std::u8string(cache_begin, cache_begin + target_cache->size()));
+    const auto* lock_begin =
+        reinterpret_cast<const char8_t*>(coordination_lock->data());
+    result.backend.coordination_lock.value = std::filesystem::path(
+        std::u8string(lock_begin, lock_begin + coordination_lock->size()));
+    result.backend.recovery_vault.value = result.backend.vault_path;
   } catch (const std::filesystem::filesystem_error&) {
     return std::nullopt;
   }
@@ -401,6 +428,7 @@ template <typename Value>
   result.backend.vault_volume.stable = (*vault_flags & 2U) != 0;
   result.backend.vault_volume.native_durability = (*vault_flags & 4U) != 0;
   result.backend.technical_reason = *technical_wide;
+  result.technical_detail = *technical_detail_wide;
   result.backend.message = *message_wide;
   result.changed = (*flags & 1U) != 0;
   result.persistent = (*flags & 2U) != 0;

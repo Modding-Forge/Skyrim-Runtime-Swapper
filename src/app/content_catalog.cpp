@@ -158,6 +158,25 @@ struct VaultCatalogRecord {
 
 }  // namespace
 
+ContentCatalogResult inspect_content_catalog_recovery_state() {
+  const auto catalog = content_catalog_path();
+  if (!catalog) {
+    return {false, false,
+            L"The ContentCatalog location could not be resolved."};
+  }
+  for (const auto& path : {catalog_hold(*catalog), catalog_journal(*catalog)}) {
+    std::error_code error;
+    const auto status = inspect_regular_file(path, error);
+    if (status == RegularFileStatus::missing && !error) continue;
+    if (error || status != RegularFileStatus::regular) {
+      return {false, false,
+              L"ContentCatalog recovery state could not be inspected safely."};
+    }
+    return {false, false, L"ContentCatalog recovery is still pending."};
+  }
+  return {true, false, {}};
+}
+
 ContentCatalogResult recover_content_catalog(const std::filesystem::path& game_root) {
   const auto catalog = content_catalog_path();
   if (!catalog) {

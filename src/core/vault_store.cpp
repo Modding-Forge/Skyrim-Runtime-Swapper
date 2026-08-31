@@ -5,6 +5,7 @@
 
 #include <runtime_swapper/patch_plan.hpp>
 #include <runtime_swapper/runtime_version.hpp>
+#include <runtime_swapper/release_version.hpp>
 #include <runtime_swapper/sha256.hpp>
 
 #if defined(_WIN32)
@@ -122,6 +123,30 @@ constexpr std::string_view persistent_magic = "SRS-PERSISTENT-2\n";
   text += "target=" + std::string(target_version_label_utf8) + "\n";
   text += "targetVolume=" + utf8_text(vault.probe.target_volume.stable_id) + "\n";
   text += "vaultVolume=" + utf8_text(vault.probe.vault_volume.stable_id) + "\n";
+  text += "formatVersion=2\n";
+  text += "producerVersion=" + std::string(release_version_utf8) + "\n";
+  text += "patchPlanHash=" + std::string(patch_plan_hash_utf8) + "\n";
+  text += "entries=" + std::to_string(patch_plan.size()) + "\n";
+  for (const auto& plan : patch_plan) {
+    text += std::string(plan.relative_file) + "|" +
+            (plan.source_present ? "1" : "0") + "|" +
+            std::string(plan.source_sha256) + "|" +
+            std::to_string(plan.source_size) + "|" +
+            std::string(plan.target_sha256) + "|" +
+            std::to_string(plan.target_size) + "|" +
+            std::string(plan.forward_patch_sha256) + "|" +
+            std::string(plan.reverse_patch_sha256) + "\n";
+  }
+  return text;
+}
+
+[[nodiscard]] std::string legacy_manifest_contents(const VaultLayout& vault) {
+  std::string text(manifest_magic);
+  text += "installation=" + vault.probe.installation_id + "\n";
+  text += "source=" + std::string(source_version_label_utf8) + "\n";
+  text += "target=" + std::string(target_version_label_utf8) + "\n";
+  text += "targetVolume=" + utf8_text(vault.probe.target_volume.stable_id) + "\n";
+  text += "vaultVolume=" + utf8_text(vault.probe.vault_volume.stable_id) + "\n";
   text += "entries=" + std::to_string(patch_plan.size()) + "\n";
   for (const auto& plan : patch_plan) {
     text += std::string(plan.relative_file) + "|" +
@@ -216,6 +241,53 @@ std::optional<VaultLayout> resolve_vault_layout(
   result.manifest = result.probe.vault_path / L"manifest.v2";
   result.persistent_marker = result.probe.vault_path / L"persistent.v2";
   return result;
+}
+
+std::optional<TargetCacheLayout> resolve_target_cache_layout(
+    const std::filesystem::path& game_root) {
+  auto probe = transaction_backend().probe(game_root, 0, false);
+  if (!probe.success() || probe.target_cache.value.empty() ||
+      !probe.target_cache.value.is_absolute()) {
+    return std::nullopt;
+  }
+  TargetCacheLayout result;
+  result.probe = std::move(probe);
+  result.root = result.probe.target_cache.value;
+  result.objects = result.root / L"objects";
+  return result;
+}
+
+namespace {
+[[nodiscard]] VaultLayout cache_as_object_store(
+    const TargetCacheLayout& cache) {
+  VaultLayout store;
+  store.probe = cache.probe;
+  store.probe.vault_path = cache.root;
+  store.objects = cache.objects;
+  return store;
+}
+}  // namespace
+
+bool target_cache_object_available(const TargetCacheLayout& cache,
+                                   std::string_view sha256,
+                                   std::uint64_t expected_size) {
+  return vault_object_available(cache_as_object_store(cache), sha256,
+                                expected_size);
+}
+
+bool materialize_target_cache_object(
+    const TargetCacheLayout& cache, std::string_view sha256,
+    std::uint64_t expected_size, const std::filesystem::path& destination) {
+  return materialize_verified_vault_object(cache_as_object_store(cache), sha256,
+                                           expected_size, destination);
+}
+
+bool commit_target_cache_object(const TargetCacheLayout& cache,
+                                const std::filesystem::path& verified_source,
+                                std::string_view sha256,
+                                std::uint64_t expected_size) {
+  return commit_verified_vault_object(cache_as_object_store(cache),
+                                      verified_source, sha256, expected_size);
 }
 
 bool vault_object_matches(const VaultLayout& vault, std::string_view sha256,
@@ -327,7 +399,20 @@ bool commit_verified_runtime_manifest(const VaultLayout& vault,
 }
 
 bool runtime_manifest_matches(const VaultLayout& vault) {
-  return read_all(vault.manifest) == manifest_contents(vault);
+  auto stored = read_all(vault.manifest);
+  if (stored == legacy_manifest_contents(vault)) return true;
+  constexpr std::string_view producer_key = "producerVersion=";
+  const auto producer = stored.find(producer_key);
+  if (producer != std::string::npos) {
+    const auto end = stored.find('\n', producer);
+    if (end == std::string::npos || end == producer + producer_key.size()) {
+      return false;
+    }
+    stored.replace(producer, end - producer,
+                   std::string(producer_key) +
+                       std::string(release_version_utf8));
+  }
+  return stored == manifest_contents(vault);
 }
 
 bool preserve_conflict(const VaultLayout& vault, const std::filesystem::path& live,

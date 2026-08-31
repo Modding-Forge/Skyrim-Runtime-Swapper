@@ -13,7 +13,7 @@ import tempfile
 
 
 MAGIC = 0x50535253
-VERSION = 2
+VERSION = 3
 HEADER = struct.Struct("<IHHI32s")
 MAXIMUM_PAYLOAD = 1024 * 1024
 
@@ -189,10 +189,7 @@ def main() -> int:
             raise AssertionError("a symbolic-link IPC directory was accepted")
 
         lock_game = pathlib.Path(root, "lock-game")
-        lock_metadata = lock_game / ".skyrim-runtime-swapper"
-        lock_metadata.mkdir(parents=True, mode=0o700)
-        lock_path = lock_metadata / "transaction.lock"
-        lock_descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        lock_game.mkdir(mode=0o700)
         lock_environment = os.environ.copy()
         lock_environment["XDG_STATE_HOME"] = str(pathlib.Path(root, "state"))
         lock_environment["HOME"] = str(pathlib.Path(root, "home"))
@@ -204,6 +201,22 @@ def main() -> int:
             + field(str(lock_catalog.resolve()))
             + b"\0"
         )
+        seed_nonce = os.urandom(32)
+        seed_ipc = pathlib.Path(root, "seed-lock-operation")
+        seed_result = run_file_transport(
+            sidecar, seed_ipc, frame(2, lock_payload, seed_nonce),
+            env=lock_environment,
+        )
+        if seed_result.returncode != 0:
+            raise AssertionError("the external coordination lock was not created")
+        lock_files = list(
+            pathlib.Path(lock_environment["XDG_STATE_HOME"]).glob(
+                "modding-forge/skyrim-runtime-swapper/locks/*.lock"
+            )
+        )
+        if len(lock_files) != 1:
+            raise AssertionError("the resolved coordination lock is ambiguous")
+        lock_descriptor = os.open(lock_files[0], os.O_RDWR)
         try:
             fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             locked_nonce = os.urandom(32)

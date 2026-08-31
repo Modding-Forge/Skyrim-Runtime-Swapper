@@ -34,6 +34,8 @@ enum class PersistentRuntimeState { inactive, active, invalid };
 
 [[nodiscard]] bool target_runtime_is_active(
     const std::filesystem::path& game_root) noexcept;
+[[nodiscard]] bool source_runtime_is_active(
+    const std::filesystem::path& game_root) noexcept;
 
 [[nodiscard]] DowngradeResult finalize_fixed_target_runtime(
     const std::filesystem::path& game_root);

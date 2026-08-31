@@ -1,6 +1,7 @@
 #include <runtime_swapper/transaction_backend.hpp>
 
 #include <runtime_swapper/sha256.hpp>
+#include <runtime_swapper/release_version.hpp>
 
 #include "internal/fault_injection.hpp"
 
@@ -15,6 +16,7 @@
 #include <cstddef>
 #include <cwctype>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <iterator>
 #include <memory>
@@ -210,6 +212,18 @@ static_assert(offsetof(MountPointReparseData, path_buffer) == 16);
   const std::filesystem::path result(raw);
   CoTaskMemFree(raw);
   return result;
+}
+
+[[nodiscard]] std::optional<std::filesystem::path> existing_directory_ancestor(
+    std::filesystem::path path) {
+  std::error_code error;
+  while (!path.empty()) {
+    if (std::filesystem::is_directory(path, error) && !error) return path;
+    error.clear();
+    if (path == path.root_path()) break;
+    path = path.parent_path();
+  }
+  return std::nullopt;
 }
 
 [[nodiscard]] std::optional<std::vector<std::byte>> current_user_sid() {
@@ -504,6 +518,38 @@ static_assert(offsetof(MountPointReparseData, path_buffer) == 16);
   return !stream.bad() && text == locator_contents(id, vault, vault_volume);
 }
 
+[[nodiscard]] std::optional<std::filesystem::path> locator_vault_path(
+    const std::filesystem::path& locator, std::string_view id) {
+  std::ifstream stream(locator, std::ios::binary);
+  std::string magic;
+  std::string installation;
+  std::string vault;
+  if (!std::getline(stream, magic) || !std::getline(stream, installation) ||
+      !std::getline(stream, vault) || magic != "SRS-VAULT-LOCATOR-1" ||
+      installation != "installation=" + std::string(id) ||
+      !vault.starts_with("vault=")) {
+    return std::nullopt;
+  }
+  const auto encoded = vault.substr(6);
+  const std::u8string utf8(reinterpret_cast<const char8_t*>(encoded.data()),
+                           encoded.size());
+  auto path = std::filesystem::path(utf8);
+  return path.is_absolute() ? std::optional(path.lexically_normal())
+                            : std::nullopt;
+}
+
+[[nodiscard]] std::optional<std::filesystem::path> steam_library_root(
+    const std::filesystem::path& game_root) {
+  const auto common = game_root.parent_path();
+  const auto steamapps = common.parent_path();
+  if (!equal_ordinal(common.filename().wstring(), L"common") ||
+      !equal_ordinal(steamapps.filename().wstring(), L"steamapps") ||
+      steamapps.parent_path().empty()) {
+    return std::nullopt;
+  }
+  return steamapps.parent_path();
+}
+
 [[nodiscard]] bool vault_manifest_identity_matches(
     const std::filesystem::path& vault, std::string_view id,
     const VolumeIdentity& target_volume, const VolumeIdentity& vault_volume) {
@@ -596,6 +642,21 @@ static_assert(offsetof(MountPointReparseData, path_buffer) == 16);
           StorageOperation::none};
 }
 
+[[nodiscard]] BackendProbeResult attach_storage_paths(
+    BackendProbeResult result, const std::filesystem::path& base,
+    std::string_view installation) {
+  result.recovery_vault.value = result.vault_path;
+  result.target_cache.value =
+      base / L"cache" /
+      std::filesystem::path(patch_plan_hash_utf8.begin(),
+                            patch_plan_hash_utf8.begin() + 16);
+  result.coordination_lock.value =
+      base / L"locks" /
+      (std::filesystem::path(installation.begin(), installation.end()).wstring() +
+       L".lock");
+  return result;
+}
+
 class WindowsTransactionBackend final : public TransactionBackend {
  public:
   BackendProbeResult probe(const std::filesystem::path& managed_root,
@@ -645,9 +706,21 @@ class WindowsTransactionBackend final : public TransactionBackend {
                      L"Windows Local AppData could not be resolved for the recovery vault.",
                      *target);
     }
-    const auto vault_path = *state_root / L"Modding Forge" /
-                            L"Skyrim Runtime Swapper" / L"Vaults" /
-                            std::filesystem::path(id->begin(), id->end());
+    const auto system_base = *state_root / L"Modding Forge" /
+                             L"Skyrim Runtime Swapper";
+    const auto local_base = target->medium == StorageMedium::internal &&
+                                    target->native_durability
+                                ? steam_library_root(absolute)
+                                : std::nullopt;
+    const auto storage_base = local_base
+                                  ? *local_base / L".runtime-swapper"
+                                  : system_base;
+    auto vault_path = local_base
+                          ? storage_base / L"recovery" /
+                                std::filesystem::path(id->begin(), id->end()) /
+                                L"active"
+                          : system_base / L"Vaults" /
+                                std::filesystem::path(id->begin(), id->end());
     const auto locator = absolute / L".skyrim-runtime-swapper" / L"vault.locator";
     const auto locator_status = std::filesystem::symlink_status(locator, error);
     const bool locator_exists = !error && std::filesystem::exists(locator_status);
@@ -656,15 +729,42 @@ class WindowsTransactionBackend final : public TransactionBackend {
                      L"The active recovery-vault locator could not be inspected.", *target,
                      {}, vault_path, *id);
     }
+    std::optional<std::filesystem::path> recorded_vault;
+    if (locator_exists) {
+      recorded_vault = locator_vault_path(locator, *id);
+      const auto& recorded = recorded_vault;
+      if (recorded) {
+        if (path_has_unsupported_reparse_component(recorded->parent_path())) {
+          return blocked(L"active-vault-locator-invalid",
+                         L"The active recovery-vault locator is invalid.",
+                         *target, {}, vault_path, *id);
+        }
+        vault_path = *recorded;
+      }
+    }
     error.clear();
     const bool vault_exists = std::filesystem::is_directory(vault_path, error) && !error;
+    if (recorded_vault && !vault_exists) {
+      return blocked(L"active-vault-directory-missing",
+                     L"The recorded recovery-vault directory is missing.",
+                     *target, {}, vault_path, *id);
+    }
+    if (recorded_vault &&
+        !std::filesystem::is_regular_file(vault_path / L"manifest.v2", error)) {
+      return blocked(L"active-vault-manifest-missing",
+                     L"The recorded recovery-vault manifest is missing.",
+                     *target, {}, vault_path, *id);
+    }
+    error.clear();
     if (path_has_unsupported_reparse_component(vault_path.parent_path())) {
       return blocked(L"vault-parent-reparse",
                      L"The automatic recovery-vault path contains a junction or reparse "
                      L"point.", *target, {}, vault_path, *id);
     }
-    auto vault = vault_exists ? inspect_volume(vault_path)
-                              : inspect_volume(*state_root);
+    const auto vault_anchor = vault_exists
+                                  ? std::optional(vault_path)
+                                  : existing_directory_ancestor(storage_base);
+    auto vault = vault_anchor ? inspect_volume(*vault_anchor) : std::nullopt;
     const bool locator_matches_vault =
         locator_exists && std::filesystem::is_regular_file(locator_status) &&
         vault_exists && vault && locator_matches(locator, *id, vault_path, *vault);
@@ -683,7 +783,7 @@ class WindowsTransactionBackend final : public TransactionBackend {
                      L"The automatic recovery vault is not on a stable internal NTFS "
                      L"volume.", *target, vault.value_or(VolumeIdentity{}), vault_path, *id);
     }
-    if (!has_free_space(vault_exists ? vault_path : *state_root,
+    if (!vault_anchor || !has_free_space(*vault_anchor,
                         required_vault_bytes + vault_reserve_bytes)) {
       return blocked(L"vault-insufficient-space",
                      L"The recovery vault does not have enough free space including the "
@@ -710,7 +810,7 @@ class WindowsTransactionBackend final : public TransactionBackend {
                      *target, *vault, vault_path, *id);
     }
     if (!prepare_vault) {
-      return {ExitCode::success,
+      return attach_storage_paths({ExitCode::success,
               candidate_mode,
               *target,
               *vault,
@@ -723,7 +823,7 @@ class WindowsTransactionBackend final : public TransactionBackend {
                          ? L"persistent-recovery-required"
                          : L"unclassified-local-storage"),
               mode_reason(candidate_mode),
-              operations_for(candidate_mode)};
+              operations_for(candidate_mode)}, storage_base, *id);
     }
 
     std::filesystem::create_directories(vault_path, error);
@@ -768,7 +868,7 @@ class WindowsTransactionBackend final : public TransactionBackend {
                      L"could not be repaired.", *target, *vault, vault_path, *id);
     }
 
-    return {ExitCode::success,
+    return attach_storage_paths({ExitCode::success,
             mode,
             *target,
             *vault,
@@ -780,7 +880,7 @@ class WindowsTransactionBackend final : public TransactionBackend {
                                                  ? L"persistent-recovery-required"
                                                  : L"unclassified-local-storage"),
             mode_reason(mode),
-            operations_for(mode)};
+            operations_for(mode)}, storage_base, *id);
   }
 
   bool flush_file(const std::filesystem::path& file) override {
@@ -966,6 +1066,85 @@ class WindowsTransactionBackend final : public TransactionBackend {
     if (core::fault_injected("remove.after-unlink")) return false;
     return attempt_directory_flush(path.parent_path()) &&
            !core::fault_injected("remove.after-sync");
+  }
+
+  bool durable_remove_tree(const std::filesystem::path& root) override {
+    if (core::fault_injected("remove-tree.before") || root.empty() ||
+        root == root.root_path()) {
+      return false;
+    }
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(root, error);
+    if (error == std::errc::no_such_file_or_directory) return true;
+    if (error || !std::filesystem::is_directory(status) ||
+        std::filesystem::is_symlink(status) ||
+        path_has_unsupported_reparse_component(root)) {
+      return false;
+    }
+
+    std::function<bool(const std::filesystem::path&)> remove_directory;
+    remove_directory = [&](const std::filesystem::path& directory) {
+      std::error_code iteration_error;
+      for (std::filesystem::directory_iterator iterator(directory, iteration_error), end;
+           !iteration_error && iterator != end; iterator.increment(iteration_error)) {
+        const auto child = iterator->path();
+        const auto child_status = std::filesystem::symlink_status(child, iteration_error);
+        if (iteration_error || std::filesystem::is_symlink(child_status) ||
+            path_has_unsupported_reparse_component(child)) {
+          return false;
+        }
+        if (std::filesystem::is_directory(child_status)) {
+          if (!remove_directory(child)) return false;
+        } else if (std::filesystem::is_regular_file(child_status)) {
+          UniqueHandle child_handle(CreateFileW(
+              child.c_str(), FILE_READ_ATTRIBUTES,
+              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL |
+                                 FILE_FLAG_OPEN_REPARSE_POINT,
+              nullptr));
+          FILE_STANDARD_INFO child_standard{};
+          if (!child_handle ||
+              !GetFileInformationByHandleEx(child_handle.get(), FileStandardInfo,
+                                            &child_standard,
+                                            sizeof(child_standard)) ||
+              child_standard.NumberOfLinks != 1) {
+            return false;
+          }
+          child_handle.reset();
+          if (!durable_remove(child)) return false;
+        } else {
+          return false;
+        }
+      }
+      if (iteration_error) return false;
+
+      UniqueHandle handle(CreateFileW(
+          directory.c_str(), DELETE | FILE_READ_ATTRIBUTES,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+          OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS |
+                             FILE_FLAG_OPEN_REPARSE_POINT,
+          nullptr));
+      FILE_ATTRIBUTE_TAG_INFO attributes{};
+      if (!handle ||
+          !GetFileInformationByHandleEx(handle.get(), FileAttributeTagInfo,
+                                        &attributes, sizeof(attributes)) ||
+          (attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+          (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return false;
+      }
+      FILE_DISPOSITION_INFO_EX disposition{
+          FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS |
+          FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE};
+      if (!SetFileInformationByHandle(handle.get(), FileDispositionInfoEx,
+                                      &disposition, sizeof(disposition))) {
+        return false;
+      }
+      handle.reset();
+      return attempt_directory_flush(directory.parent_path());
+    };
+
+    return remove_directory(root) &&
+           !core::fault_injected("remove-tree.after-sync");
   }
 
   bool write_atomic(const std::filesystem::path& path, std::string_view bytes) override {

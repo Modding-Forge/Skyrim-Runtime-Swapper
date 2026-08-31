@@ -1,6 +1,7 @@
 #pragma once
 
 #include <runtime_swapper/exit_code.hpp>
+#include <runtime_swapper/transaction_backend.hpp>
 
 #include <windows.h>
 
@@ -21,7 +22,7 @@ struct SessionResult {
 [[nodiscard]] std::wstring operation_mutex_name();
 [[nodiscard]] std::wstring session_complete_event_name();
 [[nodiscard]] UniqueHandle acquire_transaction_lock(
-    const std::filesystem::path& game_root);
+    const CoordinationLockPath& lock_path);
 
 [[nodiscard]] bool launch_session_watcher(
     const std::filesystem::path& helper, const std::filesystem::path& game_root,

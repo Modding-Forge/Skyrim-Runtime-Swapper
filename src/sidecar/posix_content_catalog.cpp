@@ -198,6 +198,24 @@ struct Record {
 
 }  // namespace
 
+ContentCatalogResult inspect_content_catalog_recovery_state() {
+  const auto catalog = catalog_path();
+  if (!catalog) {
+    return {false, false, L"The native ContentCatalog path is unavailable."};
+  }
+  for (const auto& path : {hold_path(*catalog), journal_path(*catalog)}) {
+    std::error_code error;
+    const auto status = inspect_regular_file(path, error);
+    if (status == RegularFileStatus::missing && !error) continue;
+    if (error || status != RegularFileStatus::regular) {
+      return {false, false,
+              L"ContentCatalog recovery state could not be inspected safely."};
+    }
+    return {false, false, L"ContentCatalog recovery is still pending."};
+  }
+  return {true, false, {}};
+}
+
 ContentCatalogResult recover_content_catalog(const std::filesystem::path& game_root) {
   const auto catalog = catalog_path();
   return catalog ? recover_impl(game_root, *catalog)

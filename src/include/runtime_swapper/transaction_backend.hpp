@@ -48,6 +48,18 @@ struct VolumeIdentity {
   bool native_durability{};
 };
 
+struct RecoveryVaultPath {
+  std::filesystem::path value;
+};
+
+struct TargetCachePath {
+  std::filesystem::path value;
+};
+
+struct CoordinationLockPath {
+  std::filesystem::path value;
+};
+
 struct BackendProbeResult {
   ExitCode code{ExitCode::internal_error};
   SafetyMode mode{SafetyMode::hard_blocked};
@@ -59,6 +71,9 @@ struct BackendProbeResult {
   std::wstring technical_reason;
   std::wstring message;
   StorageOperation allowed_operations{StorageOperation::none};
+  RecoveryVaultPath recovery_vault;
+  TargetCachePath target_cache;
+  CoordinationLockPath coordination_lock;
 
   [[nodiscard]] bool success() const noexcept { return code == ExitCode::success; }
   [[nodiscard]] bool allows(StorageOperation operation) const noexcept {
@@ -110,6 +125,13 @@ class TransactionBackend {
   [[nodiscard]] virtual bool move_atomic(const std::filesystem::path& source,
                                          const std::filesystem::path& destination) = 0;
   [[nodiscard]] virtual bool durable_remove(const std::filesystem::path& path) = 0;
+  // Removes a private, user-owned tree without following links. Implementations
+  // must synchronize every directory whose entries are changed.
+  [[nodiscard]] virtual bool durable_remove_tree(
+      const std::filesystem::path& root) {
+    (void)root;
+    return false;
+  }
   [[nodiscard]] virtual bool write_atomic(const std::filesystem::path& path,
                                           std::string_view bytes) = 0;
   [[nodiscard]] virtual bool sync_parent(const std::filesystem::path& path) = 0;

@@ -42,17 +42,34 @@ constexpr std::string_view restore_intent = "SRS-PERSISTENT-RESTORE-1\n";
 
 [[nodiscard]] InstallationOperationResult failure(
     ExitCode code, BackendProbeResult backend, std::wstring message,
-    bool changed = false) {
+    bool changed = false,
+    RecoveryLifecyclePhase phase = RecoveryLifecyclePhase::inspect,
+    std::wstring technical_detail = {}) {
   InstallationOperationResult result;
   result.code = code;
   result.backend = std::move(backend);
   result.changed = changed;
+  result.lifecycle_phase = phase;
+  result.technical_detail = technical_detail.empty() ? message
+                                                      : std::move(technical_detail);
   result.message = std::move(message);
   return result;
 }
 
 [[nodiscard]] InstallationOperationResult recovered_source(
     const std::filesystem::path& game_root, BackendProbeResult backend) {
+  const auto lifecycle = inspect_recovery_lifecycle(game_root);
+  if (!lifecycle) {
+    return failure(ExitCode::journal_corrupt, std::move(backend),
+                   L"The recovery lifecycle metadata is invalid.");
+  }
+  if (*lifecycle != RecoveryLifecycleState::clean_source &&
+      *lifecycle != RecoveryLifecycleState::restoring &&
+      !transition_recovery_lifecycle(game_root,
+                                     RecoveryLifecycleState::restoring)) {
+    return failure(ExitCode::commit_failed, std::move(backend),
+                   L"The pending recovery state could not be committed.");
+  }
   const auto runtime = recover_runtime(game_root);
   if (!runtime.success()) {
     return failure(runtime.code, std::move(backend), runtime.message,
@@ -70,15 +87,25 @@ constexpr std::string_view restore_intent = "SRS-PERSISTENT-RESTORE-1\n";
                    catalog.message,
                    runtime.changed_files || creation_club.changed || catalog.changed);
   }
+  const auto cleanup = finalize_recovery_storage(game_root, backend);
+  if (!cleanup.success()) {
+    return failure(cleanup.code, std::move(backend),
+                   L"The source state is verified, but recovery cleanup remains pending: " +
+                       cleanup.technical_detail,
+                   runtime.changed_files || creation_club.changed || catalog.changed,
+                   cleanup.phase, cleanup.technical_detail);
+  }
   InstallationOperationResult result;
   result.code = ExitCode::success;
   result.backend = std::move(backend);
   result.runtime_changed = runtime.changed_files;
   result.creation_club_changed = creation_club.changed;
   result.content_catalog_changed = catalog.changed;
+  result.lifecycle_state = RecoveryLifecycleState::clean_source;
+  result.lifecycle_phase = RecoveryLifecyclePhase::complete;
   result.changed = result.runtime_changed || result.creation_club_changed ||
                    result.content_catalog_changed;
-  result.message = L"The installation is in a verified recoverable source state.";
+  result.message = L"The installation is in a verified source state.";
   return result;
 }
 
@@ -89,6 +116,11 @@ constexpr std::string_view restore_intent = "SRS-PERSISTENT-RESTORE-1\n";
       !write_recovery_metadata(game_root, restore_intent_name, restore_intent)) {
     return failure(ExitCode::commit_failed, std::move(backend),
                    L"The persistent restore intent could not be committed to the vault.");
+  }
+  if (!transition_recovery_lifecycle(game_root,
+                                     RecoveryLifecycleState::restoring)) {
+    return failure(ExitCode::commit_failed, std::move(backend),
+                   L"The persistent restore state could not be committed.");
   }
 
   const auto creation_club = recover_creation_club_content(game_root);
@@ -113,6 +145,14 @@ constexpr std::string_view restore_intent = "SRS-PERSISTENT-RESTORE-1\n";
                    L"pending.", true);
   }
 
+  const auto cleanup = finalize_recovery_storage(game_root, backend);
+  if (!cleanup.success()) {
+    return failure(cleanup.code, std::move(backend),
+                   L"Skyrim 1.7.104 was verified, but recovery cleanup remains pending: " +
+                       cleanup.technical_detail,
+                   true, cleanup.phase, cleanup.technical_detail);
+  }
+
   InstallationOperationResult result;
   result.code = ExitCode::success;
   result.backend = std::move(backend);
@@ -120,6 +160,8 @@ constexpr std::string_view restore_intent = "SRS-PERSISTENT-RESTORE-1\n";
   result.runtime_changed = runtime.changed_files;
   result.creation_club_changed = creation_club.changed;
   result.content_catalog_changed = catalog.changed;
+  result.lifecycle_state = RecoveryLifecycleState::clean_source;
+  result.lifecycle_phase = RecoveryLifecyclePhase::complete;
   result.message = L"Skyrim 1.7.104 and all persistently managed content were restored.";
   return result;
 }
@@ -129,6 +171,11 @@ constexpr std::string_view restore_intent = "SRS-PERSISTENT-RESTORE-1\n";
     bool risk_accepted, bool catalog_persistent) {
   auto source = recovered_source(game_root, backend);
   if (!source.success()) return source;
+  if (!transition_recovery_lifecycle(game_root,
+                                     RecoveryLifecycleState::preparing)) {
+    return failure(ExitCode::commit_failed, std::move(backend),
+                   L"The persistent preparation state could not be committed.");
+  }
 
   auto runtime = downgrade_runtime_persistent_after_recovery(
       game_root, game_root / L"RuntimeSwap" / L"patches", risk_accepted);
@@ -156,6 +203,11 @@ constexpr std::string_view restore_intent = "SRS-PERSISTENT-RESTORE-1\n";
     return failure(ExitCode::commit_failed, std::move(backend),
                    L"The persistent target state failed final verification.", true);
   }
+  if (!transition_recovery_lifecycle(game_root,
+                                     RecoveryLifecycleState::target_active)) {
+    return failure(ExitCode::commit_failed, std::move(backend),
+                   L"The verified target state could not be committed.", true);
+  }
 
   const auto marker = commit_persistent_runtime(game_root, risk_accepted,
                                                 catalog_persistent);
@@ -170,6 +222,11 @@ constexpr std::string_view restore_intent = "SRS-PERSISTENT-RESTORE-1\n";
                                                        : finalized.message),
                    true);
   }
+  if (!transition_recovery_lifecycle(game_root,
+                                     RecoveryLifecycleState::persistent)) {
+    return failure(ExitCode::commit_failed, std::move(backend),
+                   L"The persistent lifecycle state could not be committed.", true);
+  }
 
   InstallationOperationResult result;
   result.code = ExitCode::success;
@@ -180,6 +237,8 @@ constexpr std::string_view restore_intent = "SRS-PERSISTENT-RESTORE-1\n";
   result.creation_club_changed = creation_club.changed;
   result.content_catalog_changed = catalog.changed;
   result.content_catalog_persistent = catalog_persistent;
+  result.lifecycle_state = RecoveryLifecycleState::persistent;
+  result.lifecycle_phase = RecoveryLifecyclePhase::complete;
   result.message = L"Skyrim " + std::wstring(target_version_label) +
                    L" is active persistently with verified recovery in " +
                    result.backend.vault_path.wstring() + L".";
@@ -192,6 +251,19 @@ InstallationOperationResult probe_installation_storage(
     const std::filesystem::path& game_root) {
   InstallationOperationResult result;
   result.backend = transaction_backend().probe(game_root);
+  if (!result.backend.success() &&
+      result.backend.technical_reason.starts_with(L"active-vault")) {
+    const auto catalog = inspect_content_catalog_recovery_state();
+    const auto migration = retire_orphaned_recovery_locator(
+        game_root, catalog.success);
+    if (migration.success() && migration.changed) {
+      result.backend = transaction_backend().probe(game_root);
+      result.changed = true;
+      result.lifecycle_state = RecoveryLifecycleState::clean_source;
+      result.lifecycle_phase = migration.phase;
+      result.technical_detail = migration.technical_detail;
+    }
+  }
   result.code = result.backend.code;
   result.message = result.backend.message;
   if (!result.backend.success()) return result;
@@ -268,12 +340,22 @@ InstallationOperationResult recover_installation(
                            ? verify_persistent_content_catalog(game_root)
                            : recover_content_catalog(game_root);
   if (runtime.success() && creation_club.success && catalog.success) {
+    const auto lifecycle = inspect_recovery_lifecycle(game_root);
+    if (!lifecycle ||
+        (*lifecycle != RecoveryLifecycleState::persistent &&
+         !transition_recovery_lifecycle(
+             game_root, RecoveryLifecycleState::persistent))) {
+      return failure(ExitCode::commit_failed, std::move(backend),
+                     L"The migrated persistent lifecycle could not be committed.");
+    }
     InstallationOperationResult result;
     result.code = ExitCode::success;
     result.backend = std::move(backend);
     result.persistent = true;
     result.content_catalog_persistent = catalog_persistent;
     result.content_catalog_changed = catalog.changed;
+    result.lifecycle_state = RecoveryLifecycleState::persistent;
+    result.lifecycle_phase = RecoveryLifecyclePhase::complete;
     result.changed = catalog.changed;
     result.message = L"The persistent target state and recovery vault are verified.";
     return result;
@@ -289,6 +371,11 @@ InstallationOperationResult activate_session_target(
   if (!recovered.backend.allows(StorageOperation::activate_session)) {
     return failure(ExitCode::unsupported_filesystem, recovered.backend,
                    L"This volume supports only a persistent downgrade.");
+  }
+  if (!transition_recovery_lifecycle(game_root,
+                                     RecoveryLifecycleState::preparing)) {
+    return failure(ExitCode::commit_failed, recovered.backend,
+                   L"The session preparation state could not be committed.");
   }
 
   auto runtime = downgrade_runtime_after_recovery(
@@ -311,11 +398,21 @@ InstallationOperationResult activate_session_target(
                    !creation_club.success ? creation_club.message : catalog.message,
                    true);
   }
+  if (!transition_recovery_lifecycle(game_root,
+                                     RecoveryLifecycleState::target_active)) {
+    (void)recover_creation_club_content(game_root);
+    (void)recover_content_catalog(game_root);
+    (void)restore_runtime(game_root);
+    return failure(ExitCode::commit_failed, recovered.backend,
+                   L"The verified session target state could not be committed.", true);
+  }
 
   recovered.changed = runtime.changed_files || creation_club.changed || catalog.changed;
   recovered.runtime_changed = runtime.changed_files;
   recovered.creation_club_changed = creation_club.changed;
   recovered.content_catalog_changed = catalog.changed;
+  recovered.lifecycle_state = RecoveryLifecycleState::target_active;
+  recovered.lifecycle_phase = RecoveryLifecyclePhase::complete;
   recovered.message = runtime.message;
   return recovered;
 }

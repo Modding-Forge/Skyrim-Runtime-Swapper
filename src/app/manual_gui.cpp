@@ -104,7 +104,7 @@ class ManualOperationLock {
   }
   UniqueHandle transaction_lock;
   if (!is_wine_environment()) {
-    transaction_lock = acquire_transaction_lock(game_root);
+    transaction_lock = acquire_transaction_lock(backend.coordination_lock);
     if (!transaction_lock) return acquire_error();
   }
   if (backend.mode == SafetyMode::persistent_with_warning) {
@@ -129,7 +129,8 @@ class ManualOperationLock {
   if (!is_wine_environment()) {
     const auto probed = probe_installation_storage(game_root);
     if (!probed.success()) return {false, probed.message};
-    transaction_lock = acquire_transaction_lock(game_root);
+    transaction_lock = acquire_transaction_lock(
+        probed.backend.coordination_lock);
     if (!transaction_lock) return acquire_error();
   }
 

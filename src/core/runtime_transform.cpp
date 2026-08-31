@@ -520,12 +520,6 @@ using SteadyClock = std::chrono::steady_clock;
                   quote_path(managed.logical)};
     }
   }
-  const auto backup_result = ensure_source_backups(game_root);
-  if (!backup_result.success()) {
-    return {ExitCode::recovery_failed, changed,
-            L"The source runtime was recovered, but its complete recovery-vault "
-            L"manifest could not be committed: " + backup_result.message};
-  }
   if (!recovery.append(JournalPhase::recovery_completed,
                        std::numeric_limits<std::uint32_t>::max())) {
     return {ExitCode::recovery_failed, changed,
@@ -572,6 +566,24 @@ bool target_runtime_is_active_internal(
       if (!managed || (!plan.source_present && managed->redirected) ||
           !matches_state(managed->effective, plan.target_present,
                          plan.target_sha256)) {
+        return false;
+      }
+    }
+    return true;
+  } catch (const std::exception&) {
+    return false;
+  }
+}
+
+bool source_runtime_is_active_internal(
+    const std::filesystem::path& game_root) noexcept {
+  try {
+    for (const auto& plan : patch_plan) {
+      const auto managed = resolve_managed_file(
+          game_root, utf8_path(plan.relative_file));
+      if (!managed || (!plan.source_present && managed->redirected) ||
+          !matches_state(managed->effective, plan.source_present,
+                         plan.source_sha256)) {
         return false;
       }
     }
@@ -713,11 +725,14 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
 
     const auto staging_started = SteadyClock::now();
     const bool cache_targets = vault->probe.mode == SafetyMode::automatic;
+    const auto target_cache = cache_targets
+                                  ? resolve_target_cache_layout(game_root)
+                                  : std::nullopt;
     for (auto& item : work) {
-      if (cache_targets && item.plan->target_present) {
+      if (target_cache && item.plan->target_present) {
         ++target_cache_candidates;
-        item.cached_target = vault_object_available(
-            *vault, item.plan->target_sha256, item.plan->target_size);
+        item.cached_target = target_cache_object_available(
+            *target_cache, item.plan->target_sha256, item.plan->target_size);
       }
       if (!hash_matches(item.patch, item.plan->forward_patch_sha256)) {
         (void)clean_transaction_tree(game_root);
@@ -751,8 +766,8 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
       }
       bool staged = false;
       if (item.cached_target) {
-        staged = materialize_verified_vault_object(
-            *vault, item.plan->target_sha256, item.plan->target_size,
+        staged = materialize_target_cache_object(
+            *target_cache, item.plan->target_sha256, item.plan->target_size,
             item.staged);
         if (staged) ++target_cache_hits;
       }
@@ -771,9 +786,9 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
         const auto patched = apply_hdiff_patch(patch_input, item.patch, item.staged);
         staged = patched.success && backend.flush_file(item.staged) &&
                  hash_matches(item.staged, item.plan->target_sha256);
-        if (staged && cache_targets && item.plan->target_present) {
-          (void)commit_verified_vault_object(
-              *vault, item.staged, item.plan->target_sha256,
+        if (staged && target_cache && item.plan->target_present) {
+          (void)commit_target_cache_object(
+              *target_cache, item.staged, item.plan->target_sha256,
               item.plan->target_size);
         }
       }

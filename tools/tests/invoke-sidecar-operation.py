@@ -13,7 +13,7 @@ import tempfile
 
 
 MAGIC = 0x50535253
-VERSION = 2
+VERSION = 3
 MAXIMUM_PAYLOAD = 1024 * 1024
 HEADER = struct.Struct("<IHHI32s")
 OPERATIONS = {
@@ -78,8 +78,12 @@ def parse_response(response: bytes, operation: int, nonce: bytes) -> dict[str, o
     mode, offset = take_integer(payload, offset)
     flags, offset = take_integer(payload, offset)
     allowed_operations, offset = take_integer(payload, offset)
+    lifecycle_state, offset = take_integer(payload, offset)
+    lifecycle_phase, offset = take_integer(payload, offset)
     installation, offset = take_string(payload, offset)
     vault, offset = take_string(payload, offset)
+    target_cache, offset = take_string(payload, offset)
+    coordination_lock, offset = take_string(payload, offset)
     target_id, offset = take_string(payload, offset)
     target_filesystem, offset = take_string(payload, offset)
     target_medium, offset = take_integer(payload, offset)
@@ -91,6 +95,7 @@ def parse_response(response: bytes, operation: int, nonce: bytes) -> dict[str, o
     target_description, offset = take_string(payload, offset)
     vault_description, offset = take_string(payload, offset)
     technical_reason, offset = take_string(payload, offset)
+    technical_detail, offset = take_string(payload, offset)
     message, offset = take_string(payload, offset)
     if offset != len(payload):
         raise AssertionError("the sidecar response has trailing data")
@@ -99,8 +104,12 @@ def parse_response(response: bytes, operation: int, nonce: bytes) -> dict[str, o
         "mode": mode,
         "flags": flags,
         "allowed_operations": allowed_operations,
+        "lifecycle_state": lifecycle_state,
+        "lifecycle_phase": lifecycle_phase,
         "installation": installation,
         "vault": vault,
+        "target_cache": target_cache,
+        "coordination_lock": coordination_lock,
         "target_id": target_id,
         "target_filesystem": target_filesystem,
         "target_medium": target_medium,
@@ -112,6 +121,7 @@ def parse_response(response: bytes, operation: int, nonce: bytes) -> dict[str, o
         "target_description": target_description,
         "vault_description": vault_description,
         "technical_reason": technical_reason,
+        "technical_detail": technical_detail,
         "message": message,
         "persistent": bool(flags & 2),
     }

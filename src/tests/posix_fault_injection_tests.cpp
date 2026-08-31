@@ -165,6 +165,34 @@ int main() {
     if (backend.durable_remove(removed) || std::filesystem::exists(removed)) return 16;
     clear_fault();
   }
+  const auto removable_tree = temporary.path() / "private-tree";
+  write_file(removable_tree / "nested" / "object", "verified");
+  fault("remove-tree.before");
+  if (backend.durable_remove_tree(removable_tree) ||
+      !std::filesystem::exists(removable_tree / "nested" / "object")) {
+    return 24;
+  }
+  clear_fault();
+  if (!backend.durable_remove_tree(removable_tree) ||
+      std::filesystem::exists(removable_tree)) {
+    return 22;
+  }
+  const auto interrupted_cleanup = temporary.path() / "interrupted-cleanup";
+  write_file(interrupted_cleanup / "object", "verified");
+  fault("remove-tree.after-sync");
+  if (backend.durable_remove_tree(interrupted_cleanup) ||
+      std::filesystem::exists(interrupted_cleanup)) {
+    return 25;
+  }
+  clear_fault();
+  const auto unsafe_tree = temporary.path() / "unsafe-private-tree";
+  const auto outside_alias = temporary.path() / "outside-hardlink";
+  write_file(unsafe_tree / "object", "preserved");
+  std::filesystem::create_hard_link(unsafe_tree / "object", outside_alias);
+  if (backend.durable_remove_tree(unsafe_tree) ||
+      !std::filesystem::exists(unsafe_tree / "object")) {
+    return 23;
+  }
 
   const auto game = temporary.path() / "game";
   const auto state = temporary.path() / "state";
@@ -177,7 +205,29 @@ int main() {
     return 17;
   }
   const auto vault_probe = backend.probe(game, 0, true);
-  if (!vault_probe.success()) return 18;
+  if (!vault_probe.success() ||
+      vault_probe.recovery_vault.value != vault_probe.vault_path ||
+      !vault_probe.target_cache.value.is_absolute() ||
+      !vault_probe.coordination_lock.value.is_absolute() ||
+      vault_probe.target_cache.value == vault_probe.vault_path ||
+      vault_probe.coordination_lock.value == vault_probe.vault_path) {
+    return 18;
+  }
+  const auto steam_game = temporary.path() / "SteamLibrary" / "steamapps" /
+                          "common" / "Skyrim Special Edition";
+  std::filesystem::create_directories(steam_game);
+  const auto steam_probe = backend.probe(steam_game);
+  if (steam_probe.success() && steam_probe.mode == SafetyMode::automatic) {
+    const auto local_storage = temporary.path() / "SteamLibrary" /
+                               ".runtime-swapper";
+    if (steam_probe.vault_path.lexically_relative(local_storage).empty() ||
+        steam_probe.target_cache.value.parent_path().parent_path() !=
+            local_storage ||
+        steam_probe.coordination_lock.value.parent_path().parent_path() !=
+            local_storage) {
+      return 21;
+    }
+  }
   const auto manifest = vault_probe.vault_path / "manifest.v2";
   const auto identity_manifest =
       std::string("SRS-VAULT-MANIFEST-2\ninstallation=") +

@@ -70,10 +70,9 @@ std::wstring session_complete_event_name() {
 }
 
 UniqueHandle acquire_transaction_lock(
-    const std::filesystem::path& game_root) {
-  const auto lock_path =
-      game_root / L".skyrim-runtime-swapper" / L"transaction.lock";
-  if (!managed_path_is_safe(game_root) ||
+    const CoordinationLockPath& resolved_lock) {
+  const auto& lock_path = resolved_lock.value;
+  if (lock_path.empty() || !lock_path.is_absolute() ||
       !managed_path_is_safe(lock_path.parent_path())) {
     return {};
   }
@@ -216,7 +215,8 @@ SessionResult watch_session_and_restore(const std::filesystem::path& game_root,
     if (!probed.success()) {
       return {probed.code, probed.message};
     }
-    transaction_lock = acquire_transaction_lock(game_root);
+    transaction_lock = acquire_transaction_lock(
+        probed.backend.coordination_lock);
     if (!transaction_lock) {
       return {ExitCode::another_instance_failed,
               L"The watcher could not acquire the durable runtime transaction lock."};
@@ -234,30 +234,11 @@ SessionResult watch_session_and_restore(const std::filesystem::path& game_root,
                : SessionResult{restored.code, restored.message};
   }
 
-  if (restore_runtime_after_session) {
-    const auto restored = restore_runtime(game_root);
-    log_diagnostic(L"Watcher runtime restore: " + restored.message);
+  if (restore_runtime_after_session || restore_content_catalog_after_session ||
+      restore_creation_club_after_session) {
+    const auto restored = recover_installation(game_root);
+    log_diagnostic(L"Watcher installation restore: " + restored.message);
     if (!restored.success()) return {restored.code, restored.message};
-  }
-  if (restore_creation_club_after_session) {
-    const auto restored = recover_creation_club_content(game_root);
-    log_diagnostic(restored.success
-                       ? L"Watcher Creation Club restore: complete"
-                       : L"Watcher Creation Club restore failed: " + restored.message);
-    if (!restored.success) {
-      return {ExitCode::creation_club_cleanup_failed,
-              L"Creation Club content could not be restored after the game session."};
-    }
-  }
-  if (restore_content_catalog_after_session) {
-    const auto restored = restore_content_catalog(game_root);
-    log_diagnostic(restored.success ? L"Watcher ContentCatalog restore: complete"
-                                    : L"Watcher ContentCatalog restore failed: " +
-                                          restored.message);
-    if (!restored.success) {
-      return {ExitCode::content_catalog_cleanup_failed,
-              L"ContentCatalog.txt could not be restored after the game session."};
-    }
   }
   return {};
 }

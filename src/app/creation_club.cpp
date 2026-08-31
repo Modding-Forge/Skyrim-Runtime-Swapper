@@ -371,9 +371,24 @@ CreationClubResult recover_creation_club_content(
         return {false, changed,
                 L"Creation Club recovery completed, but vault metadata remains."};
       }
-      std::filesystem::remove_all(root, error);
-      return {!error, changed,
-              error ? L"The Creation Club quarantine could not be cleaned up." : L""};
+      for (const auto& file : *files) {
+        const auto held = root / file.name;
+        error.clear();
+        const auto held_status = inspect_regular_file(held, error);
+        if (error ||
+            (held_status != RegularFileStatus::missing &&
+             (held_status != RegularFileStatus::regular ||
+              !matches(held, file) || !backend.durable_remove(held)))) {
+          return {false, changed,
+                  L"A verified Creation Club quarantine file could not be "
+                  L"removed safely."};
+        }
+      }
+      if (!cleanup_empty_quarantine(game_root)) {
+        return {false, changed,
+                L"Unknown content remains in the Creation Club quarantine."};
+      }
+      return {true, changed, {}};
     }
     if (!std::filesystem::exists(root, error)) return {!error, false, {}};
     if (error || !std::filesystem::is_directory(root, error) || error) {

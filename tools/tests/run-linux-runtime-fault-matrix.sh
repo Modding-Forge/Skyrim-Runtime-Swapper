@@ -21,9 +21,11 @@ for command in cmp cp find realpath timeout; do
   }
 done
 
-test_root="$(mktemp -d -p "${TMPDIR:-/tmp}" srs-runtime-faults.XXXXXX)"
-if [[ "$test_root" != /tmp/srs-runtime-faults.* &&
-      "$test_root" != "${TMPDIR:-/tmp}"/srs-runtime-faults.* ]]; then
+test_base="${SRS_TEST_ROOT_BASE:-${XDG_STATE_HOME:-$HOME/.local/state}}"
+mkdir -p -m 0700 "$test_base"
+test_base="$(realpath "$test_base")"
+test_root="$(mktemp -d -p "$test_base" srs-runtime-faults.XXXXXX)"
+if [[ "$test_root" != "$test_base"/srs-runtime-faults.* ]]; then
   echo "refusing unexpected test root: $test_root" >&2
   exit 2
 fi

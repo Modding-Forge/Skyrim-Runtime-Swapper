@@ -112,6 +112,26 @@ int run_tests() {
       !read_file(locator).starts_with("SRS-VAULT-LOCATOR-1\n")) {
     return 25;
   }
+  if (!commit_verified_runtime_manifest(*vault, temporary.path())) return 30;
+  auto compatible_manifest = read_file(vault->manifest);
+  const auto producer_begin = compatible_manifest.find("producerVersion=");
+  const auto producer_end = compatible_manifest.find('\n', producer_begin);
+  if (producer_begin == std::string::npos || producer_end == std::string::npos) {
+    return 31;
+  }
+  compatible_manifest.replace(producer_begin, producer_end - producer_begin,
+                              "producerVersion=1.2.0-rc5");
+  write_file(vault->manifest, compatible_manifest);
+  if (!runtime_manifest_matches(*vault)) return 32;
+  auto legacy_manifest = compatible_manifest;
+  const auto metadata_begin = legacy_manifest.find("formatVersion=");
+  const auto entries_begin = legacy_manifest.find("entries=", metadata_begin);
+  if (metadata_begin == std::string::npos || entries_begin == std::string::npos) {
+    return 33;
+  }
+  legacy_manifest.erase(metadata_begin, entries_begin - metadata_begin);
+  write_file(vault->manifest, legacy_manifest);
+  if (!runtime_manifest_matches(*vault)) return 34;
   const auto original = temporary.path() / L"original.bin";
   write_file(original, "original");
   const auto hash = sha256_file(original);

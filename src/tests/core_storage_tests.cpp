@@ -213,9 +213,44 @@ int main() {
   auto& backend = runtime_swapper::transaction_backend();
   const auto backend_probe = backend.probe(temporary.path());
   if (!backend_probe.success() || !backend_probe.vault_path.is_absolute() ||
+      backend_probe.recovery_vault.value != backend_probe.vault_path ||
+      !backend_probe.target_cache.value.is_absolute() ||
+      !backend_probe.coordination_lock.value.is_absolute() ||
+      backend_probe.target_cache.value == backend_probe.vault_path ||
+      backend_probe.coordination_lock.value == backend_probe.vault_path ||
       backend_probe.installation_id.find("skyrimse-") != 0 ||
       !backend_probe.allows(runtime_swapper::StorageOperation::recover)) {
     return 5;
+  }
+  const auto removable_tree = temporary.path() / L"private-tree";
+  write_file(removable_tree / L"nested" / L"object", "verified");
+  if (!backend.durable_remove_tree(removable_tree) ||
+      std::filesystem::exists(removable_tree)) {
+    return 41;
+  }
+  const auto unsafe_tree = temporary.path() / L"unsafe-private-tree";
+  const auto outside_alias = temporary.path() / L"outside-hardlink";
+  write_file(unsafe_tree / L"object", "preserved");
+  if (!CreateHardLinkW(outside_alias.c_str(),
+                       (unsafe_tree / L"object").c_str(), nullptr) ||
+      backend.durable_remove_tree(unsafe_tree) ||
+      !std::filesystem::exists(unsafe_tree / L"object")) {
+    return 42;
+  }
+  const auto steam_game = temporary.path() / L"SteamLibrary" / L"steamapps" /
+                          L"common" / L"Skyrim Special Edition";
+  std::filesystem::create_directories(steam_game);
+  const auto steam_probe = backend.probe(steam_game);
+  const auto local_storage = temporary.path() / L"SteamLibrary" /
+                             L".runtime-swapper";
+  if (!steam_probe.success() ||
+      steam_probe.mode != runtime_swapper::SafetyMode::automatic ||
+      steam_probe.vault_path.lexically_relative(local_storage).empty() ||
+      steam_probe.target_cache.value.parent_path().parent_path() !=
+          local_storage ||
+      steam_probe.coordination_lock.value.parent_path().parent_path() !=
+          local_storage) {
+    return 43;
   }
   const auto real_directory = temporary.path() / L"real-directory";
   const auto linked_directory = temporary.path() / L"linked-directory";
