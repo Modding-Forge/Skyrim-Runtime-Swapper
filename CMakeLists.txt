@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 project(SkyrimRuntimeSwapper VERSION 1.2.0 LANGUAGES C CXX)
 
-set(SKYRIM_RUNTIME_RELEASE_VERSION "1.2.0-rc8")
+set(SKYRIM_RUNTIME_RELEASE_VERSION "1.2.0-rc9")
 if(SKYRIM_RUNTIME_RELEASE_VERSION MATCHES "-")
   set(SKYRIM_RUNTIME_VERSION_FLAGS "VS_FF_PRERELEASE")
 else()
@@ -244,14 +244,17 @@ endif()
 
 add_library(runtime_swapper_core STATIC
   src/core/downgrade.cpp
+  src/core/file_identity.cpp
   src/core/file_operations.cpp
   src/core/fault_injection.cpp
   src/core/hdiff_patch.cpp
   src/core/persistent_runtime.cpp
+  src/core/prepared_storage.cpp
   src/core/recovery_vault.cpp
   src/core/recovery_lifecycle.cpp
   src/core/restore.cpp
   src/core/runtime_backup.cpp
+  src/core/runtime_layout.cpp
   src/core/runtime_transform.cpp
   src/core/transaction_journal.cpp
   src/core/vault_store.cpp
@@ -273,6 +276,34 @@ endif()
 
 include(CTest)
 
+if(BUILD_TESTING)
+  add_executable(prepared_storage_tests src/tests/prepared_storage_tests.cpp)
+  target_include_directories(prepared_storage_tests BEFORE PRIVATE
+    "${GENERATED_INCLUDE}" src/include src/core)
+  target_link_libraries(prepared_storage_tests PRIVATE runtime_swapper_core)
+  if(MSVC)
+    target_compile_options(prepared_storage_tests PRIVATE
+      /W4 /permissive- /EHsc /utf-8)
+  else()
+    target_compile_options(prepared_storage_tests PRIVATE
+      -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+  endif()
+  add_test(NAME prepared_storage_tests COMMAND prepared_storage_tests)
+
+  add_executable(runtime_layout_tests src/tests/runtime_layout_tests.cpp)
+  target_include_directories(runtime_layout_tests BEFORE PRIVATE
+    "${GENERATED_INCLUDE}" src/include)
+  target_link_libraries(runtime_layout_tests PRIVATE runtime_swapper_core)
+  if(MSVC)
+    target_compile_options(runtime_layout_tests PRIVATE
+      /W4 /permissive- /EHsc /utf-8)
+  else()
+    target_compile_options(runtime_layout_tests PRIVATE
+      -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+  endif()
+  add_test(NAME runtime_layout_tests COMMAND runtime_layout_tests)
+endif()
+
 add_executable(storage_backend_probe src/tools/storage_backend_probe.cpp)
 target_include_directories(storage_backend_probe PRIVATE src/include)
 target_link_libraries(storage_backend_probe PRIVATE runtime_swapper_core)
@@ -286,6 +317,7 @@ endif()
 if(WIN32)
 add_library(version_proxy SHARED
   src/proxy/bootstrap.cpp
+  src/core/file_identity.cpp
   src/proxy/version_proxy.cpp
   src/proxy/version_proxy.def
 )
@@ -364,6 +396,8 @@ if(BUILD_TESTING)
   add_test(NAME recovery_lifecycle_tests COMMAND recovery_lifecycle_tests)
   add_windows_version_resource(runtime_version_tests "runtime_version_tests.exe"
     "Skyrim Runtime Swapper Runtime Version Tests" "runtime_version_tests" "VFT_APP")
+  add_windows_version_resource(runtime_layout_tests "runtime_layout_tests.exe"
+    "Skyrim Runtime Swapper Runtime Layout Tests" "runtime_layout_tests" "VFT_APP")
 
   add_executable(command_line_tests
     src/tests/command_line_tests.cpp

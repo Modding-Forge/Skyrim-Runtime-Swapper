@@ -1,6 +1,8 @@
 #include <runtime_swapper/downgrade.hpp>
 #include <runtime_swapper/patch_plan.hpp>
+#include <runtime_swapper/prepared_storage.hpp>
 #include <runtime_swapper/runtime_version.hpp>
+#include <runtime_swapper/runtime_layout.hpp>
 #include <runtime_swapper/sha256.hpp>
 #include <runtime_swapper/transaction_backend.hpp>
 
@@ -38,39 +40,62 @@ namespace {
 
 [[nodiscard]] int run_probe(const std::filesystem::path& game_root,
                             const std::filesystem::path& patch_root) {
-  const auto recovered = runtime_swapper::recover_runtime(game_root);
-  if (!recovered.success()) {
-    std::wcerr << recovered.message << L"\n";
-    return 3;
-  }
-  const auto downgraded = runtime_swapper::downgrade_runtime(game_root, patch_root);
-  if (!downgraded.success()) {
-    std::wcerr << downgraded.message << L"\n";
-    return 4;
-  }
-  for (const auto& plan : runtime_swapper::patch_plan) {
-    if (!backup_matches(game_root, plan)) {
-      std::wcerr << L"A managed fallback backup is missing or invalid.\n";
-      return 5;
+  runtime_swapper::DowngradeResult downgraded;
+  const auto runtime_layout = runtime_swapper::detect_runtime_layout(game_root);
+  {
+    std::wstring context_error;
+    auto prepared = runtime_swapper::prepare_storage_context(
+        game_root, 0, &context_error);
+    if (!prepared) {
+      std::wcerr << L"The prepared storage context failed: " << context_error
+                 << L"\n";
+      return 12;
     }
-  }
-  const auto finalized = runtime_swapper::finalize_fixed_target_runtime(game_root);
-  if (!finalized.success() || !runtime_swapper::target_runtime_is_active(game_root)) {
-    std::wcerr << finalized.message << L"\n";
-    return 6;
-  }
-  const auto finalized_again =
-      runtime_swapper::finalize_fixed_target_runtime(game_root);
-  if (!finalized_again.success() ||
-      !runtime_swapper::target_runtime_is_active(game_root)) {
-    std::wcerr << L"Repeated finalization was not idempotent: "
-               << finalized_again.message << L"\n";
-    return 11;
+    runtime_swapper::PreparedStorageScope prepared_scope(*prepared);
+    const auto recovered = runtime_swapper::recover_runtime(game_root);
+    if (!recovered.success()) {
+      std::wcerr << recovered.message << L"\n";
+      return 3;
+    }
+    downgraded = runtime_swapper::downgrade_runtime(game_root, patch_root);
+    if (!downgraded.success()) {
+      std::wcerr << downgraded.message << L"\n";
+      return 4;
+    }
+    for (const auto& plan : runtime_swapper::patch_plan) {
+      if (!runtime_swapper::patch_plan_entry_enabled(runtime_layout, plan)) continue;
+      if (!backup_matches(game_root, plan)) {
+        std::wcerr << L"A managed fallback backup is missing or invalid.\n";
+        return 5;
+      }
+    }
+    const auto finalized = runtime_swapper::finalize_fixed_target_runtime(game_root);
+    if (!finalized.success() ||
+        !runtime_swapper::target_runtime_is_active(game_root)) {
+      std::wcerr << finalized.message << L"\n";
+      return 6;
+    }
+    const auto finalized_again =
+        runtime_swapper::finalize_fixed_target_runtime(game_root);
+    if (!finalized_again.success() ||
+        !runtime_swapper::target_runtime_is_active(game_root)) {
+      std::wcerr << L"Repeated finalization was not idempotent: "
+                 << finalized_again.message << L"\n";
+      return 11;
+    }
+    const auto metrics = prepared->metrics();
+    std::wcout << L"Prepared storage: hashes=" << metrics.files_hashed
+               << L"; cache-hits=" << metrics.verified_cache_hits
+               << L"; rename-rebinds=" << metrics.identity_rebinds
+               << L"; invalidations=" << metrics.invalidations << L".\n";
   }
 
   const auto corruptible = std::ranges::find_if(
       runtime_swapper::patch_plan,
-      [](const auto& plan) { return plan.source_present && plan.target_present; });
+      [runtime_layout](const auto& plan) {
+        return runtime_swapper::patch_plan_entry_enabled(runtime_layout, plan) &&
+               plan.source_present && plan.target_present;
+      });
   if (corruptible == runtime_swapper::patch_plan.end()) {
     std::wcerr << L"The patch plan has no file suitable for the fallback test.\n";
     return 7;

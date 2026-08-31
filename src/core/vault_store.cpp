@@ -4,8 +4,10 @@
 #include "internal/file_operations.hpp"
 
 #include <runtime_swapper/patch_plan.hpp>
+#include <runtime_swapper/prepared_storage.hpp>
 #include <runtime_swapper/runtime_version.hpp>
 #include <runtime_swapper/release_version.hpp>
+#include <runtime_swapper/runtime_layout.hpp>
 #include <runtime_swapper/sha256.hpp>
 
 #if defined(_WIN32)
@@ -126,8 +128,14 @@ constexpr std::string_view persistent_magic = "SRS-PERSISTENT-2\n";
   text += "formatVersion=2\n";
   text += "producerVersion=" + std::string(release_version_utf8) + "\n";
   text += "patchPlanHash=" + std::string(patch_plan_hash_utf8) + "\n";
-  text += "entries=" + std::to_string(patch_plan.size()) + "\n";
+  if (vault.runtime_layout != RuntimeLayout::standard) {
+    text += "runtimeLayout=" +
+            std::string(runtime_layout_name(vault.runtime_layout)) + "\n";
+  }
+  text += "entries=" +
+          std::to_string(active_patch_plan_size(vault.runtime_layout)) + "\n";
   for (const auto& plan : patch_plan) {
+    if (!patch_plan_entry_enabled(vault.runtime_layout, plan)) continue;
     text += std::string(plan.relative_file) + "|" +
             (plan.source_present ? "1" : "0") + "|" +
             std::string(plan.source_sha256) + "|" +
@@ -185,6 +193,10 @@ constexpr std::string_view persistent_magic = "SRS-PERSISTENT-2\n";
   std::string text(persistent_magic);
   text += "installation=" + vault.probe.installation_id + "\n";
   text += "target=" + std::string(target_version_label_utf8) + "\n";
+  if (vault.runtime_layout != RuntimeLayout::standard) {
+    text += "runtimeLayout=" +
+            std::string(runtime_layout_name(vault.runtime_layout)) + "\n";
+  }
   text += std::string("riskAccepted=") + (risk_accepted ? "true" : "false") + "\n";
   text += std::string("catalogPersistent=") +
           (catalog_persistent ? "true" : "false") + "\n";
@@ -227,14 +239,14 @@ struct PersistentFlags {
 std::optional<VaultLayout> resolve_vault_layout(
     const std::filesystem::path& game_root, std::uint64_t required_bytes,
     std::wstring* error_message, bool prepare_vault) {
-  auto probe = transaction_backend().probe(game_root, required_bytes,
-                                            prepare_vault);
+  auto probe = probe_prepared_storage(game_root, required_bytes, prepare_vault);
   if (!probe.success()) {
     if (error_message != nullptr) *error_message = probe.message;
     return std::nullopt;
   }
   VaultLayout result;
   result.probe = std::move(probe);
+  result.runtime_layout = detect_runtime_layout(game_root);
   result.objects = result.probe.vault_path / L"objects";
   result.transactions = result.probe.vault_path / L"transactions";
   result.conflicts = result.probe.vault_path / L"conflicts";
@@ -245,7 +257,7 @@ std::optional<VaultLayout> resolve_vault_layout(
 
 std::optional<TargetCacheLayout> resolve_target_cache_layout(
     const std::filesystem::path& game_root) {
-  auto probe = transaction_backend().probe(game_root, 0, false);
+  auto probe = probe_prepared_storage(game_root, 0, false);
   if (!probe.success() || probe.target_cache.value.empty() ||
       !probe.target_cache.value.is_absolute()) {
     return std::nullopt;
@@ -278,24 +290,42 @@ bool target_cache_object_available(const TargetCacheLayout& cache,
 bool materialize_target_cache_object(
     const TargetCacheLayout& cache, std::string_view sha256,
     std::uint64_t expected_size, const std::filesystem::path& destination) {
-  return materialize_verified_vault_object(cache_as_object_store(cache), sha256,
-                                           expected_size, destination);
+  const auto store = cache_as_object_store(cache);
+  if (materialize_verified_vault_object(store, sha256, expected_size,
+                                        destination)) {
+    return true;
+  }
+  // Cache data is never a recovery source. A stale or incomplete object is
+  // discarded after the staged copy fails verification so future launches do
+  // not repeatedly pay the same failed read cost.
+  if (valid_hash(sha256)) {
+    (void)transaction_backend().durable_remove(object_path(store, sha256));
+  }
+  return false;
 }
 
 bool commit_target_cache_object(const TargetCacheLayout& cache,
                                 const std::filesystem::path& verified_source,
                                 std::string_view sha256,
                                 std::uint64_t expected_size) {
-  return commit_verified_vault_object(cache_as_object_store(cache),
-                                      verified_source, sha256, expected_size);
+  if (!valid_hash(sha256) || !hash_matches(verified_source, sha256)) return false;
+  const auto store = cache_as_object_store(cache);
+  if (vault_object_available(store, sha256, expected_size)) return true;
+  const auto destination = object_path(store, sha256);
+  if (!transaction_backend().clone_or_copy_atomic(verified_source,
+                                                   destination)) {
+    return false;
+  }
+  // The staged source is verified and the copy primitive is durable. The
+  // disposable cache object is authenticated when it is materialized later.
+  return vault_object_available(store, sha256, expected_size);
 }
 
 bool vault_object_matches(const VaultLayout& vault, std::string_view sha256,
                           std::uint64_t expected_size) {
   if (!vault_object_available(vault, sha256, expected_size)) return false;
   const auto path = object_path(vault, sha256);
-  const auto actual = sha256_file(path);
-  return actual && *actual == sha256;
+  return hash_matches(path, sha256);
 }
 
 bool vault_object_available(const VaultLayout& vault, std::string_view sha256,
@@ -316,8 +346,7 @@ bool commit_vault_object(const VaultLayout& vault,
       std::filesystem::file_size(source, error) != expected_size || error) {
     return false;
   }
-  const auto source_hash = sha256_file(source);
-  if (!source_hash || *source_hash != sha256) return false;
+  if (!hash_matches(source, sha256)) return false;
   return commit_verified_vault_object(vault, source, sha256, expected_size);
 }
 
@@ -377,7 +406,9 @@ bool materialize_verified_vault_object(
 
 bool commit_runtime_manifest(const VaultLayout& vault,
                              const std::filesystem::path& game_root) {
+  if (!runtime_layout_matches(game_root, vault.runtime_layout)) return false;
   for (const auto& plan : patch_plan) {
+    if (!patch_plan_entry_enabled(vault.runtime_layout, plan)) continue;
     if (plan.source_present &&
         !vault_object_matches(vault, plan.source_sha256, plan.source_size)) {
       return false;
@@ -388,6 +419,7 @@ bool commit_runtime_manifest(const VaultLayout& vault,
 
 bool commit_verified_runtime_manifest(const VaultLayout& vault,
                                       const std::filesystem::path& game_root) {
+  if (!runtime_layout_matches(game_root, vault.runtime_layout)) return false;
   const auto manifest = manifest_contents(vault);
   if (!transaction_backend().write_atomic(vault.manifest, manifest) ||
       read_all(vault.manifest) != manifest) {
@@ -400,7 +432,10 @@ bool commit_verified_runtime_manifest(const VaultLayout& vault,
 
 bool runtime_manifest_matches(const VaultLayout& vault) {
   auto stored = read_all(vault.manifest);
-  if (stored == legacy_manifest_contents(vault)) return true;
+  if (vault.runtime_layout == RuntimeLayout::standard &&
+      stored == legacy_manifest_contents(vault)) {
+    return true;
+  }
   constexpr std::string_view producer_key = "producerVersion=";
   const auto producer = stored.find(producer_key);
   if (producer != std::string::npos) {
@@ -450,6 +485,7 @@ std::filesystem::path recovery_journal_path(const VaultLayout& vault) {
 bool commit_persistent_marker(const VaultLayout& vault,
                               const std::filesystem::path& game_root,
                               bool risk_accepted, bool catalog_persistent) {
+  if (!runtime_layout_matches(game_root, vault.runtime_layout)) return false;
   const auto text = persistent_contents(vault, risk_accepted, catalog_persistent);
   // The vault marker is committed first. If power fails between these writes, recovery sees
   // the vault marker and recreates the game marker instead of restoring automatically.

@@ -133,33 +133,53 @@ TransactionJournal::TransactionJournal(std::filesystem::path path,
 
 bool TransactionJournal::append(JournalPhase phase, std::uint32_t file_index,
                                 std::string_view sha256) {
+  const JournalAppend record{phase, file_index, sha256};
+  return append_batch(std::span<const JournalAppend>(&record, 1));
+}
+
+bool TransactionJournal::append_batch(
+    std::span<const JournalAppend> entries) {
+  if (entries.empty()) return true;
   if (!usable_ || fault_injected("journal.before-append")) return false;
   std::error_code error;
   std::filesystem::create_directories(path_.parent_path(), error);
   if (error) return false;
 
-  DiskRecord record{};
-  record.magic = journal_magic;
-  record.version = journal_version;
-  record.size = sizeof(record);
-  record.sequence = ++sequence_;
-  record.file_index = file_index;
-  record.phase = static_cast<std::uint32_t>(phase);
-  record.to_target = to_target_ ? 1 : 0;
-  record.reserved[0] = risk_accepted_ ? 1 : 0;
-  copy_text(record.transaction_id, transaction_id_);
-  copy_text(record.profile, profile_);
-  copy_text(record.sha256, sha256);
-  record.crc32 = crc32_bytes(&record, offsetof(DiskRecord, crc32));
+  std::vector<DiskRecord> records;
+  records.reserve(entries.size());
+  auto next_sequence = sequence_;
+  for (const auto& entry : entries) {
+    DiskRecord record{};
+    record.magic = journal_magic;
+    record.version = journal_version;
+    record.size = sizeof(record);
+    record.sequence = ++next_sequence;
+    record.file_index = entry.file_index;
+    record.phase = static_cast<std::uint32_t>(entry.phase);
+    record.to_target = to_target_ ? 1 : 0;
+    record.reserved[0] = risk_accepted_ ? 1 : 0;
+    copy_text(record.transaction_id, transaction_id_);
+    copy_text(record.profile, profile_);
+    copy_text(record.sha256, entry.sha256);
+    record.crc32 = crc32_bytes(&record, offsetof(DiskRecord, crc32));
+    records.push_back(record);
+  }
 
 #if defined(_WIN32)
   HANDLE file = CreateFileW(path_.c_str(), FILE_APPEND_DATA,
                             FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS,
                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
   if (file == INVALID_HANDLE_VALUE) return false;
+  const auto byte_count = records.size() * sizeof(DiskRecord);
+  if (byte_count > (std::numeric_limits<DWORD>::max)()) {
+    CloseHandle(file);
+    return false;
+  }
   DWORD written{};
-  const bool success = WriteFile(file, &record, sizeof(record), &written, nullptr) &&
-                       written == sizeof(record) && FlushFileBuffers(file);
+  const bool success =
+      WriteFile(file, records.data(), static_cast<DWORD>(byte_count), &written,
+                nullptr) &&
+      written == byte_count && FlushFileBuffers(file);
   CloseHandle(file);
 #if defined(_DEBUG)
   if (success) {
@@ -167,9 +187,14 @@ bool TransactionJournal::append(JournalPhase phase, std::uint32_t file_index,
     const DWORD length = GetEnvironmentVariableW(L"SKYRIM_RUNTIME_SWAPPER_FAULT_AFTER_PHASE",
                                                   configured,
                                                   static_cast<DWORD>(std::size(configured)));
-    if (length > 0 && length < std::size(configured) &&
-        std::wcstoul(configured, nullptr, 10) == static_cast<unsigned long>(phase)) {
-      TerminateProcess(GetCurrentProcess(), 0xe0000001U);
+    if (length > 0 && length < std::size(configured)) {
+      const auto configured_phase = std::wcstoul(configured, nullptr, 10);
+      if (std::ranges::any_of(entries, [configured_phase](const auto& entry) {
+            return configured_phase ==
+                   static_cast<unsigned long>(entry.phase);
+          })) {
+        TerminateProcess(GetCurrentProcess(), 0xe0000001U);
+      }
     }
   }
 #endif
@@ -177,8 +202,8 @@ bool TransactionJournal::append(JournalPhase phase, std::uint32_t file_index,
   const int file = ::open(path_.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC,
                           S_IRUSR | S_IWUSR);
   if (file < 0) return false;
-  const auto* cursor = reinterpret_cast<const std::byte*>(&record);
-  std::size_t remaining = sizeof(record);
+  const auto* cursor = reinterpret_cast<const std::byte*>(records.data());
+  std::size_t remaining = records.size() * sizeof(DiskRecord);
   bool success = true;
   while (remaining != 0) {
     const auto count = ::write(file, cursor, remaining);
@@ -195,17 +220,27 @@ bool TransactionJournal::append(JournalPhase phase, std::uint32_t file_index,
   if (success) {
     if (const char* configured =
             std::getenv("SKYRIM_RUNTIME_SWAPPER_FAULT_AFTER_PHASE")) {
-      if (std::strtoul(configured, nullptr, 10) ==
-          static_cast<unsigned long>(phase)) {
+      const auto configured_phase = std::strtoul(configured, nullptr, 10);
+      if (std::ranges::any_of(entries, [configured_phase](const auto& entry) {
+            return configured_phase ==
+                   static_cast<unsigned long>(entry.phase);
+          })) {
         _exit(201);
       }
     }
   }
 #endif
 #endif
-  if (!success || fault_injected("journal.after-file-sync")) return false;
+  if (!success) return false;
+  // Once the bytes are flushed they are part of recovery history even when a
+  // later directory-boundary fault is reported to the caller.
+  sequence_ = next_sequence;
+  if (fault_injected("journal.after-file-sync")) return false;
   const bool parent_synced = transaction_backend().sync_parent(path_);
-  return parent_synced && !fault_injected("journal.after-directory-sync");
+  if (!parent_synced || fault_injected("journal.after-directory-sync")) {
+    return false;
+  }
+  return true;
 }
 
 JournalReadResult read_transaction_journal(const std::filesystem::path& path) {

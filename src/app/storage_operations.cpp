@@ -5,6 +5,7 @@
 #include "fixed_runtime.hpp"
 
 #include <runtime_swapper/downgrade.hpp>
+#include <runtime_swapper/prepared_storage.hpp>
 #include <runtime_swapper/recovery_vault.hpp>
 #include <runtime_swapper/runtime_version.hpp>
 
@@ -250,14 +251,14 @@ constexpr std::string_view restore_intent = "SRS-PERSISTENT-RESTORE-1\n";
 InstallationOperationResult probe_installation_storage(
     const std::filesystem::path& game_root) {
   InstallationOperationResult result;
-  result.backend = transaction_backend().probe(game_root);
+  result.backend = probe_prepared_storage(game_root);
   if (!result.backend.success() &&
       result.backend.technical_reason.starts_with(L"active-vault")) {
     const auto catalog = inspect_content_catalog_recovery_state();
     const auto migration = retire_orphaned_recovery_locator(
         game_root, catalog.success);
     if (migration.success() && migration.changed) {
-      result.backend = transaction_backend().probe(game_root);
+      result.backend = probe_prepared_storage(game_root);
       result.changed = true;
       result.lifecycle_state = RecoveryLifecycleState::clean_source;
       result.lifecycle_phase = migration.phase;
@@ -303,6 +304,58 @@ InstallationOperationResult probe_installation_storage(
     result.message = result.backend.message;
   }
   return result;
+}
+
+InstallationOperationResult prepare_launch(
+    const std::filesystem::path& game_root, bool allow_persistent,
+    bool risk_accepted) {
+  auto initial = probe_installation_storage(game_root);
+  if (!initial.success()) return initial;
+
+  const auto persistent =
+      inspect_persistent_runtime(game_root, nullptr, nullptr, false);
+  if (persistent == PersistentRuntimeState::invalid) {
+    return failure(ExitCode::journal_corrupt, std::move(initial.backend),
+                   L"The persistent recovery markers are inconsistent. Skyrim was not "
+                   L"started.");
+  }
+  const bool needs_consent =
+      initial.backend.mode != SafetyMode::automatic &&
+      persistent == PersistentRuntimeState::inactive;
+  if (needs_consent && !allow_persistent) {
+    initial.code = ExitCode::user_cancelled;
+    initial.message = L"A persistent downgrade requires active confirmation.";
+    return initial;
+  }
+  if (initial.backend.mode == SafetyMode::persistent_with_warning &&
+      persistent == PersistentRuntimeState::inactive && !risk_accepted) {
+    return failure(ExitCode::invalid_arguments, std::move(initial.backend),
+                   L"This unclassified filesystem requires active confirmation.");
+  }
+
+  std::wstring context_error;
+  auto context = prepare_storage_context(game_root, 0, &context_error);
+  if (!context) {
+    return failure(ExitCode::unsupported_filesystem, std::move(initial.backend),
+                   L"The prepared storage context could not be established: " +
+                       context_error);
+  }
+  if (context->backend.installation_id != initial.backend.installation_id ||
+      context->backend.target_volume.stable_id !=
+          initial.backend.target_volume.stable_id ||
+      context->backend.vault_volume.stable_id !=
+          initial.backend.vault_volume.stable_id ||
+      context->backend.vault_path != initial.backend.vault_path) {
+    return failure(
+        ExitCode::unsupported_filesystem, std::move(initial.backend),
+        L"The installation or recovery-vault identity changed while the launch was "
+        L"being prepared. No managed file was changed.");
+  }
+  PreparedStorageScope prepared_scope(*context);
+  return initial.backend.mode == SafetyMode::automatic &&
+                 persistent == PersistentRuntimeState::inactive
+             ? activate_session_target(game_root)
+             : activate_persistent_target(game_root, risk_accepted);
 }
 
 InstallationOperationResult recover_installation(

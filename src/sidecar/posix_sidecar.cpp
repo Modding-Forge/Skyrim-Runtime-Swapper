@@ -27,7 +27,7 @@
 namespace {
 
 constexpr std::uint32_t protocol_magic = 0x50535253U;  // SRSP
-constexpr std::uint16_t protocol_version = 3;
+constexpr std::uint16_t protocol_version = 4;
 constexpr std::uint32_t maximum_payload = 1024U * 1024U;
 
 enum class Operation : std::uint16_t {
@@ -36,6 +36,7 @@ enum class Operation : std::uint16_t {
   activate_session = 3,
   activate_persistent = 4,
   restore_persistent = 5,
+  prepare_launch = 6,
 };
 
 enum class LockResult {
@@ -236,7 +237,8 @@ void append_string(std::vector<std::byte>& bytes, std::string_view value) {
 }
 
 [[nodiscard]] runtime_swapper::app::InstallationOperationResult execute(
-    Operation operation, const std::filesystem::path& game_root, bool risk_accepted) {
+    Operation operation, const std::filesystem::path& game_root,
+    bool risk_accepted, bool allow_persistent) {
   using namespace runtime_swapper::app;
   switch (operation) {
     case Operation::recover:
@@ -247,6 +249,8 @@ void append_string(std::vector<std::byte>& bytes, std::string_view value) {
       return activate_persistent_target(game_root, risk_accepted);
     case Operation::restore_persistent:
       return restore_persistent_source(game_root);
+    case Operation::prepare_launch:
+      return prepare_launch(game_root, allow_persistent, risk_accepted);
     case Operation::probe:
       break;
   }
@@ -260,7 +264,8 @@ void append_string(std::vector<std::byte>& bytes, std::string_view value) {
   return operation == Operation::recover ||
          operation == Operation::activate_session ||
          operation == Operation::activate_persistent ||
-         operation == Operation::restore_persistent;
+         operation == Operation::restore_persistent ||
+         operation == Operation::prepare_launch;
 }
 
 [[nodiscard]] runtime_swapper::app::InstallationOperationResult lock_failure(
@@ -414,7 +419,11 @@ int main(int argc, char** argv) {
   const auto game = take_string(fields);
   const auto catalog = take_string(fields);
   const auto risk = take_integer<std::uint8_t>(fields);
-  if (!game || !catalog || !risk || *risk > 1 || !fields.empty()) return 4;
+  const auto allow_persistent = take_integer<std::uint8_t>(fields);
+  if (!game || !catalog || !risk || !allow_persistent || *risk > 1 ||
+      *allow_persistent > 1 || !fields.empty()) {
+    return 4;
+  }
   const std::filesystem::path requested_game_root(*game);
   if (!requested_game_root.is_absolute()) return 5;
   std::error_code path_error;
@@ -450,7 +459,8 @@ int main(int argc, char** argv) {
       }
     }
   } else if (!valid_mutating_operation(operation)) {
-    result = execute(operation, game_root, *risk != 0);
+    result = execute(operation, game_root, *risk != 0,
+                     *allow_persistent != 0);
   } else {
     result = runtime_swapper::app::probe_installation_storage(game_root);
     if (result.success()) {
@@ -458,7 +468,8 @@ int main(int argc, char** argv) {
       const auto locked =
           installation_lock.acquire(result.backend.coordination_lock);
       result = locked == LockResult::acquired
-                   ? execute(operation, game_root, *risk != 0)
+                   ? execute(operation, game_root, *risk != 0,
+                             *allow_persistent != 0)
                    : lock_failure(std::move(result), locked);
     }
   }

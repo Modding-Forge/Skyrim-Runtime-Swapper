@@ -134,12 +134,36 @@ int run(int argc, wchar_t** argv) {
   }
 
   const bool wine = is_wine_environment();
-  auto sidecar_probe = wine
-                           ? run_wine_sidecar(WineSidecarOperation::probe,
-                                              *options.game_root)
-                           : InstallationOperationResult{};
-  auto probe = wine ? sidecar_probe.backend
-                    : probe_installation_storage(*options.game_root).backend;
+  InstallationOperationResult prepared;
+  auto probe = BackendProbeResult{};
+  bool risk_accepted = false;
+
+  if (wine) {
+    prepared = run_wine_sidecar(WineSidecarOperation::prepare_launch,
+                                *options.game_root);
+    probe = prepared.backend;
+    if (prepared.code == ExitCode::user_cancelled && probe.success()) {
+      if (options.quiet ||
+          show_persistent_downgrade_dialog(*options.game_root, probe) !=
+              PersistentDialogChoice::accepted) {
+        mutex_lock.unlock();
+        log_diagnostic(options.quiet
+                           ? L"Persistent downgrade requires interactive consent; launch "
+                             L"cancelled in quiet mode."
+                           : L"Persistent downgrade cancelled by the user.");
+        return static_cast<int>(ExitCode::user_cancelled);
+      }
+      risk_accepted = probe.mode == SafetyMode::persistent_with_warning;
+      if (risk_accepted) {
+        log_diagnostic(L"Persistent storage risk accepted: riskAccepted=true");
+      }
+      prepared = run_wine_sidecar(WineSidecarOperation::prepare_launch,
+                                  *options.game_root, risk_accepted, true);
+      probe = prepared.backend;
+    }
+  } else {
+    probe = probe_installation_storage(*options.game_root).backend;
+  }
   log_diagnostic(L"Storage backend: " + probe.description + L"; vault: " +
                  probe.vault_path.wstring() + L"; technical reason: " +
                  probe.technical_reason + L"; message: " + probe.message);
@@ -150,43 +174,26 @@ int run(int argc, wchar_t** argv) {
                   MB_ICONERROR, true);
   }
 
-  const auto persistent_state =
-      wine ? (sidecar_probe.persistent ? PersistentRuntimeState::active
-                                       : PersistentRuntimeState::inactive)
-           : inspect_persistent_runtime(*options.game_root, nullptr, nullptr,
-                                        false);
-  if ((!wine && persistent_state == PersistentRuntimeState::invalid) ||
-      (wine && !sidecar_probe.success())) {
-    mutex_lock.unlock();
-    return finish(ExitCode::journal_corrupt,
-                  L"The persistent recovery markers are inconsistent. Skyrim was not "
-                  L"started.",
-                  MB_ICONERROR, options.quiet);
-  }
-
-  bool risk_accepted = false;
-  if (probe.mode != SafetyMode::automatic &&
-      persistent_state == PersistentRuntimeState::inactive) {
-    if (options.quiet ||
-        show_persistent_downgrade_dialog(*options.game_root, probe) !=
-            PersistentDialogChoice::accepted) {
-      mutex_lock.unlock();
-      log_diagnostic(options.quiet
-                         ? L"Persistent downgrade requires interactive consent; launch "
-                           L"cancelled in quiet mode."
-                         : L"Persistent downgrade cancelled by the user.");
-      return static_cast<int>(ExitCode::user_cancelled);
-    }
-    risk_accepted = probe.mode == SafetyMode::persistent_with_warning;
-    if (risk_accepted) {
-      log_diagnostic(L"Persistent storage risk accepted: riskAccepted=true");
-    }
-  }
-
-  const bool session_activation =
-      probe.mode == SafetyMode::automatic &&
-      persistent_state == PersistentRuntimeState::inactive;
   if (!wine) {
+    const auto persistent_state = inspect_persistent_runtime(
+        *options.game_root, nullptr, nullptr, false);
+    if (persistent_state == PersistentRuntimeState::invalid) {
+      mutex_lock.unlock();
+      return finish(ExitCode::journal_corrupt,
+                    L"The persistent recovery markers are inconsistent. Skyrim was not "
+                    L"started.",
+                    MB_ICONERROR, options.quiet);
+    }
+    if (probe.mode != SafetyMode::automatic &&
+        persistent_state == PersistentRuntimeState::inactive) {
+      if (options.quiet ||
+          show_persistent_downgrade_dialog(*options.game_root, probe) !=
+              PersistentDialogChoice::accepted) {
+        mutex_lock.unlock();
+        return static_cast<int>(ExitCode::user_cancelled);
+      }
+      risk_accepted = probe.mode == SafetyMode::persistent_with_warning;
+    }
     transaction_lock = acquire_transaction_lock(probe.coordination_lock);
     if (!transaction_lock) {
       mutex_lock.unlock();
@@ -194,17 +201,11 @@ int run(int argc, wchar_t** argv) {
                     L"The durable runtime transaction lock could not be acquired.",
                     MB_ICONERROR, options.quiet);
     }
+    // The UI probe above exists only to obtain consent and the external lock
+    // path. Recovery, the final probe, and activation share one prepared core
+    // operation so authenticated large files and native handles are reused.
+    prepared = prepare_launch(*options.game_root, true, risk_accepted);
   }
-  auto prepared = wine
-                      ? run_wine_sidecar(
-                            session_activation
-                                ? WineSidecarOperation::activate_session
-                                : WineSidecarOperation::activate_persistent,
-                            *options.game_root, risk_accepted)
-                      : (session_activation
-                             ? activate_session_target(*options.game_root)
-                             : activate_persistent_target(*options.game_root,
-                                                          risk_accepted));
   log_diagnostic(L"Installation prepare: " + prepared.message);
   if (!prepared.success()) {
     mutex_lock.unlock();

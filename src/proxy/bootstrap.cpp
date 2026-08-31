@@ -1,6 +1,7 @@
 #include "bootstrap.hpp"
 
 #include <runtime_swapper/exit_code.hpp>
+#include <runtime_swapper/file_identity.hpp>
 
 #include <filesystem>
 #include <mutex>
@@ -37,7 +38,10 @@ bool equals_ignore_case(std::wstring_view left, std::wstring_view right) {
 }
 
 bool is_skse_loader() {
-  return equals_ignore_case(module_path(nullptr).filename().wstring(), L"skse64_loader.exe");
+  // Amethyst can copy the SKSE loader over SkyrimSELauncher.exe so Steam starts
+  // SKSE directly. A content comparison prevents the real Bethesda launcher or
+  // an unrelated renamed executable from triggering the runtime transaction.
+  return runtime_swapper::is_skse_loader_entry_image(module_path(nullptr));
 }
 
 bool is_skyrim_executable(const wchar_t* queried_file) {

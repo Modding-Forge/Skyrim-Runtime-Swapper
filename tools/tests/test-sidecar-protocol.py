@@ -13,7 +13,7 @@ import tempfile
 
 
 MAGIC = 0x50535253
-VERSION = 3
+VERSION = 4
 HEADER = struct.Struct("<IHHI32s")
 MAXIMUM_PAYLOAD = 1024 * 1024
 
@@ -110,7 +110,7 @@ def main() -> int:
         game = pathlib.Path(root, "game").resolve()
         catalog = pathlib.Path(root, "state", "ContentCatalog.txt").resolve()
         nonce = os.urandom(32)
-        payload = field(str(game)) + field(str(catalog)) + b"\0"
+        payload = field(str(game)) + field(str(catalog)) + b"\0\0"
         result = run(sidecar, frame(0xFFFF, payload, nonce))
         if result.returncode != 0 or len(result.stdout) < HEADER.size:
             raise AssertionError(
@@ -199,8 +199,20 @@ def main() -> int:
         lock_payload = (
             field(str(lock_game.resolve()))
             + field(str(lock_catalog.resolve()))
-            + b"\0"
+            + b"\0\0"
         )
+        prepare_nonce = os.urandom(32)
+        prepare_ipc = pathlib.Path(root, "prepare-launch-operation")
+        prepare_result = run_file_transport(
+            sidecar, prepare_ipc, frame(6, lock_payload, prepare_nonce),
+            env=lock_environment,
+        )
+        if prepare_result.returncode != 0:
+            raise AssertionError("prepare_launch did not return a framed result")
+        validate_response(
+            (prepare_ipc / "response.bin").read_bytes(), 6, prepare_nonce
+        )
+
         seed_nonce = os.urandom(32)
         seed_ipc = pathlib.Path(root, "seed-lock-operation")
         seed_result = run_file_transport(

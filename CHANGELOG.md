@@ -2,6 +2,22 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.2.0-rc9 - 2026-08-31
+
+- Recognizes Amethyst's byte-identical `SkyrimSELauncher.exe` copy as an SKSE
+  loader entry point without hashing it.
+- Records a dedicated runtime layout and leaves the active SKSE launcher alias
+  untouched during downgrade, recovery, and source verification.
+- Blocks a transaction if the launcher layout changes while it is active and
+  adds cross-platform regression tests for alias detection and patch-plan scope.
+- Runs launch recovery and activation through one prepared storage operation,
+  reusing verified file identities and hashes while the underlying file remains
+  unchanged.
+- Commits file intents in journal batches and synchronizes each affected
+  directory once per safety boundary instead of once per managed file.
+- Treats the target cache as disposable performance data, while keeping every
+  recovery-vault verification and fail-closed identity check intact.
+
 ## 1.2.0-rc8 - 2026-08-31
 
 - Retired orphaned RC5/RC6 recovery locators when the complete source state is independently verified.

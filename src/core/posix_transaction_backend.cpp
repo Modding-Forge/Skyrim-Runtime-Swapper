@@ -827,6 +827,48 @@ class PosixTransactionBackend final : public TransactionBackend {
     return fsync_file(live) && fsync_directory(live.parent_path());
   }
 
+  bool atomic_replace_deferred_sync(
+      const std::filesystem::path& live,
+      const std::filesystem::path& staged,
+      const std::filesystem::path& rollback) override {
+    if (core::fault_injected("replace.before")) return false;
+    std::error_code error;
+    std::filesystem::create_directories(rollback.parent_path(), error);
+    if (error || has_symlink_component(live) || has_symlink_component(staged) ||
+        has_symlink_component(rollback.parent_path()) || !fsync_file(staged) ||
+        !same_device(live.parent_path(), staged.parent_path()) ||
+        !same_device(live.parent_path(), rollback.parent_path())) {
+      return false;
+    }
+    (void)::unlink(rollback.c_str());
+    if (::rename(live.c_str(), rollback.c_str()) != 0 ||
+        !fsync_file(rollback)) {
+      return false;
+    }
+    if (core::fault_injected("replace.after-source-move")) return false;
+    if (::rename(staged.c_str(), live.c_str()) != 0) {
+      (void)::rename(rollback.c_str(), live.c_str());
+      return false;
+    }
+    if (core::fault_injected("replace.after-rename")) return false;
+    return fsync_file(live);
+  }
+
+  bool atomic_install_deferred_sync(
+      const std::filesystem::path& staged,
+      const std::filesystem::path& live) override {
+    std::error_code error;
+    std::filesystem::create_directories(live.parent_path(), error);
+    if (error || std::filesystem::exists(live, error) || error ||
+        has_symlink_component(staged) ||
+        has_symlink_component(live.parent_path()) ||
+        !same_device(staged.parent_path(), live.parent_path()) ||
+        !fsync_file(staged) || ::rename(staged.c_str(), live.c_str()) != 0) {
+      return false;
+    }
+    return fsync_file(live);
+  }
+
   bool restore_file(const std::filesystem::path& rollback,
                     const std::filesystem::path& live) override {
     if (has_symlink_component(rollback) ||
@@ -916,6 +958,15 @@ class PosixTransactionBackend final : public TransactionBackend {
            !core::fault_injected("remove.after-sync");
   }
 
+  bool durable_remove_deferred_sync(
+      const std::filesystem::path& path) override {
+    if (core::fault_injected("remove.before") || has_symlink_component(path)) {
+      return false;
+    }
+    if (::unlink(path.c_str()) != 0) return errno == ENOENT;
+    return !core::fault_injected("remove.after-unlink");
+  }
+
   bool durable_remove_tree(const std::filesystem::path& root) override {
     if (core::fault_injected("remove-tree.before") || root.empty() ||
         root == root.root_path() || has_symlink_component(root.parent_path())) {
@@ -958,6 +1009,12 @@ class PosixTransactionBackend final : public TransactionBackend {
 
   bool sync_parent(const std::filesystem::path& path) override {
     return fsync_directory(path.parent_path());
+  }
+
+  bool sync_directory(const std::filesystem::path& directory) override {
+    if (core::fault_injected("directory.before-sync")) return false;
+    return fsync_directory(directory) &&
+           !core::fault_injected("directory.after-sync");
   }
 };
 

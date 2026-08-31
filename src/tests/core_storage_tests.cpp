@@ -157,6 +157,25 @@ int main() {
       read_transaction_journal(accepted_path).records.front().risk_accepted != true) {
     return 25;
   }
+  const auto batch_path = temporary.path() / L"journal" / L"batch.journal";
+  TransactionJournal batch(batch_path, "abcdef0123456789abcdef0123456789",
+                           "batch-profile", true);
+  const std::array batch_hashes{std::string(64, 'c'), std::string(64, 'd'),
+                                std::string(64, 'e')};
+  const std::array batch_entries{
+      JournalAppend{JournalPhase::replace_pending, 0, batch_hashes[0]},
+      JournalAppend{JournalPhase::replace_pending, 1, batch_hashes[1]},
+      JournalAppend{JournalPhase::replace_pending, 2, batch_hashes[2]}};
+  if (!batch.append_batch(batch_entries)) return 44;
+  const auto batch_state = read_transaction_journal(batch_path);
+  if (batch_state.status != JournalReadStatus::valid ||
+      batch_state.records.size() != batch_entries.size() ||
+      batch_state.records.front().sequence != 1 ||
+      batch_state.records.back().sequence != batch_entries.size() ||
+      batch_state.records.back().file_index != 2 ||
+      batch_state.records.back().sha256 != std::string(64, 'e')) {
+    return 45;
+  }
   const auto legacy_path = temporary.path() / L"journal" / L"legacy-v1.journal";
   write_legacy_journal(legacy_path);
   const auto legacy = read_transaction_journal(legacy_path);

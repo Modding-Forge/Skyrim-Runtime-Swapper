@@ -30,6 +30,13 @@ struct InstallationOperationResult {
 [[nodiscard]] InstallationOperationResult probe_installation_storage(
     const std::filesystem::path& game_root);
 
+// One native launch operation owns probe, recovery, and activation. On a
+// persistent-only target it returns user_cancelled without mutation until the
+// caller supplies explicit consent.
+[[nodiscard]] InstallationOperationResult prepare_launch(
+    const std::filesystem::path& game_root, bool allow_persistent,
+    bool risk_accepted);
+
 [[nodiscard]] InstallationOperationResult activate_session_target(
     const std::filesystem::path& game_root);
 [[nodiscard]] InstallationOperationResult activate_persistent_target(

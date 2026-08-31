@@ -285,6 +285,26 @@ int run_tests() {
       remove_recovery_metadata(temporary.path(), "unsafe-metadata")) {
     return 18;
   }
+
+  const auto launcher = temporary.path() / L"SkyrimSELauncher.exe";
+  const auto loader = temporary.path() / L"skse64_loader.exe";
+  write_file(launcher, "copied-skse-loader");
+  write_file(loader, "copied-skse-loader");
+  if (commit_verified_runtime_manifest(*vault, temporary.path())) return 35;
+  const auto alias_vault = resolve_vault_layout(temporary.path());
+  if (!alias_vault ||
+      alias_vault->runtime_layout != RuntimeLayout::skse_launcher_alias ||
+      !commit_verified_runtime_manifest(*alias_vault, temporary.path()) ||
+      !runtime_manifest_matches(*alias_vault)) {
+    return 36;
+  }
+  const auto alias_manifest = read_file(alias_vault->manifest);
+  if (alias_manifest.find("runtimeLayout=skse-launcher-alias\n") ==
+          std::string::npos ||
+      alias_manifest.find("SkyrimSELauncher.exe|") != std::string::npos) {
+    return 37;
+  }
+
   if (SetNamedSecurityInfoW(
           const_cast<wchar_t*>(vault->probe.vault_path.c_str()), SE_FILE_OBJECT,
           DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,

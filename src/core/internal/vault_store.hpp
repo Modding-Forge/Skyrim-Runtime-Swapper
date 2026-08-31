@@ -1,6 +1,7 @@
 #pragma once
 
 #include <runtime_swapper/transaction_backend.hpp>
+#include <runtime_swapper/runtime_layout.hpp>
 
 #include <cstdint>
 #include <filesystem>
@@ -12,6 +13,7 @@ namespace runtime_swapper::core {
 
 struct VaultLayout {
   BackendProbeResult probe;
+  RuntimeLayout runtime_layout{RuntimeLayout::standard};
   std::filesystem::path objects;
   std::filesystem::path transactions;
   std::filesystem::path conflicts;

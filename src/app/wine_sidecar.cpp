@@ -30,7 +30,7 @@ namespace runtime_swapper::app {
 namespace {
 
 constexpr std::uint32_t protocol_magic = 0x50535253U;
-constexpr std::uint16_t protocol_version = 3;
+constexpr std::uint16_t protocol_version = 4;
 constexpr std::uint32_t maximum_payload = 1024U * 1024U;
 
 #pragma pack(push, 1)
@@ -444,7 +444,7 @@ template <typename Value>
 
 InstallationOperationResult run_wine_sidecar(
     WineSidecarOperation operation, const std::filesystem::path& game_root,
-    bool risk_accepted) {
+    bool risk_accepted, bool allow_persistent) {
   if (posix_sidecar_sha256.size() != 64) {
     return error_result(L"native-sidecar-not-embedded",
                         L"This build does not contain a trusted native Linux helper hash.");
@@ -502,6 +502,8 @@ InstallationOperationResult run_wine_sidecar(
   append_string(payload, *unix_game);
   append_string(payload, *unix_catalog);
   append_integer(payload, static_cast<std::uint8_t>(risk_accepted ? 1 : 0));
+  append_integer(payload,
+                 static_cast<std::uint8_t>(allow_persistent ? 1 : 0));
   request.payload_size = static_cast<std::uint32_t>(payload.size());
 
   const auto ipc_parent = *local_app_data / L"Modding Forge" /

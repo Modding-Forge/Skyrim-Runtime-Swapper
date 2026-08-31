@@ -4,6 +4,7 @@
 #include "internal/vault_store.hpp"
 
 #include <runtime_swapper/patch_plan.hpp>
+#include <runtime_swapper/runtime_layout.hpp>
 #include <runtime_swapper/runtime_version.hpp>
 
 #include <cstdint>
@@ -21,9 +22,10 @@ namespace {
          std::wstring(source_version_label) / utf8_path(plan.relative_file);
 }
 
-[[nodiscard]] std::uint64_t total_source_bytes() {
+[[nodiscard]] std::uint64_t total_source_bytes(RuntimeLayout layout) {
   std::uint64_t required{};
   for (const auto& plan : patch_plan) {
+    if (!patch_plan_entry_enabled(layout, plan)) continue;
     if (plan.source_present) required += plan.source_size;
   }
   return required;
@@ -33,9 +35,10 @@ namespace {
 
 std::uint64_t required_source_backup_space(const std::filesystem::path& game_root) {
   const auto vault = resolve_vault_layout(game_root);
-  if (!vault) return total_source_bytes();
+  if (!vault) return total_source_bytes(detect_runtime_layout(game_root));
   std::uint64_t required{};
   for (const auto& plan : patch_plan) {
+    if (!patch_plan_entry_enabled(vault->runtime_layout, plan)) continue;
     if (plan.source_present &&
         !vault_object_matches(*vault, plan.source_sha256, plan.source_size)) {
       required += plan.source_size;
@@ -58,6 +61,7 @@ SourceBackupResult ensure_source_backups(const std::filesystem::path& game_root)
   bool complete = true;
   for (std::size_t index = 0; index < patch_plan.size(); ++index) {
     const auto& plan = patch_plan[index];
+    if (!patch_plan_entry_enabled(candidate->runtime_layout, plan)) continue;
     if (!plan.source_present) continue;
     verified_objects[index] = vault_object_matches(
         *candidate, plan.source_sha256, plan.source_size);
@@ -78,7 +82,9 @@ SourceBackupResult ensure_source_backups(const std::filesystem::path& game_root)
       candidate->probe.target_volume.stable_id !=
           vault->probe.target_volume.stable_id ||
       candidate->probe.vault_volume.stable_id !=
-          vault->probe.vault_volume.stable_id) {
+          vault->probe.vault_volume.stable_id ||
+      candidate->runtime_layout != vault->runtime_layout ||
+      !runtime_layout_matches(game_root, vault->runtime_layout)) {
     return {ExitCode::backup_failed, false,
             L"The recovery-vault identity changed while it was being verified."};
   }
@@ -90,6 +96,7 @@ SourceBackupResult ensure_source_backups(const std::filesystem::path& game_root)
   bool changed = false;
   for (std::size_t index = 0; index < patch_plan.size(); ++index) {
     const auto& plan = patch_plan[index];
+    if (!patch_plan_entry_enabled(vault->runtime_layout, plan)) continue;
     if (!plan.source_present || verified_objects[index]) continue;
     std::wstring path_error;
     const auto managed = resolve_managed_file(
@@ -121,7 +128,8 @@ SourceBackupResult ensure_source_backups(const std::filesystem::path& game_root)
     verified_objects[index] = true;
   }
 
-  if (!commit_verified_runtime_manifest(*vault, game_root) ||
+  if (!runtime_layout_matches(game_root, vault->runtime_layout) ||
+      !commit_verified_runtime_manifest(*vault, game_root) ||
       !runtime_manifest_matches(*vault)) {
     return {ExitCode::backup_failed, changed,
             L"The versioned recovery-vault manifest could not be committed."};

@@ -1,6 +1,7 @@
 #include "internal/file_operations.hpp"
 
 #include <runtime_swapper/sha256.hpp>
+#include <runtime_swapper/prepared_storage.hpp>
 #include <runtime_swapper/transaction_backend.hpp>
 
 #if defined(_WIN32)
@@ -77,6 +78,9 @@ std::filesystem::path utf8_path(std::string_view value) {
 }
 
 bool hash_matches(const std::filesystem::path& file, std::string_view expected) {
+  if (const auto prepared = prepared_hash_matches(file, expected)) {
+    return *prepared;
+  }
   const auto actual = sha256_file(file);
   return actual && *actual == expected;
 }

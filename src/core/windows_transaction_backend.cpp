@@ -940,6 +940,55 @@ class WindowsTransactionBackend final : public TransactionBackend {
     return flush_existing_file(live) && attempt_directory_flush(live.parent_path());
   }
 
+  bool atomic_replace_deferred_sync(
+      const std::filesystem::path& live,
+      const std::filesystem::path& staged,
+      const std::filesystem::path& rollback) override {
+    if (core::fault_injected("replace.before")) return false;
+    std::error_code error;
+    std::filesystem::create_directories(rollback.parent_path(), error);
+    if (error || path_has_unsupported_reparse_component(live) ||
+        path_has_unsupported_reparse_component(staged) ||
+        path_has_unsupported_reparse_component(rollback.parent_path()) ||
+        !same_volume(live, staged) || !same_volume(live, rollback)) {
+      return false;
+    }
+    std::filesystem::remove(rollback, error);
+    error.clear();
+    if (!ReplaceFileW(live.c_str(), staged.c_str(), rollback.c_str(),
+                      REPLACEFILE_WRITE_THROUGH, nullptr, nullptr)) {
+      if (!std::filesystem::is_regular_file(live, error) || error ||
+          !std::filesystem::is_regular_file(staged, error) || error ||
+          std::filesystem::exists(rollback, error) || error ||
+          !MoveFileExW(live.c_str(), rollback.c_str(), MOVEFILE_WRITE_THROUGH) ||
+          !flush_existing_file(rollback)) {
+        return false;
+      }
+      if (core::fault_injected("replace.after-source-move")) return false;
+      if (!MoveFileExW(staged.c_str(), live.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        (void)MoveFileExW(rollback.c_str(), live.c_str(), MOVEFILE_WRITE_THROUGH);
+        return false;
+      }
+    }
+    if (core::fault_injected("replace.after-rename")) return false;
+    return flush_existing_file(live);
+  }
+
+  bool atomic_install_deferred_sync(
+      const std::filesystem::path& staged,
+      const std::filesystem::path& live) override {
+    std::error_code error;
+    std::filesystem::create_directories(live.parent_path(), error);
+    if (error || std::filesystem::exists(live, error) || error ||
+        path_has_unsupported_reparse_component(staged) ||
+        path_has_unsupported_reparse_component(live.parent_path()) ||
+        !same_volume(staged, live) ||
+        !MoveFileExW(staged.c_str(), live.c_str(), MOVEFILE_WRITE_THROUGH)) {
+      return false;
+    }
+    return flush_existing_file(live);
+  }
+
   bool restore_file(const std::filesystem::path& rollback,
                     const std::filesystem::path& live) override {
     if (!std::filesystem::is_regular_file(rollback) ||
@@ -1068,6 +1117,43 @@ class WindowsTransactionBackend final : public TransactionBackend {
            !core::fault_injected("remove.after-sync");
   }
 
+  bool durable_remove_deferred_sync(
+      const std::filesystem::path& path) override {
+    if (core::fault_injected("remove.before") ||
+        path_has_unsupported_reparse_component(path)) {
+      return false;
+    }
+    UniqueHandle file(CreateFileW(
+        path.c_str(), DELETE | FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr));
+    if (file.get() == INVALID_HANDLE_VALUE) {
+      const DWORD error = GetLastError();
+      return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+    }
+    FILE_ATTRIBUTE_TAG_INFO tag{};
+    if (!GetFileInformationByHandleEx(file.get(), FileAttributeTagInfo, &tag,
+                                      sizeof(tag)) ||
+        (tag.FileAttributes &
+         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+      return false;
+    }
+    FILE_DISPOSITION_INFO_EX disposition{
+        FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS |
+        FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE};
+    if (!SetFileInformationByHandle(file.get(), FileDispositionInfoEx,
+                                    &disposition, sizeof(disposition))) {
+      FILE_DISPOSITION_INFO legacy{TRUE};
+      if (!SetFileInformationByHandle(file.get(), FileDispositionInfo, &legacy,
+                                      sizeof(legacy))) {
+        return false;
+      }
+    }
+    file.reset();
+    return !core::fault_injected("remove.after-unlink");
+  }
+
   bool durable_remove_tree(const std::filesystem::path& root) override {
     if (core::fault_injected("remove-tree.before") || root.empty() ||
         root == root.root_path()) {
@@ -1180,6 +1266,12 @@ class WindowsTransactionBackend final : public TransactionBackend {
 
   bool sync_parent(const std::filesystem::path& path) override {
     return attempt_directory_flush(path.parent_path());
+  }
+
+  bool sync_directory(const std::filesystem::path& directory) override {
+    if (core::fault_injected("directory.before-sync")) return false;
+    return attempt_directory_flush(directory) &&
+           !core::fault_injected("directory.after-sync");
   }
 };
 

@@ -4,6 +4,7 @@
 
 #include <unistd.h>
 
+#include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -107,6 +108,27 @@ int main() {
     if (!backend.restore_file(rollback, live)) return 7;
   }
 
+  const auto deferred_root = temporary.path() / "deferred";
+  const auto deferred_live = deferred_root / "live";
+  const auto deferred_staged = deferred_root / "staged";
+  const auto deferred_rollback = deferred_root / "rollback";
+  write_file(deferred_live, "source");
+  write_file(deferred_staged, "target");
+  if (!backend.atomic_replace_deferred_sync(
+          deferred_live, deferred_staged, deferred_rollback) ||
+      read_file(deferred_live) != "target" ||
+      read_file(deferred_rollback) != "source") {
+    return 26;
+  }
+  fault("directory.before-sync");
+  if (backend.sync_directory(deferred_root) ||
+      read_file(deferred_live) != "target" ||
+      read_file(deferred_rollback) != "source") {
+    return 27;
+  }
+  clear_fault();
+  if (!backend.sync_directory(deferred_root)) return 28;
+
   const auto written = temporary.path() / "written";
   for (const auto* point : {"write.before", "write.after-temp-sync"}) {
     std::error_code error;
@@ -136,6 +158,26 @@ int main() {
   if (journal.append(JournalPhase::staged, 0, std::string(64, 'a'))) return 11;
   clear_fault();
   if (read_transaction_journal(journal_path).records.size() != 2) return 12;
+  const auto batch_journal_path = temporary.path() / "batch-journal";
+  TransactionJournal batch_journal(
+      batch_journal_path, "abcdef0123456789abcdef0123456789", "batch-fault", true);
+  const std::array batch_hashes{std::string(64, 'c'), std::string(64, 'd')};
+  const std::array batch_entries{
+      JournalAppend{JournalPhase::replace_pending, 0, batch_hashes[0]},
+      JournalAppend{JournalPhase::replace_pending, 1, batch_hashes[1]}};
+  fault("journal.after-file-sync");
+  if (batch_journal.append_batch(batch_entries)) return 29;
+  clear_fault();
+  const auto durable_batch = read_transaction_journal(batch_journal_path);
+  if (durable_batch.status != JournalReadStatus::valid ||
+      durable_batch.records.size() != 2 ||
+      durable_batch.records.back().sequence != 2 ||
+      !batch_journal.append(JournalPhase::replaced, 0, std::string(64, 'e'))) {
+    return 30;
+  }
+  if (read_transaction_journal(batch_journal_path).records.back().sequence != 3) {
+    return 31;
+  }
   {
     std::ofstream stream(journal_path, std::ios::binary | std::ios::app);
     stream.write("torn", 4);

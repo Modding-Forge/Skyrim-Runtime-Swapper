@@ -109,6 +109,18 @@ class TransactionBackend {
                                             const std::filesystem::path& rollback) = 0;
   [[nodiscard]] virtual bool atomic_install(const std::filesystem::path& staged,
                                             const std::filesystem::path& live) = 0;
+  // Used only after a complete journal intent and verified recovery vault are
+  // durable. Callers must synchronize every affected directory as one boundary.
+  [[nodiscard]] virtual bool atomic_replace_deferred_sync(
+      const std::filesystem::path& live, const std::filesystem::path& staged,
+      const std::filesystem::path& rollback) {
+    return atomic_replace(live, staged, rollback);
+  }
+  [[nodiscard]] virtual bool atomic_install_deferred_sync(
+      const std::filesystem::path& staged,
+      const std::filesystem::path& live) {
+    return atomic_install(staged, live);
+  }
   [[nodiscard]] virtual bool restore_file(const std::filesystem::path& rollback,
                                           const std::filesystem::path& live) = 0;
   [[nodiscard]] virtual bool copy_atomic(const std::filesystem::path& source,
@@ -125,6 +137,10 @@ class TransactionBackend {
   [[nodiscard]] virtual bool move_atomic(const std::filesystem::path& source,
                                          const std::filesystem::path& destination) = 0;
   [[nodiscard]] virtual bool durable_remove(const std::filesystem::path& path) = 0;
+  [[nodiscard]] virtual bool durable_remove_deferred_sync(
+      const std::filesystem::path& path) {
+    return durable_remove(path);
+  }
   // Removes a private, user-owned tree without following links. Implementations
   // must synchronize every directory whose entries are changed.
   [[nodiscard]] virtual bool durable_remove_tree(
@@ -135,6 +151,10 @@ class TransactionBackend {
   [[nodiscard]] virtual bool write_atomic(const std::filesystem::path& path,
                                           std::string_view bytes) = 0;
   [[nodiscard]] virtual bool sync_parent(const std::filesystem::path& path) = 0;
+  [[nodiscard]] virtual bool sync_directory(
+      const std::filesystem::path& directory) {
+    return sync_parent(directory / ".srs-sync-boundary");
+  }
 };
 
 [[nodiscard]] TransactionBackend& transaction_backend();
