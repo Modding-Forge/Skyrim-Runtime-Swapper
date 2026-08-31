@@ -183,6 +183,10 @@ void show_error_dialog(const std::wstring& message) {
 
 }  // namespace
 
+bool copy_diagnostic_logs() noexcept {
+  return copy_latest_skse_log();
+}
+
 void log_diagnostic(const std::wstring& message) noexcept {
   try {
     const auto path = swapper_log_path();

@@ -141,7 +141,8 @@ int run(int argc, wchar_t** argv) {
   auto probe = wine ? sidecar_probe.backend
                     : probe_installation_storage(*options.game_root).backend;
   log_diagnostic(L"Storage backend: " + probe.description + L"; vault: " +
-                 probe.vault_path.wstring());
+                 probe.vault_path.wstring() + L"; technical reason: " +
+                 probe.technical_reason + L"; message: " + probe.message);
   if (!probe.success()) {
     mutex_lock.unlock();
     if (!options.quiet) show_hard_blocked_dialog(probe);

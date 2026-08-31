@@ -2,11 +2,13 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
-## 1.2.0-rc3 - 2026-08-31
+## 1.2.0-rc4 - 2026-08-31
 
 - Added portable storage classification and automatically selected recovery vaults for Windows, Linux, Wine, and Proton.
 - Added recoverable persistent downgrades for external, exFAT, ntfs-3g, and otherwise non-automatic local filesystems.
 - Hardened transaction journals, conflict preservation, vault identity validation, locator repair, native sidecar authentication, and crash recovery.
+- Accepted canonical Bazzite and Fedora Atomic home aliases without allowing symlinks inside the recovery-vault hierarchy.
+- Added log copying to hard-block dialogs and recorded the complete storage probe reason before showing them.
 - Added Windows, Linux, WSL, Wine, filesystem, persistent-mode, fault-injection, and block-corruption test matrices.
 
 ## 1.1.0 - 2026-08-29

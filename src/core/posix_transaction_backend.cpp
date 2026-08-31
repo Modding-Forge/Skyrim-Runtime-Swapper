@@ -301,14 +301,39 @@ struct MountEntry {
 }
 
 [[nodiscard]] std::optional<std::filesystem::path> state_home() {
-  if (const char* xdg = std::getenv("XDG_STATE_HOME"); xdg != nullptr && *xdg != '\0') {
-    const std::filesystem::path path(xdg);
-    return path.is_absolute() ? std::optional(path) : std::nullopt;
+  const char* home_value = std::getenv("HOME");
+  std::optional<std::filesystem::path> raw_home;
+  std::optional<std::filesystem::path> resolved_home;
+  if (home_value != nullptr && *home_value != '\0') {
+    const std::filesystem::path candidate(home_value);
+    if (candidate.is_absolute()) {
+      raw_home = candidate.lexically_normal();
+      std::error_code error;
+      const auto canonical = std::filesystem::canonical(*raw_home, error);
+      struct stat status {};
+      if (!error && canonical.is_absolute() &&
+          ::lstat(canonical.c_str(), &status) == 0 && S_ISDIR(status.st_mode) &&
+          status.st_uid == ::geteuid() &&
+          (status.st_mode & (S_IWGRP | S_IWOTH)) == 0) {
+        resolved_home = canonical;
+      }
+    }
   }
-  const char* home = std::getenv("HOME");
-  if (home == nullptr || *home == '\0') return std::nullopt;
-  const std::filesystem::path path(home);
-  return path.is_absolute() ? std::optional(path / ".local" / "state") : std::nullopt;
+  if (const char* xdg = std::getenv("XDG_STATE_HOME"); xdg != nullptr && *xdg != '\0') {
+    const std::filesystem::path path =
+        std::filesystem::path(xdg).lexically_normal();
+    if (!path.is_absolute()) return std::nullopt;
+    if (raw_home && resolved_home) {
+      const auto relative = path.lexically_relative(*raw_home);
+      if (!relative.empty() &&
+          (relative.begin() == relative.end() || *relative.begin() != "..")) {
+        return (*resolved_home / relative).lexically_normal();
+      }
+    }
+    return path;
+  }
+  return resolved_home ? std::optional(*resolved_home / ".local" / "state")
+                       : std::nullopt;
 }
 
 [[nodiscard]] std::optional<std::filesystem::path> existing_directory_ancestor(

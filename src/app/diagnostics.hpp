@@ -9,6 +9,7 @@
 namespace runtime_swapper::app {
 
 void log_diagnostic(const std::wstring& message) noexcept;
+[[nodiscard]] bool copy_diagnostic_logs() noexcept;
 
 int finish(ExitCode code, const std::wstring& message, UINT icon, bool quiet = false);
 

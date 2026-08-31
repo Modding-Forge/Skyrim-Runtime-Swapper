@@ -158,6 +158,21 @@ if "$exfat_available"; then
 fi
 
 first_target="${mounts[1]}/game"
+bazzite_home="$vault_mount/bazzite-home"
+bazzite_home_alias="$test_root/bazzite-home-alias"
+bazzite_target="${mounts[1]}/game-bazzite"
+mkdir -p "$bazzite_home" "$bazzite_target"
+chmod 0700 "$bazzite_home"
+ln -s "$bazzite_home" "$bazzite_home_alias"
+bazzite_output="$(env -u XDG_STATE_HOME HOME="$bazzite_home_alias" \
+  "$probe" "$bazzite_target" --prepare)"
+printf '%s\n' "$bazzite_output"
+[[ "$(sed -n 's/^mode=//p' <<<"$bazzite_output")" == automatic ]]
+bazzite_vault="$(sed -n 's/^vault=//p' <<<"$bazzite_output")"
+[[ "$bazzite_vault" == "$bazzite_home"/.local/state/modding-forge/skyrim-runtime-swapper/vaults/skyrimse-* ]]
+[[ -d "$bazzite_vault" && ! -L "$bazzite_vault" &&
+   "$(stat -c '%a' "$bazzite_vault")" == 700 ]]
+
 make_volume undersized-vault ext4 128
 undersized_mount="$created_mount"
 mkdir -p "$undersized_mount/state"

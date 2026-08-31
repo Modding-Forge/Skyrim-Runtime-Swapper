@@ -1,5 +1,7 @@
 #include "persistent_dialog.hpp"
 
+#include "diagnostics.hpp"
+
 #include <runtime_swapper/runtime_version.hpp>
 
 #include <windows.h>
@@ -12,6 +14,7 @@ namespace runtime_swapper::app {
 namespace {
 
 constexpr int persistent_button_id = 4101;
+constexpr int copy_logs_button_id = 4102;
 
 }  // namespace
 
@@ -65,6 +68,10 @@ void show_hard_blocked_dialog(const BackendProbeResult& probe) {
   const std::wstring content = probe.message + L"\n\nTechnical reason: " +
                                probe.technical_reason +
                                L"\n\nNo game file was changed.";
+  const TASKDIALOG_BUTTON buttons[] = {
+      {copy_logs_button_id, L"Copy logs"},
+      {IDCLOSE, L"Close"},
+  };
   TASKDIALOGCONFIG configuration{};
   configuration.cbSize = sizeof(configuration);
   configuration.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
@@ -72,9 +79,15 @@ void show_hard_blocked_dialog(const BackendProbeResult& probe) {
   configuration.pszMainIcon = TD_ERROR_ICON;
   configuration.pszMainInstruction = L"Downgrade is not recoverable";
   configuration.pszContent = content.c_str();
-  configuration.dwCommonButtons = TDCBF_CLOSE_BUTTON;
+  configuration.cButtons = static_cast<UINT>(std::size(buttons));
+  configuration.pButtons = buttons;
+  configuration.nDefaultButton = IDCLOSE;
   int selected{};
-  (void)TaskDialogIndirect(&configuration, &selected, nullptr, nullptr);
+  if (SUCCEEDED(TaskDialogIndirect(&configuration, &selected, nullptr, nullptr)) &&
+      selected == copy_logs_button_id && !copy_diagnostic_logs()) {
+    MessageBoxW(nullptr, L"The diagnostic logs could not be found or copied.",
+                L"Skyrim Runtime Swapper", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+  }
 }
 
 }  // namespace runtime_swapper::app
