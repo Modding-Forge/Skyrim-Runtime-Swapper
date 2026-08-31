@@ -268,8 +268,9 @@ static_assert(offsetof(MountPointReparseData, path_buffer) == 16);
   std::unique_ptr<void, LocalFreeDeleter> acl(raw_acl);
   return SetNamedSecurityInfoW(
              const_cast<wchar_t*>(directory.c_str()), SE_FILE_OBJECT,
-             DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, nullptr,
-             nullptr, raw_acl, nullptr) == ERROR_SUCCESS;
+             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION |
+                 PROTECTED_DACL_SECURITY_INFORMATION,
+             current_sid, nullptr, raw_acl, nullptr) == ERROR_SUCCESS;
 }
 
 [[nodiscard]] bool directory_dacl_is_restricted(
@@ -731,8 +732,8 @@ class WindowsTransactionBackend final : public TransactionBackend {
                      L"The automatic recovery vault could not be created safely.", *target,
                      {}, vault_path, *id);
     }
-    if (!current_sid || !owner_is_current_user(vault_path, current_sid) ||
-        !restrict_directory_acl(vault_path, current_sid) ||
+    if (!current_sid || !restrict_directory_acl(vault_path, current_sid) ||
+        !owner_is_current_user(vault_path, current_sid) ||
         !directory_dacl_is_restricted(vault_path, current_sid)) {
       return blocked(L"vault-owner-or-dacl",
                      L"The recovery vault is not exclusively controlled by the current "
