@@ -15,8 +15,8 @@ if ($LASTEXITCODE -ne 0) {
 
 $probePath = (Resolve-Path -LiteralPath $LinuxProbe).Path
 $scriptPath = (Resolve-Path -LiteralPath $MatrixScript).Path
-$linuxProbe = (& wsl.exe -d $Distribution -- wslpath -a ($probePath -replace '\', '/')).Trim()
-$linuxScript = (& wsl.exe -d $Distribution -- wslpath -a ($scriptPath -replace '\', '/')).Trim()
+$linuxProbe = (& wsl.exe -d $Distribution -- wslpath -a $probePath.Replace('\', '/')).Trim()
+$linuxScript = (& wsl.exe -d $Distribution -- wslpath -a $scriptPath.Replace('\', '/')).Trim()
 if (-not $linuxProbe -or -not $linuxScript) {
     throw 'WSL path translation failed'
 }

@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(SkyrimRuntimeSwapper VERSION 1.1.0 LANGUAGES C CXX)
+project(SkyrimRuntimeSwapper VERSION 1.2.0 LANGUAGES C CXX)
+
+set(SKYRIM_RUNTIME_RELEASE_VERSION "1.2.0-rc1")
+if(SKYRIM_RUNTIME_RELEASE_VERSION MATCHES "-")
+  set(SKYRIM_RUNTIME_VERSION_FLAGS "VS_FF_PRERELEASE")
+else()
+  set(SKYRIM_RUNTIME_VERSION_FLAGS "0x0L")
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -160,11 +167,7 @@ if(NOT EXISTS "${HDIFFPATCH_ROOT}/libHDiffPatch/HPatch/patch.c" OR
     "HDiffPatch5 is missing. Initialize third_party/HDiffPatch5 recursively before building")
 endif()
 
-if(WIN32)
-  set(HDIFFPATCH_WINDOW_DIFF 1)
-else()
-  set(HDIFFPATCH_WINDOW_DIFF 0)
-endif()
+set(HDIFFPATCH_WINDOW_DIFF 1)
 
 add_library(hdiffpatch_native STATIC
   src/core/native_hpatch_adapter.c
@@ -213,6 +216,12 @@ target_compile_definitions(hdiffpatch_native PRIVATE
   _CompressPlugin_zstd
   _ChecksumPlugin_xxh128
 )
+if(NOT WIN32)
+  target_compile_definitions(hdiffpatch_native PRIVATE
+    _GNU_SOURCE
+    _FILE_OFFSET_BITS=64
+    ZSTD_DISABLE_ASM)
+endif()
 if(MSVC)
   set_target_properties(hdiffpatch_native PROPERTIES VS_GLOBAL_WarningLevel TurnOffAllWarnings)
 endif()
@@ -469,10 +478,6 @@ if(BUILD_TESTING)
     if(MSVC)
       target_compile_options(wine_sidecar_probe PRIVATE /W4 /permissive- /EHsc /utf-8)
     endif()
-    add_custom_command(TARGET wine_sidecar_probe POST_BUILD
-      COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-        "${SKYRIM_RUNTIME_POSIX_SIDECAR}"
-        "$<TARGET_FILE_DIR:wine_sidecar_probe>/SkyrimRuntimeSwapper.Native")
   endif()
 endif()
 

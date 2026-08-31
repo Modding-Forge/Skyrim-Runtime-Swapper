@@ -162,11 +162,22 @@ struct MountEntry {
     return StorageMedium::network;
   }
   if (const auto medium = udev_medium(mount)) return *medium;
-  const auto sys_path = std::filesystem::path("/sys/dev/block") /
-                        (std::to_string(mount.major_number) + ":" +
-                         std::to_string(mount.minor_number));
+  auto sys_path = std::filesystem::path("/sys/dev/block") /
+                  (std::to_string(mount.major_number) + ":" +
+                   std::to_string(mount.minor_number));
   std::error_code error;
-  const auto canonical = std::filesystem::canonical(sys_path, error);
+  auto canonical = std::filesystem::canonical(sys_path, error);
+  if (error && mount.source.starts_with("/dev/")) {
+    struct stat source_status {};
+    if (::stat(mount.source.c_str(), &source_status) == 0 &&
+        S_ISBLK(source_status.st_mode)) {
+      sys_path = std::filesystem::path("/sys/dev/block") /
+                 (std::to_string(::major(source_status.st_rdev)) + ":" +
+                  std::to_string(::minor(source_status.st_rdev)));
+      error.clear();
+      canonical = std::filesystem::canonical(sys_path, error);
+    }
+  }
   if (!error) {
     const auto sysfs = canonical.generic_string();
     if (sysfs.find("/usb") != std::string::npos ||
@@ -345,6 +356,14 @@ struct MountEntry {
   return std::string(reinterpret_cast<const char*>(value.data()), value.size());
 }
 
+[[nodiscard]] std::string locator_contents(
+    std::string_view id, const std::filesystem::path& vault,
+    const VolumeIdentity& vault_volume) {
+  return "SRS-VAULT-LOCATOR-1\ninstallation=" + std::string(id) +
+         "\nvault=" + utf8_path(vault) + "\nvolume=" +
+         utf8_path(vault_volume.stable_id) + "\n";
+}
+
 [[nodiscard]] bool locator_matches(const std::filesystem::path& locator,
                                    std::string_view id,
                                    const std::filesystem::path& vault,
@@ -352,11 +371,29 @@ struct MountEntry {
   std::ifstream stream(locator, std::ios::binary);
   if (!stream) return false;
   const std::string text(std::istreambuf_iterator<char>(stream), {});
-  const std::string expected = "SRS-VAULT-LOCATOR-1\ninstallation=" +
-                               std::string(id) + "\nvault=" + utf8_path(vault) +
-                               "\nvolume=" +
-                               utf8_path(vault_volume.stable_id) + "\n";
-  return !stream.bad() && text == expected;
+  return !stream.bad() && text == locator_contents(id, vault, vault_volume);
+}
+
+[[nodiscard]] bool vault_manifest_identity_matches(
+    const std::filesystem::path& vault, std::string_view id,
+    const VolumeIdentity& target_volume, const VolumeIdentity& vault_volume) {
+  const auto manifest = vault / "manifest.v2";
+  std::error_code error;
+  if (!std::filesystem::is_regular_file(manifest, error) || error ||
+      has_symlink_component(manifest)) {
+    return false;
+  }
+  std::ifstream stream(manifest, std::ios::binary);
+  std::array<std::string, 6> lines;
+  for (auto& line : lines) {
+    if (!std::getline(stream, line)) return false;
+  }
+  return lines[0] == "SRS-VAULT-MANIFEST-2" &&
+         lines[1] == "installation=" + std::string(id) &&
+         lines[2].starts_with("source=") && lines[2].size() > 7 &&
+         lines[3].starts_with("target=") && lines[3].size() > 7 &&
+         lines[4] == "targetVolume=" + utf8_path(target_volume.stable_id) &&
+         lines[5] == "vaultVolume=" + utf8_path(vault_volume.stable_id);
 }
 
 [[nodiscard]] std::optional<std::string> installation_id(
@@ -370,7 +407,10 @@ struct MountEntry {
       volume_relative.native().starts_with("..")) {
     return std::nullopt;
   }
-  const auto relative_id = volume_relative.generic_u8string();
+  auto relative_id = volume_relative.generic_u8string();
+  while (relative_id.size() > 1 && relative_id.back() == u8'/') {
+    relative_id.pop_back();
+  }
   std::string identity(volume.stable_id.begin(), volume.stable_id.end());
   identity += '\n';
   identity.append(reinterpret_cast<const char*>(relative_id.data()), relative_id.size());
@@ -458,9 +498,14 @@ class PosixTransactionBackend final : public TransactionBackend {
                                   ? std::optional(vault_path)
                                   : existing_directory_ancestor(*state);
     auto vault = vault_anchor ? inspect_volume(*vault_anchor) : std::nullopt;
-    if (locator_exists &&
-        (!std::filesystem::is_regular_file(locator_status) || !vault_exists || !vault ||
-         !locator_matches(locator, *id, vault_path, *vault))) {
+    const bool locator_matches_vault =
+        locator_exists && std::filesystem::is_regular_file(locator_status) &&
+        vault_exists && vault && locator_matches(locator, *id, vault_path, *vault);
+    const bool locator_recoverable =
+        locator_exists && std::filesystem::is_regular_file(locator_status) &&
+        vault_exists && vault && !locator_matches_vault &&
+        vault_manifest_identity_matches(vault_path, *id, *target, *vault);
+    if (locator_exists && !locator_matches_vault && !locator_recoverable) {
       return blocked(L"active-vault-unavailable",
                      L"The recorded recovery vault is missing, changed, or unavailable. "
                      L"The pending installation will not be redirected to a new vault.",
@@ -540,6 +585,13 @@ class PosixTransactionBackend final : public TransactionBackend {
       return blocked(L"independent-vault-required",
                      L"This target requires a vault on a different durable volume.",
                      *target, *vault, vault_path, *id);
+    }
+    if (locator_recoverable &&
+        (!write_atomic(locator, locator_contents(*id, vault_path, *vault)) ||
+         !locator_matches(locator, *id, vault_path, *vault))) {
+      return blocked(L"vault-locator-repair-failed",
+                     L"The verified recovery vault was found, but its damaged locator "
+                     L"could not be repaired.", *target, *vault, vault_path, *id);
     }
     return {ExitCode::success, mode, *target, *vault, vault_path, *id,
             safety_mode_label(mode) + L": " + target->description,

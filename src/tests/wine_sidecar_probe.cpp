@@ -16,8 +16,12 @@ int wmain(int argc, wchar_t** argv) {
       std::filesystem::absolute(argv[1]));
   constexpr std::wstring_view bridge_failures[] = {
       L"native-sidecar-not-embedded", L"native-sidecar-hash-mismatch",
-      L"wine-path-translation-failed", L"sidecar-pipe-failed",
-      L"sidecar-pipe-security-failed", L"sidecar-process-security-failed",
+      L"wine-game-path-translation-failed",
+      L"wine-sidecar-path-translation-failed", L"wine-sidecar-path-invalid",
+      L"wine-local-app-data-unavailable",
+      L"wine-local-app-data-translation-failed",
+      L"sidecar-ipc-directory-failed", L"sidecar-ipc-directory-unsafe",
+      L"sidecar-ipc-path-translation-failed",
       L"native-sidecar-start-failed",
       L"sidecar-nonce-failed", L"sidecar-request-failed",
       L"sidecar-response-invalid", L"sidecar-response-incomplete",

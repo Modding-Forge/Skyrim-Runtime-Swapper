@@ -2,7 +2,7 @@
 
 Skyrim Runtime Swapper lets a Skyrim mod collection built for an older runtime start through the unmodified `skse64_loader.exe`. On trusted internal filesystems it restores the original Steam runtime automatically after every game session. On external, removable, exFAT, or otherwise uncertain local storage it offers a recoverable persistent downgrade instead.
 
-Current release: `1.1.0`.
+Current release: `1.2.0-rc1`.
 
 ## Profiles
 
@@ -46,7 +46,7 @@ Originals are content-addressed under `objects/<sha256>` in an automatically sel
 
 Internal NTFS on Windows and internal ext4, XFS, or Btrfs on Linux use automatic per-session restoration. External or removable volumes and exFAT use persistent-only mode with a vault on another durable volume. Unknown but stable local storage requires an explicit warning confirmation. Network storage, unsafe paths, missing recovery storage, missing native helpers, and unrecognized source files are hard blocked. A hard block exposes no downgrade action.
 
-Under Wine and Proton the Windows process translates paths and coordinates a native ELF sidecar through a one-shot, nonce-authenticated, length-prefixed pipe protocol. The ELF SHA-256 is embedded into the Windows binary and verified before launch. Only the native helper mutates managed files, so Linux filesystem synchronization and rename semantics are used directly.
+Under Wine and Proton the Windows process translates paths and coordinates a native ELF sidecar through a one-shot, nonce-authenticated, length-prefixed exchange in a randomly named private directory. The native helper restricts and validates the directory, rejects links and pre-existing responses, and publishes its response atomically. The ELF SHA-256 is embedded into the Windows binary and verified before launch. Only the native helper mutates managed files, so Linux filesystem synchronization and rename semantics are used directly.
 
 The vault intent is synchronized before the game volume changes. Each live result is hashed again after replacement. Persistent markers are committed in the vault first and then in the game directory. If the active vault disappears or another device appears at a reused path, the transaction remains pending and launch is blocked instead of silently selecting a replacement vault.
 
@@ -74,7 +74,7 @@ build.bat Release D:\Assets\manifest.json
 
 The build fails if the asset format, algorithm, HDiffPatch version, runtime pair, required profile files, or patch hashes do not match. Bethesda game files are never included.
 
-The normal CTest suite covers journal migration, torn records, risk acceptance, vault corruption, unknown-file preservation, Unicode names, ContentCatalog conflicts, and transaction cut points. Additional guarded release-gate runners live under `tools/tests` for Windows VHDX classification and detach recovery, Linux loop filesystems, `dm-log-writes` replay, `dm-flakey` failures, WSL shutdowns, sidecar protocol rejection, and full runtime crash recovery with a locally supplied clean Skyrim fixture. The destructive storage runners create and validate isolated temporary images only, require explicit administrator or root execution, and never select a physical disk.
+The normal CTest suite covers journal migration, torn records, risk acceptance, vault corruption, unknown-file preservation, Unicode names, ContentCatalog conflicts, and transaction cut points. Additional guarded release-gate runners live under `tools/tests` for Windows VHDX classification and detach recovery, Linux loop filesystems, persistent exFAT and ntfs-3g activation plus restore, `dm-log-writes` replay, `dm-flakey` failures, WSL shutdowns, sidecar protocol rejection, and full runtime crash recovery with a locally supplied clean Skyrim fixture. The destructive storage runners create and validate isolated temporary images only, require explicit administrator or root execution, and never select a physical disk.
 
 ## Source layout
 

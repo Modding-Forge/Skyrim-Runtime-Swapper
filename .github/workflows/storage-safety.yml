@@ -23,7 +23,7 @@ jobs:
         with:
           submodules: recursive
       - name: Install filesystem test tools
-        run: sudo apt-get update && sudo apt-get install -y btrfs-progs dosfstools exfatprogs xfsprogs
+        run: sudo apt-get update && sudo apt-get install -y btrfs-progs dosfstools e2fsprogs exfatprogs ntfs-3g xfsprogs
       - name: Configure
         run: >-
           cmake -S . -B build/native -G Ninja
@@ -102,4 +102,4 @@ jobs:
         run: |
           mkdir -p /tmp/srs-wine-game
           chmod 0644 bridge/SkyrimRuntimeSwapper.Native
-          wine bridge/WineSidecarProbe.exe 'Z:\tmp\srs-wine-game'
+          wine64 bridge/WineSidecarProbe.exe 'Z:\tmp\srs-wine-game'

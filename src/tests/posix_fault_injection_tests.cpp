@@ -15,12 +15,15 @@ namespace {
 class TemporaryDirectory {
  public:
   TemporaryDirectory() {
-    std::string pattern = "/tmp/srs-posix-faults-XXXXXX";
+    std::string pattern =
+        (std::filesystem::current_path() / "srs-posix-faults-XXXXXX").string();
     pattern.push_back('\0');
     if (char* created = ::mkdtemp(pattern.data())) path_ = created;
   }
   ~TemporaryDirectory() {
     ::unsetenv("SKYRIM_RUNTIME_SWAPPER_FAULT_POINT");
+    ::unsetenv("XDG_STATE_HOME");
+    ::unsetenv("HOME");
     std::error_code error;
     std::filesystem::remove_all(path_, error);
   }
@@ -39,6 +42,11 @@ void write_file(const std::filesystem::path& path, std::string_view text) {
 std::string read_file(const std::filesystem::path& path) {
   std::ifstream stream(path, std::ios::binary);
   return std::string(std::istreambuf_iterator<char>(stream), {});
+}
+
+std::string utf8_path(const std::filesystem::path& path) {
+  const auto value = path.generic_u8string();
+  return std::string(reinterpret_cast<const char*>(value.data()), value.size());
 }
 
 void fault(const char* point) {
@@ -156,6 +164,39 @@ int main() {
     fault(point);
     if (backend.durable_remove(removed) || std::filesystem::exists(removed)) return 16;
     clear_fault();
+  }
+
+  const auto game = temporary.path() / "game";
+  const auto state = temporary.path() / "state";
+  const auto home = temporary.path() / "home";
+  std::filesystem::create_directories(game);
+  std::filesystem::create_directories(state);
+  std::filesystem::create_directories(home);
+  if (::setenv("XDG_STATE_HOME", state.c_str(), 1) != 0 ||
+      ::setenv("HOME", home.c_str(), 1) != 0) {
+    return 17;
+  }
+  const auto vault_probe = backend.probe(game, 0, true);
+  if (!vault_probe.success()) return 18;
+  const auto manifest = vault_probe.vault_path / "manifest.v2";
+  const auto identity_manifest =
+      std::string("SRS-VAULT-MANIFEST-2\ninstallation=") +
+      vault_probe.installation_id +
+      "\nsource=test-source\ntarget=test-target\ntargetVolume=" +
+      utf8_path(vault_probe.target_volume.stable_id) + "\nvaultVolume=" +
+      utf8_path(vault_probe.vault_volume.stable_id) + "\nentries=0\n";
+  write_file(manifest, identity_manifest);
+  const auto locator = game / ".skyrim-runtime-swapper" / "vault.locator";
+  write_file(locator, "torn-locator");
+  const auto recoverable_locator_probe = backend.probe(game);
+  if (!recoverable_locator_probe.success() ||
+      read_file(locator) != "torn-locator") {
+    return 19;
+  }
+  const auto repaired_locator_probe = backend.probe(game, 0, true);
+  if (!repaired_locator_probe.success() ||
+      !read_file(locator).starts_with("SRS-VAULT-LOCATOR-1\n")) {
+    return 20;
   }
   return 0;
 }

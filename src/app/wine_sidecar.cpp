@@ -23,6 +23,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace runtime_swapper::app {
@@ -95,14 +96,14 @@ static_assert(sizeof(Elf64ProgramHeader) == 56);
              : std::filesystem::path(std::wstring_view(buffer.data(), size)).parent_path();
 }
 
-[[nodiscard]] std::optional<std::filesystem::path> content_catalog_path() {
+[[nodiscard]] std::optional<std::filesystem::path> local_app_data_path() {
   PWSTR raw{};
   if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &raw))) {
     return std::nullopt;
   }
   std::filesystem::path result(raw);
   CoTaskMemFree(raw);
-  return result / L"Skyrim Special Edition" / L"ContentCatalog.txt";
+  return result;
 }
 
 [[nodiscard]] std::optional<std::string> wine_unix_path(
@@ -210,22 +211,11 @@ static_assert(sizeof(Elf64ProgramHeader) == 56);
   return true;
 }
 
-[[nodiscard]] bool read_exact_until(HANDLE handle, HANDLE process, void* output,
-                                    std::size_t size, ULONGLONG deadline) {
+[[nodiscard]] bool read_exact(HANDLE handle, void* output, std::size_t size) {
   auto* cursor = static_cast<std::byte*>(output);
   while (size != 0) {
-    DWORD available{};
-    if (!PeekNamedPipe(handle, nullptr, 0, nullptr, &available, nullptr)) return false;
-    if (available == 0) {
-      if (WaitForSingleObject(process, 0) == WAIT_OBJECT_0 ||
-          GetTickCount64() >= deadline) {
-        return false;
-      }
-      Sleep(10);
-      continue;
-    }
     const DWORD chunk = static_cast<DWORD>((std::min)(
-        size, static_cast<std::size_t>(available)));
+        size, static_cast<std::size_t>((std::numeric_limits<DWORD>::max)())));
     DWORD read{};
     if (!ReadFile(handle, cursor, chunk, &read, nullptr) || read == 0) return false;
     cursor += read;
@@ -233,6 +223,35 @@ static_assert(sizeof(Elf64ProgramHeader) == 56);
   }
   return true;
 }
+
+[[nodiscard]] std::wstring nonce_name(std::span<const std::byte> nonce) {
+  constexpr wchar_t digits[] = L"0123456789abcdef";
+  std::wstring result;
+  result.reserve(nonce.size() * 2);
+  for (const auto byte : nonce) {
+    const auto value = std::to_integer<unsigned>(byte);
+    result.push_back(digits[value >> 4U]);
+    result.push_back(digits[value & 0x0fU]);
+  }
+  return result;
+}
+
+class IpcCleanup {
+ public:
+  explicit IpcCleanup(std::filesystem::path directory)
+      : directory_(std::move(directory)) {}
+  IpcCleanup(const IpcCleanup&) = delete;
+  IpcCleanup& operator=(const IpcCleanup&) = delete;
+  ~IpcCleanup() {
+    DeleteFileW((directory_ / L"response.bin").c_str());
+    DeleteFileW((directory_ / L"response.tmp").c_str());
+    DeleteFileW((directory_ / L"request.bin").c_str());
+    RemoveDirectoryW(directory_.c_str());
+  }
+
+ private:
+  std::filesystem::path directory_;
+};
 
 template <typename Value>
 void append_integer(std::vector<std::byte>& bytes, Value value) {
@@ -410,100 +429,35 @@ InstallationOperationResult run_wine_sidecar(
   }
   const auto unix_game = wine_unix_path(game_root);
   const auto unix_sidecar = wine_unix_path(sidecar);
-  const auto catalog = content_catalog_path();
-  const auto unix_catalog = catalog ? wine_unix_path(*catalog) : std::nullopt;
+  const auto local_app_data = local_app_data_path();
+  const auto unix_local_app_data =
+      local_app_data ? wine_unix_path(*local_app_data) : std::nullopt;
+  const auto unix_catalog = unix_local_app_data
+                                ? std::optional<std::string>(
+                                      *unix_local_app_data +
+                                      "/Skyrim Special Edition/ContentCatalog.txt")
+                                : std::nullopt;
   const auto wide_sidecar = unix_sidecar ? wide(*unix_sidecar) : std::nullopt;
-  if (!unix_game || !unix_sidecar || !wide_sidecar || !unix_catalog) {
-    return error_result(L"wine-path-translation-failed",
-                        L"Wine could not translate the managed paths to native Linux paths.");
+  if (!unix_game) {
+    return error_result(L"wine-game-path-translation-failed",
+                        L"Wine could not translate the Skyrim directory to a native Linux path.");
   }
-
-  SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
-  HANDLE child_input_raw{};
-  HANDLE parent_input_raw{};
-  HANDLE parent_output_raw{};
-  HANDLE child_output_raw{};
-  if (!CreatePipe(&child_input_raw, &parent_input_raw, &security, 0) ||
-      !CreatePipe(&parent_output_raw, &child_output_raw, &security, 0)) {
-    if (child_input_raw) CloseHandle(child_input_raw);
-    if (parent_input_raw) CloseHandle(parent_input_raw);
-    if (parent_output_raw) CloseHandle(parent_output_raw);
-    if (child_output_raw) CloseHandle(child_output_raw);
-    return error_result(L"sidecar-pipe-failed",
-                        L"The native helper communication pipes could not be created.");
+  if (!unix_sidecar) {
+    return error_result(L"wine-sidecar-path-translation-failed",
+                        L"Wine could not translate the native helper path.");
   }
-  UniqueHandle child_input(child_input_raw);
-  UniqueHandle parent_input(parent_input_raw);
-  UniqueHandle parent_output(parent_output_raw);
-  UniqueHandle child_output(child_output_raw);
-  UniqueHandle child_error(CreateFileW(
-      L"NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &security,
-      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
-  if (!SetHandleInformation(parent_input.get(), HANDLE_FLAG_INHERIT, 0) ||
-      !SetHandleInformation(parent_output.get(), HANDLE_FLAG_INHERIT, 0) ||
-      !child_error) {
-    return error_result(L"sidecar-pipe-security-failed",
-                        L"The native helper pipe inheritance could not be restricted.");
+  if (!wide_sidecar) {
+    return error_result(L"wine-sidecar-path-invalid",
+                        L"The translated native helper path is not valid UTF-8.");
   }
-
-  STARTUPINFOEXW startup{};
-  startup.StartupInfo.cb = sizeof(startup);
-  startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-  startup.StartupInfo.hStdInput = child_input.get();
-  startup.StartupInfo.hStdOutput = child_output.get();
-  startup.StartupInfo.hStdError = child_error.get();
-  SIZE_T attribute_size{};
-  (void)InitializeProcThreadAttributeList(nullptr, 1, 0, &attribute_size);
-  std::vector<std::byte> attribute_storage(attribute_size);
-  startup.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(
-      attribute_storage.data());
-  std::array<HANDLE, 3> inherited_handles{
-      child_input.get(), child_output.get(), child_error.get()};
-  if (attribute_size == 0 ||
-      !InitializeProcThreadAttributeList(startup.lpAttributeList, 1, 0,
-                                         &attribute_size)) {
-    return error_result(L"sidecar-process-security-failed",
-                        L"The native helper handle list could not be restricted.");
+  if (!local_app_data) {
+    return error_result(L"wine-local-app-data-unavailable",
+                        L"Wine could not resolve the local application data directory.");
   }
-  if (!UpdateProcThreadAttribute(
-          startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-          inherited_handles.data(), sizeof(inherited_handles), nullptr, nullptr)) {
-    DeleteProcThreadAttributeList(startup.lpAttributeList);
-    return error_result(L"sidecar-process-security-failed",
-                        L"The native helper handle list could not be restricted.");
+  if (!unix_catalog) {
+    return error_result(L"wine-local-app-data-translation-failed",
+                        L"Wine could not translate the local application data directory to native Linux.");
   }
-  PROCESS_INFORMATION process_info{};
-  const auto start_process = [&](const std::filesystem::path& application,
-                                 const std::wstring& command) {
-    std::vector<wchar_t> mutable_command(command.begin(), command.end());
-    mutable_command.push_back(L'\0');
-    return CreateProcessW(
-        application.c_str(), mutable_command.data(), nullptr, nullptr, TRUE,
-        CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT |
-            EXTENDED_STARTUPINFO_PRESENT,
-        nullptr, game_root.c_str(), &startup.StartupInfo, &process_info);
-  };
-  BOOL started = start_process(sidecar, L"\"" + sidecar.wstring() + L"\"");
-  if (!started) {
-    const auto interpreter = elf_interpreter(sidecar);
-    const auto windows_interpreter =
-        interpreter ? wine_windows_path(*interpreter) : std::nullopt;
-    if (interpreter && windows_interpreter) {
-      const auto command = L"\"" + windows_interpreter->wstring() + L"\" \"" +
-                           *wide_sidecar + L"\"";
-      started = start_process(*windows_interpreter, command);
-    }
-  }
-  DeleteProcThreadAttributeList(startup.lpAttributeList);
-  if (!started) {
-    return error_result(L"native-sidecar-start-failed",
-                        L"Wine could not start the verified native Linux helper.");
-  }
-  UniqueHandle process(process_info.hProcess);
-  UniqueHandle thread(process_info.hThread);
-  child_input.reset();
-  child_output.reset();
-  child_error.reset();
 
   FrameHeader request{};
   request.magic = protocol_magic;
@@ -513,7 +467,6 @@ InstallationOperationResult run_wine_sidecar(
                                       reinterpret_cast<PUCHAR>(request.nonce.data()),
                                       static_cast<ULONG>(request.nonce.size()),
                                       BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
-    TerminateProcess(process.get(), 8);
     return error_result(L"sidecar-nonce-failed",
                         L"A secure native-helper protocol nonce could not be generated.");
   }
@@ -522,56 +475,193 @@ InstallationOperationResult run_wine_sidecar(
   append_string(payload, *unix_catalog);
   append_integer(payload, static_cast<std::uint8_t>(risk_accepted ? 1 : 0));
   request.payload_size = static_cast<std::uint32_t>(payload.size());
-  if (!write_exact(parent_input.get(), &request, sizeof(request)) ||
-      !write_exact(parent_input.get(), payload.data(), payload.size())) {
-    TerminateProcess(process.get(), 9);
-    return error_result(L"sidecar-request-failed",
-                        L"The native-helper request could not be transmitted.");
+
+  const auto ipc_parent = *local_app_data / L"Modding Forge" /
+                          L"Skyrim Runtime Swapper" / L"IPC";
+  std::error_code filesystem_error;
+  std::filesystem::create_directories(ipc_parent, filesystem_error);
+  const auto ipc_directory = ipc_parent / nonce_name(request.nonce);
+  if (filesystem_error ||
+      !std::filesystem::create_directory(ipc_directory, filesystem_error)) {
+    return error_result(L"sidecar-ipc-directory-failed",
+                        L"The isolated native-helper communication directory could not be created.");
   }
-  parent_input.reset();
+  IpcCleanup cleanup(ipc_directory);
+  const DWORD ipc_attributes = GetFileAttributesW(ipc_directory.c_str());
+  if (ipc_attributes == INVALID_FILE_ATTRIBUTES ||
+      (ipc_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+    return error_result(L"sidecar-ipc-directory-unsafe",
+                        L"The native-helper communication directory is not a plain local directory.");
+  }
+  const auto request_path = ipc_directory / L"request.bin";
+  const auto response_path = ipc_directory / L"response.bin";
+  UniqueHandle request_file(CreateFileW(
+      request_path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+      FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_OPEN_REPARSE_POINT |
+          FILE_FLAG_WRITE_THROUGH,
+      nullptr));
+  if (!request_file || !write_exact(request_file.get(), &request, sizeof(request)) ||
+      !write_exact(request_file.get(), payload.data(), payload.size()) ||
+      !FlushFileBuffers(request_file.get())) {
+    return error_result(L"sidecar-request-failed",
+                        L"The authenticated native-helper request could not be committed.");
+  }
+  request_file.reset();
+
+  const auto unix_ipc = wine_unix_path(ipc_directory);
+  const auto wide_request =
+      unix_ipc ? wide(*unix_ipc + "/request.bin") : std::nullopt;
+  const auto wide_response =
+      unix_ipc ? wide(*unix_ipc + "/response.bin") : std::nullopt;
+  if (!unix_ipc || !wide_request || !wide_response) {
+    return error_result(L"sidecar-ipc-path-translation-failed",
+                        L"Wine could not translate the isolated native-helper channel.");
+  }
+
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION process_info{};
+  const auto start_process = [&](const std::filesystem::path& application,
+                                 const std::wstring& command) {
+    process_info = {};
+    std::vector<wchar_t> mutable_command(command.begin(), command.end());
+    mutable_command.push_back(L'\0');
+    return CreateProcessW(application.c_str(), mutable_command.data(), nullptr,
+                          nullptr, FALSE,
+                          CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                          nullptr, game_root.c_str(), &startup, &process_info);
+  };
+  const auto sidecar_arguments = L" \"" + *wide_request + L"\" \"" +
+                                 *wide_response + L"\"";
+  BOOL started = start_process(
+      sidecar, L"\"" + sidecar.wstring() + L"\"" + sidecar_arguments);
+  const DWORD direct_error = started ? ERROR_SUCCESS : GetLastError();
+  if (!started) {
+    auto chmod_path = wine_windows_path("/bin/chmod");
+    if (chmod_path) {
+      std::error_code canonical_error;
+      const auto canonical_chmod =
+          std::filesystem::weakly_canonical(*chmod_path, canonical_error);
+      if (!canonical_error && canonical_chmod.is_absolute()) {
+        chmod_path = canonical_chmod;
+      }
+      STARTUPINFOW chmod_startup{};
+      chmod_startup.cb = sizeof(chmod_startup);
+      PROCESS_INFORMATION chmod_process{};
+      auto chmod_command = L"\"" + chmod_path->wstring() + L"\" 0700 \"" +
+                           *wide_sidecar + L"\"";
+      std::vector<wchar_t> mutable_chmod(chmod_command.begin(),
+                                         chmod_command.end());
+      mutable_chmod.push_back(L'\0');
+      if (CreateProcessW(chmod_path->c_str(), mutable_chmod.data(), nullptr,
+                         nullptr, FALSE,
+                         CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                         nullptr, game_root.c_str(), &chmod_startup,
+                         &chmod_process)) {
+        if (chmod_process.hThread != nullptr &&
+            chmod_process.hThread != INVALID_HANDLE_VALUE) {
+          CloseHandle(chmod_process.hThread);
+        }
+        if (chmod_process.hProcess != nullptr &&
+            chmod_process.hProcess != INVALID_HANDLE_VALUE) {
+          CloseHandle(chmod_process.hProcess);
+        }
+        for (unsigned attempt = 0; attempt != 200 && !started; ++attempt) {
+          Sleep(10);
+          if (sha256_file(sidecar) !=
+              std::optional<std::string>(posix_sidecar_sha256)) {
+            return error_result(
+                L"native-sidecar-hash-mismatch",
+                L"The native Linux helper changed while its executable permission was restored.");
+          }
+          started = start_process(
+              sidecar,
+              L"\"" + sidecar.wstring() + L"\"" + sidecar_arguments);
+        }
+      }
+    }
+  }
+  DWORD interpreter_error = ERROR_SUCCESS;
+  if (!started) {
+    const auto interpreter = elf_interpreter(sidecar);
+    auto windows_interpreter =
+        interpreter ? wine_windows_path(*interpreter) : std::nullopt;
+    if (windows_interpreter) {
+      std::error_code canonical_error;
+      const auto canonical_interpreter =
+          std::filesystem::weakly_canonical(*windows_interpreter,
+                                            canonical_error);
+      if (!canonical_error && canonical_interpreter.is_absolute()) {
+        windows_interpreter = canonical_interpreter;
+      }
+    }
+    if (interpreter && windows_interpreter) {
+      const auto command = L"\"" + windows_interpreter->wstring() + L"\" \"" +
+                           *wide_sidecar + L"\"" + sidecar_arguments;
+      started = start_process(*windows_interpreter, command);
+      if (!started) interpreter_error = GetLastError();
+    }
+  }
+  if (!started) {
+    return error_result(L"native-sidecar-start-failed",
+                        L"Wine could not start the verified native Linux helper (direct error " +
+                            std::to_wstring(direct_error) + L", interpreter error " +
+                            std::to_wstring(interpreter_error) + L").");
+  }
+  UniqueHandle process(process_info.hProcess);
+  UniqueHandle thread(process_info.hThread);
 
   constexpr ULONGLONG sidecar_timeout_ms = 10ULL * 60ULL * 1000ULL;
   const ULONGLONG deadline = GetTickCount64() + sidecar_timeout_ms;
+  for (;;) {
+    const DWORD attributes = GetFileAttributesW(response_path.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES) break;
+    const DWORD response_error = GetLastError();
+    if (response_error != ERROR_FILE_NOT_FOUND &&
+        response_error != ERROR_PATH_NOT_FOUND) {
+      return error_result(L"sidecar-response-invalid",
+                          L"The native helper response path became unsafe.");
+    }
+    if (GetTickCount64() >= deadline) {
+      if (process) TerminateProcess(process.get(), 11);
+      return error_result(L"sidecar-response-incomplete",
+                          L"The native helper did not complete its response safely.");
+    }
+    Sleep(10);
+  }
+  UniqueHandle response_file(CreateFileW(
+      response_path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+      OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN,
+      nullptr));
+  BY_HANDLE_FILE_INFORMATION response_info{};
+  LARGE_INTEGER response_size{};
+  if (!response_file ||
+      GetFileType(response_file.get()) != FILE_TYPE_DISK ||
+      !GetFileInformationByHandle(response_file.get(), &response_info) ||
+      (response_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+      response_info.nNumberOfLinks != 1 ||
+      !GetFileSizeEx(response_file.get(), &response_size) ||
+      response_size.QuadPart < static_cast<LONGLONG>(sizeof(FrameHeader)) ||
+      response_size.QuadPart >
+          static_cast<LONGLONG>(sizeof(FrameHeader) + maximum_payload)) {
+    return error_result(L"sidecar-response-invalid",
+                        L"The native helper response file is missing or unsafe.");
+  }
   FrameHeader response{};
-  if (!read_exact_until(parent_output.get(), process.get(), &response,
-                        sizeof(response), deadline) ||
+  if (!read_exact(response_file.get(), &response, sizeof(response)) ||
       response.magic != protocol_magic || response.version != protocol_version ||
       response.operation != request.operation || response.nonce != request.nonce ||
-      response.payload_size > maximum_payload) {
-    TerminateProcess(process.get(), 10);
+      response.payload_size > maximum_payload ||
+      response_size.QuadPart !=
+          static_cast<LONGLONG>(sizeof(response) + response.payload_size)) {
     return error_result(L"sidecar-response-invalid",
                         L"The native helper returned an invalid or unauthenticated response.");
   }
   std::vector<std::byte> response_payload(response.payload_size);
-  if (!read_exact_until(parent_output.get(), process.get(), response_payload.data(),
-                        response_payload.size(), deadline)) {
-    TerminateProcess(process.get(), 11);
+  if (!read_exact(response_file.get(), response_payload.data(),
+                  response_payload.size())) {
     return error_result(L"sidecar-response-incomplete",
-                        L"The native helper did not complete its response safely.");
-  }
-  const ULONGLONG now = GetTickCount64();
-  const DWORD remaining = now >= deadline
-                              ? 0
-                              : static_cast<DWORD>((std::min)(
-                                    deadline - now,
-                                    static_cast<ULONGLONG>(MAXDWORD)));
-  if (WaitForSingleObject(process.get(), remaining) != WAIT_OBJECT_0) {
-    TerminateProcess(process.get(), 11);
-    return error_result(L"sidecar-response-incomplete",
-                        L"The native helper did not complete its response safely.");
-  }
-  DWORD trailing{};
-  if (PeekNamedPipe(parent_output.get(), nullptr, 0, nullptr, &trailing,
-                    nullptr)) {
-    if (trailing != 0) {
-      return error_result(L"sidecar-response-invalid",
-                          L"The native helper returned trailing protocol data.");
-    }
-  }
-  DWORD exit_code{};
-  if (!GetExitCodeProcess(process.get(), &exit_code) || exit_code != 0) {
-    return error_result(L"sidecar-exit-failed",
-                        L"The native helper terminated before committing a valid result.");
+                        L"The native helper response was truncated.");
   }
   const auto parsed = parse_response(response_payload);
   return parsed ? *parsed

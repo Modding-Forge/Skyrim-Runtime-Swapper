@@ -107,6 +107,29 @@ class NativeInstallationLock {
   int lock_{-1};
 };
 
+class UniqueDescriptor {
+ public:
+  explicit UniqueDescriptor(int descriptor = -1) noexcept
+      : descriptor_(descriptor) {}
+  UniqueDescriptor(const UniqueDescriptor&) = delete;
+  UniqueDescriptor& operator=(const UniqueDescriptor&) = delete;
+  ~UniqueDescriptor() {
+    if (descriptor_ >= 0) ::close(descriptor_);
+  }
+
+  [[nodiscard]] int get() const noexcept { return descriptor_; }
+  [[nodiscard]] explicit operator bool() const noexcept {
+    return descriptor_ >= 0;
+  }
+  void reset(int descriptor = -1) noexcept {
+    if (descriptor_ >= 0) ::close(descriptor_);
+    descriptor_ = descriptor;
+  }
+
+ private:
+  int descriptor_{-1};
+};
+
 #pragma pack(push, 1)
 struct FrameHeader {
   std::uint32_t magic{};
@@ -174,12 +197,12 @@ void append_string(std::vector<std::byte>& bytes, std::string_view value) {
   bytes.insert(bytes.end(), begin, begin + value.size());
 }
 
-[[nodiscard]] std::string utf8(const std::filesystem::path& path) {
+[[nodiscard]] std::string path_utf8(const std::filesystem::path& path) {
   const auto text = path.generic_u8string();
   return std::string(reinterpret_cast<const char*>(text.data()), text.size());
 }
 
-[[nodiscard]] std::string utf8(std::wstring_view text) {
+[[nodiscard]] std::string text_utf8(std::wstring_view text) {
   std::string result;
   for (std::size_t index = 0; index < text.size(); ++index) {
     std::uint32_t value = static_cast<std::uint32_t>(text[index]);
@@ -263,6 +286,7 @@ void append_string(std::vector<std::byte>& bytes, std::string_view value) {
 }
 
 [[nodiscard]] bool send_response(
+    int descriptor,
     const FrameHeader& request,
     const runtime_swapper::app::InstallationOperationResult& result) {
   std::vector<std::byte> payload;
@@ -279,59 +303,126 @@ void append_string(std::vector<std::byte>& bytes, std::string_view value) {
   append_integer(payload,
                  static_cast<std::uint32_t>(result.backend.allowed_operations));
   append_string(payload, result.backend.installation_id);
-  append_string(payload, utf8(result.backend.vault_path));
-  append_string(payload, utf8(result.backend.target_volume.stable_id));
-  append_string(payload, utf8(result.backend.target_volume.filesystem));
+  append_string(payload, path_utf8(result.backend.vault_path));
+  append_string(payload, text_utf8(result.backend.target_volume.stable_id));
+  append_string(payload, text_utf8(result.backend.target_volume.filesystem));
   append_integer(payload,
                  static_cast<std::uint32_t>(result.backend.target_volume.medium));
   append_integer(payload,
                  static_cast<std::uint32_t>(result.backend.target_volume.local ? 1U : 0U) |
                      (result.backend.target_volume.stable ? 2U : 0U) |
                      (result.backend.target_volume.native_durability ? 4U : 0U));
-  append_string(payload, utf8(result.backend.vault_volume.stable_id));
-  append_string(payload, utf8(result.backend.vault_volume.filesystem));
+  append_string(payload, text_utf8(result.backend.vault_volume.stable_id));
+  append_string(payload, text_utf8(result.backend.vault_volume.filesystem));
   append_integer(payload,
                  static_cast<std::uint32_t>(result.backend.vault_volume.medium));
   append_integer(payload,
                  static_cast<std::uint32_t>(result.backend.vault_volume.local ? 1U : 0U) |
                      (result.backend.vault_volume.stable ? 2U : 0U) |
                      (result.backend.vault_volume.native_durability ? 4U : 0U));
-  append_string(payload, utf8(result.backend.target_volume.description));
-  append_string(payload, utf8(result.backend.vault_volume.description));
-  append_string(payload, utf8(result.backend.technical_reason));
-  append_string(payload, utf8(result.message.empty() ? result.backend.message
-                                                     : result.message));
+  append_string(payload, text_utf8(result.backend.target_volume.description));
+  append_string(payload, text_utf8(result.backend.vault_volume.description));
+  append_string(payload, text_utf8(result.backend.technical_reason));
+  append_string(payload,
+                text_utf8(result.message.empty() ? result.backend.message
+                                                 : result.message));
   if (payload.size() > maximum_payload) return false;
   FrameHeader response{protocol_magic, protocol_version, request.operation,
                        static_cast<std::uint32_t>(payload.size()), request.nonce};
-  return write_exact(STDOUT_FILENO, &response, sizeof(response)) &&
-         write_exact(STDOUT_FILENO, payload.data(), payload.size());
+  return write_exact(descriptor, &response, sizeof(response)) &&
+         write_exact(descriptor, payload.data(), payload.size());
 }
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  int input = STDIN_FILENO;
+  int output = STDOUT_FILENO;
+  UniqueDescriptor ipc_directory;
+  UniqueDescriptor ipc_input;
+  UniqueDescriptor ipc_output;
+  off_t input_size = -1;
+  const bool file_transport = argc == 3;
+  if (argc != 1 && !file_transport) return 8;
+  if (file_transport) {
+    const std::filesystem::path request_path(argv[1]);
+    const std::filesystem::path response_path(argv[2]);
+    if (!request_path.is_absolute() || !response_path.is_absolute() ||
+        request_path.parent_path() != response_path.parent_path() ||
+        request_path.filename() != "request.bin" ||
+        response_path.filename() != "response.bin") {
+      return 9;
+    }
+    ipc_directory.reset(::open(request_path.parent_path().c_str(),
+                               O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+    struct stat directory_status {};
+    if (!ipc_directory ||
+        ::fstat(ipc_directory.get(), &directory_status) != 0 ||
+        !S_ISDIR(directory_status.st_mode) ||
+        directory_status.st_uid != ::geteuid() ||
+        ::fchmod(ipc_directory.get(), 0700) != 0) {
+      return 10;
+    }
+    ipc_input.reset(::openat(ipc_directory.get(), "request.bin",
+                             O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+    struct stat request_status {};
+    if (!ipc_input || ::fstat(ipc_input.get(), &request_status) != 0 ||
+        !S_ISREG(request_status.st_mode) ||
+        request_status.st_uid != ::geteuid() || request_status.st_nlink != 1 ||
+        ::fchmod(ipc_input.get(), 0600) != 0 ||
+        request_status.st_size < static_cast<off_t>(sizeof(FrameHeader)) ||
+        request_status.st_size >
+            static_cast<off_t>(sizeof(FrameHeader) + maximum_payload)) {
+      return 11;
+    }
+    input_size = request_status.st_size;
+    struct stat existing_response {};
+    if (::fstatat(ipc_directory.get(), "response.bin", &existing_response,
+                  AT_SYMLINK_NOFOLLOW) == 0 ||
+        errno != ENOENT) {
+      return 12;
+    }
+    ipc_output.reset(::openat(ipc_directory.get(), "response.tmp",
+                              O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC |
+                                  O_NOFOLLOW,
+                              0600));
+    if (!ipc_output) return 12;
+    input = ipc_input.get();
+    output = ipc_output.get();
+  }
+
   FrameHeader request{};
-  if (!read_exact(STDIN_FILENO, &request, sizeof(request)) ||
+  if (!read_exact(input, &request, sizeof(request)) ||
       request.magic != protocol_magic || request.version != protocol_version ||
       request.payload_size > maximum_payload ||
+      (file_transport &&
+       input_size != static_cast<off_t>(sizeof(FrameHeader) +
+                                        request.payload_size)) ||
       std::ranges::all_of(request.nonce,
                           [](std::byte value) { return value == std::byte{}; })) {
     return 2;
   }
   std::vector<std::byte> payload(request.payload_size);
-  if (!read_exact(STDIN_FILENO, payload.data(), payload.size())) return 3;
+  if (!read_exact(input, payload.data(), payload.size())) return 3;
   std::span<const std::byte> fields(payload);
   const auto game = take_string(fields);
   const auto catalog = take_string(fields);
   const auto risk = take_integer<std::uint8_t>(fields);
   if (!game || !catalog || !risk || *risk > 1 || !fields.empty()) return 4;
-  const std::filesystem::path game_root(*game);
-  if (!game_root.is_absolute()) return 5;
+  const std::filesystem::path requested_game_root(*game);
+  if (!requested_game_root.is_absolute()) return 5;
+  std::error_code path_error;
+  const auto game_root =
+      std::filesystem::weakly_canonical(requested_game_root, path_error);
+  if (path_error || !game_root.is_absolute()) return 5;
   if (!catalog->empty()) {
-    const std::filesystem::path catalog_path(*catalog);
-    if (!catalog_path.is_absolute() ||
-        ::setenv("SRS_CONTENT_CATALOG_PATH", catalog->c_str(), 1) != 0) {
+    const std::filesystem::path requested_catalog_path(*catalog);
+    path_error.clear();
+    const auto catalog_path =
+        std::filesystem::weakly_canonical(requested_catalog_path, path_error);
+    const auto catalog_text = catalog_path.string();
+    if (path_error || !catalog_path.is_absolute() ||
+        ::setenv("SRS_CONTENT_CATALOG_PATH", catalog_text.c_str(), 1) != 0) {
       return 6;
     }
   }
@@ -364,5 +455,15 @@ int main() {
                    : lock_failure(std::move(result), locked);
     }
   }
-  return send_response(request, result) ? 0 : 7;
+  if (!send_response(output, request, result)) return 7;
+  if (file_transport) {
+    if (::fsync(output) != 0) return 13;
+    ipc_output.reset();
+    if (::renameat(ipc_directory.get(), "response.tmp", ipc_directory.get(),
+                   "response.bin") != 0 ||
+        !sync_directory(ipc_directory.get())) {
+      return 13;
+    }
+  }
+  return 0;
 }

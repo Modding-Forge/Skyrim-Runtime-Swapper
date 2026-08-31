@@ -1,8 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+mode=all
+if [[ $# -eq 4 ]]; then
+  case "$1" in
+    --flakey-only) mode=flakey ;;
+    --corruption-only) mode=corruption ;;
+    *) mode=invalid ;;
+  esac
+  shift
+fi
 if [[ $# -ne 3 ]]; then
-  echo "usage: run-linux-block-fault-matrix.sh <debug-runtime-probe> <baseline-game-root> <patch-root>" >&2
+  echo "usage: run-linux-block-fault-matrix.sh [--flakey-only|--corruption-only] <debug-runtime-probe> <baseline-game-root> <patch-root>" >&2
+  exit 2
+fi
+if [[ "$mode" == invalid ]]; then
+  echo "unknown block-fault matrix mode" >&2
   exit 2
 fi
 probe="$(realpath "$1")"
@@ -16,13 +29,29 @@ if [[ ${EUID} -ne 0 ]]; then
   echo "the isolated device-mapper matrix must run as root" >&2
   exit 2
 fi
-for command in blockdev cmp cp dmsetup e2fsck losetup mkfs.ext4 mount \
-    mountpoint realpath replay-log sync timeout truncate umount; do
+commands=(blockdev cmp cp dmsetup e2fsck losetup mkfs.ext4 mount mountpoint
+          realpath sync timeout truncate umount)
+if [[ "$mode" == all ]]; then commands+=(replay-log); fi
+for command in "${commands[@]}"; do
   command -v "$command" >/dev/null || {
     echo "missing test dependency: $command" >&2
     exit 2
   }
 done
+if ! dmsetup targets | grep -q '^flakey '; then
+  modprobe dm_flakey 2>/dev/null || true
+fi
+if ! dmsetup targets | grep -q '^flakey '; then
+  echo "the kernel does not provide the dm-flakey target" >&2
+  exit 2
+fi
+if [[ "$mode" == all ]] && ! dmsetup targets | grep -q '^log-writes '; then
+  modprobe dm_log_writes 2>/dev/null || true
+  if ! dmsetup targets | grep -q '^log-writes '; then
+    echo "the kernel does not provide the dm-log-writes target" >&2
+    exit 2
+  fi
+fi
 
 test_root="$(mktemp -d -p "${TMPDIR:-/tmp}" srs-block-faults.XXXXXX)"
 if [[ "$test_root" != /tmp/srs-block-faults.* &&
@@ -40,7 +69,7 @@ cleanup() {
     mountpoint -q "${mounts[index]}" && umount -l "${mounts[index]}"
   done
   for ((index=${#maps[@]}-1; index>=0; --index)); do
-    dmsetup remove --force "${maps[index]}" 2>/dev/null
+    dmsetup remove --retry --force "${maps[index]}" 2>/dev/null
   done
   for ((index=${#loops[@]}-1; index>=0; --index)); do
     losetup -d "${loops[index]}" 2>/dev/null
@@ -67,7 +96,7 @@ detach_loop() {
 
 remove_map() {
   local name="$1"
-  dmsetup remove "$name"
+  dmsetup remove --retry "$name"
   local remaining=()
   local item
   for item in "${maps[@]}"; do
@@ -115,6 +144,19 @@ verify_baseline() {
   done < <(find "$baseline" -type f -print0)
 }
 
+repair_ext4() {
+  local device="$1"
+  local result
+  set +e
+  e2fsck -fy "$device" >/dev/null
+  result=$?
+  set -e
+  if (( result > 1 )); then
+    echo "e2fsck could not repair the injected filesystem damage (exit $result)" >&2
+    return 1
+  fi
+}
+
 baseline_bytes="$(du -sb --apparent-size "$baseline" | cut -f1)"
 target_mib=$(( (baseline_bytes * 4 + 1073741823) / 1048576 + 1024 ))
 (( target_mib < 2048 )) && target_mib=2048
@@ -143,6 +185,7 @@ vault_loop="$attached_loop"
 vault_mount="$test_root/vault"
 mount_device "$vault_loop" "$vault_mount"
 
+if [[ "$mode" == all ]]; then
 for phase in {1..10}; do
   target_image="$test_root/log-target-$phase.ext4"
   replay_image="$test_root/log-replay-$phase.ext4"
@@ -190,7 +233,7 @@ for phase in {1..10}; do
   attach_loop "$log_image"
   log_loop="$attached_loop"
   replay-log --log "$log_loop" --replay "$replay_loop"
-  e2fsck -fy "$replay_loop" >/dev/null
+  repair_ext4 "$replay_loop"
   replay_mount="$test_root/replay-mount-$phase"
   mount_device "$replay_loop" "$replay_mount"
   XDG_STATE_HOME="$state" HOME="$test_root/home" \
@@ -200,10 +243,15 @@ for phase in {1..10}; do
   detach_loop "$replay_loop"
   detach_loop "$log_loop"
 done
+fi
 
-for feature_spec in 'error_writes|1|error_writes' \
-    'drop_writes|1|drop_writes' \
-    'corrupt_bio_byte|5|corrupt_bio_byte 32 w 1 0'; do
+feature_specs=('error_writes|1|error_writes'
+               'drop_writes|1|drop_writes'
+               'corrupt_bio_byte|5|corrupt_bio_byte 32 w 1 0')
+if [[ "$mode" == corruption ]]; then
+  feature_specs=('corrupt_bio_byte|5|corrupt_bio_byte 32 w 1 0')
+fi
+for feature_spec in "${feature_specs[@]}"; do
   IFS='|' read -r slug feature_count feature <<<"$feature_spec"
   target_image="$test_root/flakey-$slug.ext4"
   cp --reflink=auto --sparse=always "$base_image" "$target_image"
@@ -227,7 +275,7 @@ for feature_spec in 'error_writes|1|error_writes' \
   umount -l "$target_mount"
   forget_mount "$target_mount"
   remove_map "$map_name"
-  e2fsck -fy "$target_loop" >/dev/null
+  repair_ext4 "$target_loop"
   recovery_mount="$test_root/flakey-recovery-$slug"
   mount_device "$target_loop" "$recovery_mount"
   XDG_STATE_HOME="$state" HOME="$test_root/home" \
@@ -237,4 +285,10 @@ for feature_spec in 'error_writes|1|error_writes' \
   detach_loop "$target_loop"
 done
 
-echo "Linux dm-log-writes and dm-flakey recovery matrix passed"
+if [[ "$mode" == all ]]; then
+  echo "Linux dm-log-writes and dm-flakey recovery matrix passed"
+elif [[ "$mode" == corruption ]]; then
+  echo "Linux dm-flakey corruption recovery passed"
+else
+  echo "Linux dm-flakey recovery matrix passed"
+fi

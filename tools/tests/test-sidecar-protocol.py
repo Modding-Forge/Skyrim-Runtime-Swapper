@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import pathlib
 import struct
@@ -46,6 +47,43 @@ def expect_rejected(sidecar: pathlib.Path, request: bytes, expected: int) -> Non
         )
 
 
+def validate_response(response: bytes, operation: int, nonce: bytes,
+                      *, require_failure: bool = True) -> int:
+    if len(response) < HEADER.size:
+        raise AssertionError("valid frame was not answered")
+    magic, version, returned_operation, size, response_nonce = HEADER.unpack_from(response)
+    response_payload = response[HEADER.size:]
+    if (
+        magic != MAGIC
+        or version != VERSION
+        or returned_operation != operation
+        or response_nonce != nonce
+        or size != len(response_payload)
+        or size > MAXIMUM_PAYLOAD
+    ):
+        raise AssertionError("response authentication or framing mismatch")
+    if len(response_payload) < 4:
+        raise AssertionError("response does not contain an exit code")
+    (exit_code,) = struct.unpack_from("<i", response_payload)
+    if require_failure and exit_code == 0:
+        raise AssertionError("an unknown operation was accepted")
+    return exit_code
+
+
+def run_file_transport(sidecar: pathlib.Path, directory: pathlib.Path,
+                       request: bytes, *, env: dict[str, str] | None = None
+                       ) -> subprocess.CompletedProcess[bytes]:
+    directory.mkdir(mode=0o700)
+    request_path = directory / "request.bin"
+    response_path = directory / "response.bin"
+    request_path.write_bytes(request)
+    request_path.chmod(0o666)
+    return subprocess.run(
+        [sidecar, request_path, response_path], stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, check=False, timeout=15, env=env,
+    )
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print("usage: test-sidecar-protocol.py <SkyrimRuntimeSwapper.Native>",
@@ -66,7 +104,9 @@ def main() -> int:
     )
     expect_rejected(sidecar, frame(1, b""), 4)
 
-    with tempfile.TemporaryDirectory(prefix="srs-sidecar-protocol-") as root:
+    with tempfile.TemporaryDirectory(
+        prefix="srs-sidecar-protocol-", dir=sidecar.parent
+    ) as root:
         game = pathlib.Path(root, "game").resolve()
         catalog = pathlib.Path(root, "state", "ContentCatalog.txt").resolve()
         nonce = os.urandom(32)
@@ -76,22 +116,125 @@ def main() -> int:
             raise AssertionError(
                 f"valid frame was not answered: {result.returncode}, {result.stderr!r}"
             )
-        magic, version, operation, size, response_nonce = HEADER.unpack_from(result.stdout)
-        response_payload = result.stdout[HEADER.size:]
-        if (
-            magic != MAGIC
-            or version != VERSION
-            or operation != 0xFFFF
-            or response_nonce != nonce
-            or size != len(response_payload)
-            or size > MAXIMUM_PAYLOAD
-        ):
-            raise AssertionError("response authentication or framing mismatch")
-        if len(response_payload) < 4:
-            raise AssertionError("response does not contain an exit code")
-        (exit_code,) = struct.unpack_from("<i", response_payload)
-        if exit_code == 0:
-            raise AssertionError("an unknown operation was accepted")
+        validate_response(result.stdout, 0xFFFF, nonce)
+
+        file_nonce = os.urandom(32)
+        file_request = frame(0xFFFF, payload, file_nonce)
+        ipc = pathlib.Path(root, "file-ipc")
+        result = run_file_transport(sidecar, ipc, file_request)
+        response_path = ipc / "response.bin"
+        if result.returncode != 0 or result.stdout or not response_path.is_file():
+            raise AssertionError(
+                f"file transport failed: {result.returncode}, "
+                f"stdout={result.stdout!r}, stderr={result.stderr!r}"
+            )
+        validate_response(response_path.read_bytes(), 0xFFFF, file_nonce)
+        if (ipc.stat().st_mode & 0o777) != 0o700:
+            raise AssertionError("file transport directory was not restricted")
+        if ((ipc / "request.bin").stat().st_mode & 0o777) != 0o600:
+            raise AssertionError("file transport request was not restricted")
+        if (response_path.stat().st_mode & 0o777) != 0o600:
+            raise AssertionError("file transport response was not restricted")
+
+        trailing = pathlib.Path(root, "trailing-request-data")
+        result = run_file_transport(sidecar, trailing, file_request + b"junk")
+        if result.returncode != 2 or (trailing / "response.bin").exists():
+            raise AssertionError("trailing request data was accepted")
+
+        collision = pathlib.Path(root, "response-collision")
+        collision.mkdir(mode=0o700)
+        (collision / "request.bin").write_bytes(file_request)
+        (collision / "response.bin").write_bytes(b"untrusted")
+        result = subprocess.run(
+            [sidecar, collision / "request.bin", collision / "response.bin"],
+            check=False, timeout=15,
+        )
+        if result.returncode != 12 or (collision / "response.bin").read_bytes() != b"untrusted":
+            raise AssertionError("a pre-existing response file was overwritten")
+
+        linked = pathlib.Path(root, "linked-request")
+        linked.mkdir(mode=0o700)
+        real_request = linked / "real-request.bin"
+        real_request.write_bytes(file_request)
+        os.link(real_request, linked / "request.bin")
+        result = subprocess.run(
+            [sidecar, linked / "request.bin", linked / "response.bin"],
+            check=False, timeout=15,
+        )
+        if result.returncode != 11:
+            raise AssertionError("a hard-linked request file was accepted")
+
+        symlinked = pathlib.Path(root, "symlinked-request")
+        symlinked.mkdir(mode=0o700)
+        real_request = symlinked / "real-request.bin"
+        real_request.write_bytes(file_request)
+        os.symlink(real_request, symlinked / "request.bin")
+        result = subprocess.run(
+            [sidecar, symlinked / "request.bin", symlinked / "response.bin"],
+            check=False, timeout=15,
+        )
+        if result.returncode != 11:
+            raise AssertionError("a symbolic-link request file was accepted")
+
+        real_directory = pathlib.Path(root, "real-ipc-directory")
+        real_directory.mkdir(mode=0o700)
+        (real_directory / "request.bin").write_bytes(file_request)
+        directory_link = pathlib.Path(root, "linked-ipc-directory")
+        os.symlink(real_directory, directory_link)
+        result = subprocess.run(
+            [sidecar, directory_link / "request.bin", directory_link / "response.bin"],
+            check=False, timeout=15,
+        )
+        if result.returncode != 10:
+            raise AssertionError("a symbolic-link IPC directory was accepted")
+
+        lock_game = pathlib.Path(root, "lock-game")
+        lock_metadata = lock_game / ".skyrim-runtime-swapper"
+        lock_metadata.mkdir(parents=True, mode=0o700)
+        lock_path = lock_metadata / "transaction.lock"
+        lock_descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        lock_environment = os.environ.copy()
+        lock_environment["XDG_STATE_HOME"] = str(pathlib.Path(root, "state"))
+        lock_environment["HOME"] = str(pathlib.Path(root, "home"))
+        pathlib.Path(lock_environment["XDG_STATE_HOME"]).mkdir(mode=0o700)
+        pathlib.Path(lock_environment["HOME"]).mkdir(mode=0o700)
+        lock_catalog = pathlib.Path(root, "catalog", "ContentCatalog.txt")
+        lock_payload = (
+            field(str(lock_game.resolve()))
+            + field(str(lock_catalog.resolve()))
+            + b"\0"
+        )
+        try:
+            fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked_nonce = os.urandom(32)
+            locked_ipc = pathlib.Path(root, "locked-operation")
+            result = run_file_transport(
+                sidecar, locked_ipc, frame(2, lock_payload, locked_nonce),
+                env=lock_environment,
+            )
+            if result.returncode != 0:
+                raise AssertionError("the concurrent operation did not answer safely")
+            locked_response = (locked_ipc / "response.bin").read_bytes()
+            locked_exit_code = validate_response(locked_response, 2, locked_nonce)
+            if locked_exit_code != 28:
+                raise AssertionError("a concurrent native operation bypassed its lock")
+        finally:
+            os.close(lock_descriptor)
+
+        stale_nonce = os.urandom(32)
+        stale_ipc = pathlib.Path(root, "stale-lock-operation")
+        result = run_file_transport(
+            sidecar, stale_ipc, frame(2, lock_payload, stale_nonce),
+            env=lock_environment,
+        )
+        if result.returncode != 0:
+            raise AssertionError("the stale-lock recovery did not answer safely")
+        stale_response = (stale_ipc / "response.bin").read_bytes()
+        stale_exit_code = validate_response(
+            stale_response, 2, stale_nonce, require_failure=False
+        )
+        if stale_exit_code == 28:
+            raise AssertionError("a stale lock file blocked native recovery")
     return 0
 
 

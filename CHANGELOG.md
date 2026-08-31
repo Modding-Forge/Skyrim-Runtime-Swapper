@@ -2,6 +2,13 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.2.0-rc1 - 2026-08-31
+
+- Added portable storage classification and automatically selected recovery vaults for Windows, Linux, Wine, and Proton.
+- Added recoverable persistent downgrades for external, exFAT, ntfs-3g, and otherwise non-automatic local filesystems.
+- Hardened transaction journals, conflict preservation, vault identity validation, locator repair, native sidecar authentication, and crash recovery.
+- Added Windows, Linux, WSL, Wine, filesystem, persistent-mode, fault-injection, and block-corruption test matrices.
+
 ## 1.1.0 - 2026-08-29
 
 - Added a native manual control panel for persistent target-runtime switching and explicit 1.7.104 restoration.

@@ -485,6 +485,14 @@ static_assert(offsetof(MountPointReparseData, path_buffer) == 16);
   return std::string(reinterpret_cast<const char*>(value.data()), value.size());
 }
 
+[[nodiscard]] std::string locator_contents(
+    std::string_view id, const std::filesystem::path& vault,
+    const VolumeIdentity& vault_volume) {
+  return "SRS-VAULT-LOCATOR-1\ninstallation=" + std::string(id) +
+         "\nvault=" + utf8_path(vault) + "\nvolume=" +
+         utf8_path(vault_volume.stable_id) + "\n";
+}
+
 [[nodiscard]] bool locator_matches(const std::filesystem::path& locator,
                                    std::string_view id,
                                    const std::filesystem::path& vault,
@@ -492,11 +500,29 @@ static_assert(offsetof(MountPointReparseData, path_buffer) == 16);
   std::ifstream stream(locator, std::ios::binary);
   if (!stream) return false;
   const std::string text(std::istreambuf_iterator<char>(stream), {});
-  const std::string expected = "SRS-VAULT-LOCATOR-1\ninstallation=" +
-                               std::string(id) + "\nvault=" + utf8_path(vault) +
-                               "\nvolume=" +
-                               utf8_path(vault_volume.stable_id) + "\n";
-  return !stream.bad() && text == expected;
+  return !stream.bad() && text == locator_contents(id, vault, vault_volume);
+}
+
+[[nodiscard]] bool vault_manifest_identity_matches(
+    const std::filesystem::path& vault, std::string_view id,
+    const VolumeIdentity& target_volume, const VolumeIdentity& vault_volume) {
+  const auto manifest = vault / L"manifest.v2";
+  std::error_code error;
+  if (!std::filesystem::is_regular_file(manifest, error) || error ||
+      path_has_unsupported_reparse_component(manifest)) {
+    return false;
+  }
+  std::ifstream stream(manifest, std::ios::binary);
+  std::array<std::string, 6> lines;
+  for (auto& line : lines) {
+    if (!std::getline(stream, line)) return false;
+  }
+  return lines[0] == "SRS-VAULT-MANIFEST-2" &&
+         lines[1] == "installation=" + std::string(id) &&
+         lines[2].starts_with("source=") && lines[2].size() > 7 &&
+         lines[3].starts_with("target=") && lines[3].size() > 7 &&
+         lines[4] == "targetVolume=" + utf8_path(target_volume.stable_id) &&
+         lines[5] == "vaultVolume=" + utf8_path(vault_volume.stable_id);
 }
 
 [[nodiscard]] std::optional<std::string> installation_id(
@@ -638,9 +664,14 @@ class WindowsTransactionBackend final : public TransactionBackend {
     }
     auto vault = vault_exists ? inspect_volume(vault_path)
                               : inspect_volume(*state_root);
-    if (locator_exists &&
-        (!std::filesystem::is_regular_file(locator_status) || !vault_exists || !vault ||
-         !locator_matches(locator, *id, vault_path, *vault))) {
+    const bool locator_matches_vault =
+        locator_exists && std::filesystem::is_regular_file(locator_status) &&
+        vault_exists && vault && locator_matches(locator, *id, vault_path, *vault);
+    const bool locator_recoverable =
+        locator_exists && std::filesystem::is_regular_file(locator_status) &&
+        vault_exists && vault && !locator_matches_vault &&
+        vault_manifest_identity_matches(vault_path, *id, *target, *vault);
+    if (locator_exists && !locator_matches_vault && !locator_recoverable) {
       return blocked(L"active-vault-unavailable",
                      L"The recorded recovery vault is missing, changed, or unavailable. "
                      L"The pending installation will not be redirected to a new vault.",
@@ -726,6 +757,14 @@ class WindowsTransactionBackend final : public TransactionBackend {
                      L"This game volume requires a recovery vault on a different durable "
                      L"physical volume, but the automatic vault resolves to the same volume.",
                      *target, *vault, vault_path, *id);
+    }
+
+    if (locator_recoverable &&
+        (!write_atomic(locator, locator_contents(*id, vault_path, *vault)) ||
+         !locator_matches(locator, *id, vault_path, *vault))) {
+      return blocked(L"vault-locator-repair-failed",
+                     L"The verified recovery vault was found, but its damaged locator "
+                     L"could not be repaired.", *target, *vault, vault_path, *id);
     }
 
     return {ExitCode::success,

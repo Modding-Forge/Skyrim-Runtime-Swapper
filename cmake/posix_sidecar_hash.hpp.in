@@ -6,6 +6,6 @@ namespace runtime_swapper {
 
 inline constexpr std::string_view posix_sidecar_sha256 =
     "@SKYRIM_RUNTIME_POSIX_SIDECAR_SHA256@";
-inline constexpr std::string_view posix_sidecar_protocol = "1";
+inline constexpr std::string_view posix_sidecar_protocol = "2";
 
 }  // namespace runtime_swapper

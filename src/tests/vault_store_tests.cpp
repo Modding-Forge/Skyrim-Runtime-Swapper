@@ -15,12 +15,22 @@ namespace {
 
 class TemporaryDirectory {
  public:
-  TemporaryDirectory()
-      : path_(std::filesystem::temp_directory_path() /
-              (L"skyrim-runtime-swapper-vault-tests-" +
-               std::to_wstring(GetCurrentProcessId()))) {
+  TemporaryDirectory() {
     std::error_code error;
-    std::filesystem::remove_all(path_, error);
+    wchar_t unique_path[MAX_PATH]{};
+    const auto temporary_root = std::filesystem::temp_directory_path();
+    if (GetTempFileNameW(temporary_root.c_str(), L"srv", 0, unique_path) == 0) {
+      throw std::filesystem::filesystem_error(
+          "GetTempFileNameW failed", temporary_root,
+          std::error_code(static_cast<int>(GetLastError()),
+                          std::system_category()));
+    }
+    path_ = unique_path;
+    std::filesystem::remove(path_, error);
+    if (error) {
+      throw std::filesystem::filesystem_error("temporary file cleanup failed",
+                                              path_, error);
+    }
     std::filesystem::create_directories(path_);
     const auto probe = runtime_swapper::transaction_backend().probe(path_);
     if (probe.vault_path.filename().native().starts_with(L"skyrimse-") &&
@@ -57,6 +67,11 @@ std::string read_file(const std::filesystem::path& path) {
   return std::string(std::istreambuf_iterator<char>(stream), {});
 }
 
+std::string utf8_path(const std::filesystem::path& path) {
+  const auto value = path.generic_u8string();
+  return std::string(reinterpret_cast<const char*>(value.data()), value.size());
+}
+
 }  // namespace
 
 int main() {
@@ -73,6 +88,28 @@ int main() {
   if (!vault || vault->probe.installation_id.empty() ||
       !vault->probe.vault_path.is_absolute()) {
     return 1;
+  }
+  const auto locator = temporary.path() / L".skyrim-runtime-swapper" /
+                       L"vault.locator";
+  const auto identity_manifest =
+      std::string("SRS-VAULT-MANIFEST-2\ninstallation=") +
+      vault->probe.installation_id +
+      "\nsource=test-source\ntarget=test-target\ntargetVolume=" +
+      utf8_path(vault->probe.target_volume.stable_id) + "\nvaultVolume=" +
+      utf8_path(vault->probe.vault_volume.stable_id) + "\nentries=0\n";
+  write_file(vault->manifest, identity_manifest);
+  write_file(locator, "torn-locator");
+  const auto recoverable_locator_probe =
+      transaction_backend().probe(temporary.path());
+  if (!recoverable_locator_probe.success() ||
+      read_file(locator) != "torn-locator") {
+    return 24;
+  }
+  const auto repaired_locator_probe =
+      transaction_backend().probe(temporary.path(), 0, true);
+  if (!repaired_locator_probe.success() ||
+      !read_file(locator).starts_with("SRS-VAULT-LOCATOR-1\n")) {
+    return 25;
   }
   const auto original = temporary.path() / L"original.bin";
   write_file(original, "original");
