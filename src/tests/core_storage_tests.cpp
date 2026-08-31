@@ -279,8 +279,16 @@ int main() {
       read_file(live) != "source") {
     return 8;
   }
+  const auto cloned = temporary.path() / L"backup" / L"cloned.bin";
+  if (!backend.clone_or_copy_atomic(live, cloned) ||
+      read_file(cloned) != "source") {
+    return 36;
+  }
   write_file(live, "updated");
-  if (!backend.copy_atomic(live, copied) || read_file(copied) != "updated") return 9;
+  if (!backend.copy_atomic(live, copied) || read_file(copied) != "updated" ||
+      read_file(cloned) != "source") {
+    return 9;
+  }
   const auto moved = temporary.path() / L"quarantine" / L"moved.bin";
   if (!backend.move_atomic(copied, moved) || std::filesystem::exists(copied) ||
       read_file(moved) != "updated") {

@@ -103,6 +103,14 @@ int main() {
   if (!backend.copy_atomic(live, cross_copy) || read_file(cross_copy) != "source") {
     return 10;
   }
+  const auto cloned_copy = temporary.path() / "objects" / "clone";
+  if (!backend.clone_or_copy_atomic(live, cloned_copy) ||
+      read_file(cloned_copy) != "source") {
+    return 20;
+  }
+  write_file(live, "changed-after-clone");
+  if (read_file(cloned_copy) != "source") return 21;
+  write_file(live, "source");
   const auto journal_path = temporary.path() / "vault" / "runtime.journal";
   TransactionJournal journal(journal_path, "0123456789abcdef0123456789abcdef",
                              "posix-test", true, true);

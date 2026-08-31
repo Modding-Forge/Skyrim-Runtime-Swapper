@@ -5,10 +5,12 @@
 #include "internal/fault_injection.hpp"
 
 #include <fcntl.h>
+#include <linux/fs.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/statvfs.h>
 #include <sys/sysmacros.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -296,6 +298,18 @@ struct MountEntry {
                                                  static_cast<std::size_t>(count)))) {
       return false;
     }
+  }
+  return ::fsync(output.value) == 0;
+}
+
+[[nodiscard]] bool clone_file_synced(const std::filesystem::path& source,
+                                     const std::filesystem::path& destination) {
+  FileDescriptor input(::open(source.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+  FileDescriptor output(::open(destination.c_str(), O_WRONLY | O_CREAT | O_EXCL |
+                                                        O_CLOEXEC | O_NOFOLLOW,
+                               S_IRUSR | S_IWUSR));
+  if (!input || !output || ::ioctl(output.value, FICLONE, input.value) != 0) {
+    return false;
   }
   return ::fsync(output.value) == 0;
 }
@@ -702,6 +716,33 @@ class PosixTransactionBackend final : public TransactionBackend {
     (void)::unlink(temporary.c_str());
     if (!copy_file_synced(source, temporary) ||
         core::fault_injected("copy.after-temp-sync") ||
+        ::rename(temporary.c_str(), destination.c_str()) != 0) {
+      (void)::unlink(temporary.c_str());
+      return false;
+    }
+    if (core::fault_injected("copy.after-rename")) return false;
+    const bool synced =
+        fsync_file(destination) && fsync_directory(destination.parent_path());
+    return synced && !core::fault_injected("copy.after-sync");
+  }
+
+  bool clone_or_copy_atomic(const std::filesystem::path& source,
+                            const std::filesystem::path& destination) override {
+    if (core::fault_injected("copy.before")) return false;
+    std::error_code error;
+    std::filesystem::create_directories(destination.parent_path(), error);
+    if (error || has_symlink_component(source) ||
+        has_symlink_component(destination.parent_path())) {
+      return false;
+    }
+    auto temporary = destination;
+    temporary += ".clone-" + std::to_string(::getpid());
+    (void)::unlink(temporary.c_str());
+    if (!clone_file_synced(source, temporary)) {
+      (void)::unlink(temporary.c_str());
+      return copy_atomic(source, destination);
+    }
+    if (core::fault_injected("copy.after-temp-sync") ||
         ::rename(temporary.c_str(), destination.c_str()) != 0) {
       (void)::unlink(temporary.c_str());
       return false;

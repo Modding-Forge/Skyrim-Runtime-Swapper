@@ -220,15 +220,19 @@ std::optional<VaultLayout> resolve_vault_layout(
 
 bool vault_object_matches(const VaultLayout& vault, std::string_view sha256,
                           std::uint64_t expected_size) {
+  if (!vault_object_available(vault, sha256, expected_size)) return false;
+  const auto path = object_path(vault, sha256);
+  const auto actual = sha256_file(path);
+  return actual && *actual == sha256;
+}
+
+bool vault_object_available(const VaultLayout& vault, std::string_view sha256,
+                            std::uint64_t expected_size) {
   if (!valid_hash(sha256)) return false;
   const auto path = object_path(vault, sha256);
   std::error_code error;
-  if (!private_regular_file(path) ||
-      std::filesystem::file_size(path, error) != expected_size || error) {
-    return false;
-  }
-  const auto actual = sha256_file(path);
-  return actual && *actual == sha256;
+  return private_regular_file(path) &&
+         std::filesystem::file_size(path, error) == expected_size && !error;
 }
 
 bool commit_vault_object(const VaultLayout& vault,
@@ -242,6 +246,19 @@ bool commit_vault_object(const VaultLayout& vault,
   }
   const auto source_hash = sha256_file(source);
   if (!source_hash || *source_hash != sha256) return false;
+  return commit_verified_vault_object(vault, source, sha256, expected_size);
+}
+
+bool commit_verified_vault_object(const VaultLayout& vault,
+                                  const std::filesystem::path& verified_source,
+                                  std::string_view sha256,
+                                  std::uint64_t expected_size) {
+  if (vault_object_matches(vault, sha256, expected_size)) return true;
+  std::error_code error;
+  if (!valid_hash(sha256) || !private_regular_file(verified_source) ||
+      std::filesystem::file_size(verified_source, error) != expected_size || error) {
+    return false;
+  }
   if (fault_injected("vault.before-object-copy")) return false;
 
   const auto destination = object_path(vault, sha256);
@@ -255,7 +272,7 @@ bool commit_vault_object(const VaultLayout& vault,
     std::filesystem::create_directories(corrupt.parent_path(), error);
     if (error || !transaction_backend().move_atomic(destination, corrupt)) return false;
   }
-  if (!transaction_backend().copy_atomic(source, destination) ||
+  if (!transaction_backend().clone_or_copy_atomic(verified_source, destination) ||
       fault_injected("vault.after-object-copy")) {
     return false;
   }
@@ -267,7 +284,22 @@ bool restore_vault_object(const VaultLayout& vault, std::string_view sha256,
                           std::uint64_t expected_size,
                           const std::filesystem::path& destination) {
   if (!vault_object_matches(vault, sha256, expected_size)) return false;
-  return transaction_backend().copy_atomic(object_path(vault, sha256), destination) &&
+  return materialize_verified_vault_object(vault, sha256, expected_size,
+                                           destination);
+}
+
+bool materialize_verified_vault_object(
+    const VaultLayout& vault, std::string_view sha256,
+    std::uint64_t expected_size,
+    const std::filesystem::path& destination) {
+  if (!valid_hash(sha256)) return false;
+  const auto source = object_path(vault, sha256);
+  std::error_code error;
+  if (!private_regular_file(source) ||
+      std::filesystem::file_size(source, error) != expected_size || error) {
+    return false;
+  }
+  return transaction_backend().clone_or_copy_atomic(source, destination) &&
          hash_matches(destination, sha256);
 }
 
@@ -279,6 +311,11 @@ bool commit_runtime_manifest(const VaultLayout& vault,
       return false;
     }
   }
+  return commit_verified_runtime_manifest(vault, game_root);
+}
+
+bool commit_verified_runtime_manifest(const VaultLayout& vault,
+                                      const std::filesystem::path& game_root) {
   const auto manifest = manifest_contents(vault);
   if (!transaction_backend().write_atomic(vault.manifest, manifest) ||
       read_all(vault.manifest) != manifest) {

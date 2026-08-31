@@ -126,6 +126,32 @@ int run_tests() {
     return 2;
   }
 
+  const auto cached_target = temporary.path() / L"cached-target.bin";
+  write_file(cached_target, "tampered");
+  const auto cached_hash = sha256_string("expected");
+  if (!cached_hash || commit_verified_vault_object(
+                          *vault, cached_target, *cached_hash, 8)) {
+    return 26;
+  }
+  write_file(cached_target, "expected");
+  if (!commit_verified_vault_object(*vault, cached_target, *cached_hash, 8) ||
+      !vault_object_matches(*vault, *cached_hash, 8)) {
+    return 27;
+  }
+  const auto cached_object =
+      vault->objects /
+      std::filesystem::path(cached_hash->begin(), cached_hash->end());
+  write_file(cached_object, "tampered");
+  const auto unsafe_stage = temporary.path() / L"unsafe-stage.bin";
+  if (materialize_verified_vault_object(*vault, *cached_hash, 8,
+                                        unsafe_stage)) {
+    return 28;
+  }
+  write_file(cached_target, "expected");
+  if (!commit_verified_vault_object(*vault, cached_target, *cached_hash, 8)) {
+    return 29;
+  }
+
   const auto destination = temporary.path() / L"destination.bin";
   write_file(destination, "unknown-user-content");
   if (!preserve_conflict(*vault, destination, "conflict-test") ||

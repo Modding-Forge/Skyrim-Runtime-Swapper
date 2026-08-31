@@ -99,6 +99,14 @@ class TransactionBackend {
   [[nodiscard]] virtual bool copy_atomic(const std::filesystem::path& source,
                                          const std::filesystem::path& destination) = 0;
 
+  // Uses a filesystem-native copy-on-write clone when it is available and
+  // falls back to the same durable atomic copy contract as copy_atomic.
+  [[nodiscard]] virtual bool clone_or_copy_atomic(
+      const std::filesystem::path& source,
+      const std::filesystem::path& destination) {
+    return copy_atomic(source, destination);
+  }
+
   [[nodiscard]] virtual bool move_atomic(const std::filesystem::path& source,
                                          const std::filesystem::path& destination) = 0;
   [[nodiscard]] virtual bool durable_remove(const std::filesystem::path& path) = 0;

@@ -2,6 +2,14 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.2.0-rc6 - 2026-08-31
+
+- Added a verified content-addressed target-runtime cache for automatic sessions, avoiding repeated HDiffPatch work after the first successful switch.
+- Added portable clone-or-copy storage operations with Linux copy-on-write reflinks and a durable atomic-copy fallback.
+- Removed redundant source-vault and cache hash passes while retaining independent verification of every materialized staged and live file.
+- Added per-phase performance diagnostics for recovery, preflight, vault verification, staging, commit, and target-cache hits.
+- Added cache-corruption, clone isolation, fallback, and destination-verification coverage.
+
 ## 1.2.0-rc5 - 2026-08-31
 
 - Added platform-neutral support for managed file links whose verified targets remain inside the locked Skyrim installation and on the same volume.

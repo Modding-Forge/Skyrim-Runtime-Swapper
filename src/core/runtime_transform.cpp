@@ -13,6 +13,7 @@
 #include <runtime_swapper/transaction_backend.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <limits>
@@ -34,12 +35,36 @@ struct WorkItem {
   std::filesystem::path patch;
   std::filesystem::path staged;
   std::filesystem::path rollback;
+  bool cached_target{};
 };
 
 struct CleanupResult {
   bool success{};
   std::wstring detail;
 };
+
+using SteadyClock = std::chrono::steady_clock;
+
+[[nodiscard]] std::int64_t elapsed_milliseconds(
+    SteadyClock::time_point start) {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             SteadyClock::now() - start)
+      .count();
+}
+
+[[nodiscard]] std::wstring performance_summary(
+    std::int64_t total, std::int64_t recovery, std::int64_t preflight,
+    std::int64_t source_vault, std::int64_t staging, std::int64_t commit,
+    std::size_t cache_hits, std::size_t cache_candidates) {
+  return L"\nPerformance: total=" + std::to_wstring(total) +
+         L" ms; recovery=" + std::to_wstring(recovery) +
+         L" ms; preflight=" + std::to_wstring(preflight) +
+         L" ms; source-vault=" + std::to_wstring(source_vault) +
+         L" ms; staging=" + std::to_wstring(staging) +
+         L" ms; commit=" + std::to_wstring(commit) +
+         L" ms; target-cache=" + std::to_wstring(cache_hits) + L"/" +
+         std::to_wstring(cache_candidates) + L".";
+}
 
 [[nodiscard]] std::wstring source_version() { return std::wstring(source_version_label); }
 [[nodiscard]] std::wstring target_version() { return std::wstring(target_version_label); }
@@ -593,11 +618,23 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
   try {
     if (!to_target) return recover_to_source(game_root, patch_root, true);
 
+    const auto total_started = SteadyClock::now();
+    std::int64_t recovery_duration{};
+    std::int64_t preflight_duration{};
+    std::int64_t source_vault_duration{};
+    std::int64_t staging_duration{};
+    std::int64_t commit_duration{};
+    std::size_t target_cache_hits{};
+    std::size_t target_cache_candidates{};
+
     if (recover_first) {
+      const auto recovery_started = SteadyClock::now();
       const auto recovered = recover_to_source(game_root, patch_root);
+      recovery_duration = elapsed_milliseconds(recovery_started);
       if (!recovered.success()) return recovered;
     }
 
+    const auto preflight_started = SteadyClock::now();
     auto& backend = transaction_backend();
     const auto active = active_root(game_root);
     std::error_code error;
@@ -643,11 +680,6 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
           .staged = active / L"staged" / std::to_wstring(index),
           .rollback = active / L"rollback" / std::to_wstring(index),
       };
-      if (!hash_matches(item.patch, plan.forward_patch_sha256)) {
-        (void)clean_transaction_tree(game_root);
-        return {ExitCode::patch_files_missing, false,
-                L"A required patch is missing or modified for " + quote_path(live)};
-      }
       required_space += plan.target_size;
       work.push_back(std::move(item));
     }
@@ -657,13 +689,14 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
       return {ExitCode::success, false,
               L"Skyrim " + target_version() + L" is already active."};
     }
-    required_space += required_source_backup_space(game_root);
     if (!has_minimum_free_space(game_root, required_space)) {
       (void)clean_transaction_tree(game_root);
       return {ExitCode::insufficient_disk_space, false,
               L"There is not enough free space to stage the verified runtime swap."};
     }
+    preflight_duration = elapsed_milliseconds(preflight_started);
 
+    const auto source_vault_started = SteadyClock::now();
     const auto backup_result = ensure_source_backups(game_root);
     if (!backup_result.success()) {
       (void)clean_transaction_tree(game_root);
@@ -675,6 +708,23 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
       (void)clean_transaction_tree(game_root);
       return {ExitCode::backup_failed, false,
               L"The verified recovery-vault manifest became unavailable."};
+    }
+    source_vault_duration = elapsed_milliseconds(source_vault_started);
+
+    const auto staging_started = SteadyClock::now();
+    const bool cache_targets = vault->probe.mode == SafetyMode::automatic;
+    for (auto& item : work) {
+      if (cache_targets && item.plan->target_present) {
+        ++target_cache_candidates;
+        item.cached_target = vault_object_available(
+            *vault, item.plan->target_sha256, item.plan->target_size);
+      }
+      if (!hash_matches(item.patch, item.plan->forward_patch_sha256)) {
+        (void)clean_transaction_tree(game_root);
+        return {ExitCode::patch_files_missing, false,
+                L"A required patch is missing or modified for " +
+                    quote_path(item.managed.logical)};
+      }
     }
     const auto transaction_profile =
         profile_fingerprint(game_root, transaction_files);
@@ -692,27 +742,44 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
               L"The runtime transaction journal could not be created."};
     }
 
-    for (const auto& item : work) {
+    for (auto& item : work) {
       if (!managed_file_mapping_matches(game_root, item.managed)) {
         const auto rollback = recover_to_source(game_root, patch_root);
         return {ExitCode::patch_failed, !rollback.success(),
                 L"A managed runtime path changed while staging: " +
                     quote_path(item.managed.logical)};
       }
-      auto patch_input = item.managed.effective;
-      if (!item.plan->source_present) {
-        patch_input = active / L"empty-input" / std::to_wstring(item.index);
-        if (!backend.write_atomic(patch_input, {})) {
-          const auto rollback = recover_to_source(game_root, patch_root);
-          return {ExitCode::patch_failed, !rollback.success(),
-                  L"An empty patch input could not be prepared: " +
-                      quote_path(item.managed.logical)};
+      bool staged = false;
+      if (item.cached_target) {
+        staged = materialize_verified_vault_object(
+            *vault, item.plan->target_sha256, item.plan->target_size,
+            item.staged);
+        if (staged) ++target_cache_hits;
+      }
+      if (!staged) {
+        item.cached_target = false;
+        auto patch_input = item.managed.effective;
+        if (!item.plan->source_present) {
+          patch_input = active / L"empty-input" / std::to_wstring(item.index);
+          if (!backend.write_atomic(patch_input, {})) {
+            const auto rollback = recover_to_source(game_root, patch_root);
+            return {ExitCode::patch_failed, !rollback.success(),
+                    L"An empty patch input could not be prepared: " +
+                        quote_path(item.managed.logical)};
+          }
+        }
+        const auto patched = apply_hdiff_patch(patch_input, item.patch, item.staged);
+        staged = patched.success && backend.flush_file(item.staged) &&
+                 hash_matches(item.staged, item.plan->target_sha256);
+        if (staged && cache_targets && item.plan->target_present) {
+          (void)commit_verified_vault_object(
+              *vault, item.staged, item.plan->target_sha256,
+              item.plan->target_size);
         }
       }
-      const auto patched = apply_hdiff_patch(patch_input, item.patch, item.staged);
-      if (!patched.success || !backend.flush_file(item.staged) ||
-          !hash_matches(item.staged, item.plan->target_sha256) ||
-          !journal.append(JournalPhase::staged, static_cast<std::uint32_t>(item.index),
+      if (!staged ||
+          !journal.append(JournalPhase::staged,
+                          static_cast<std::uint32_t>(item.index),
                           item.plan->target_sha256)) {
         const auto rollback = recover_to_source(game_root, patch_root);
         return {ExitCode::patch_failed, !rollback.success(),
@@ -720,7 +787,9 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
                     quote_path(item.managed.logical)};
       }
     }
+    staging_duration = elapsed_milliseconds(staging_started);
 
+    const auto commit_started = SteadyClock::now();
     for (const auto& item : work) {
       if (!managed_file_mapping_matches(game_root, item.managed) ||
           !journal.append(JournalPhase::replace_pending,
@@ -771,12 +840,20 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
               L"The completed runtime transaction could not be recorded."};
     }
 
+    commit_duration = elapsed_milliseconds(commit_started);
+    const auto total_duration = elapsed_milliseconds(total_started);
+
     return {ExitCode::success, true,
             L"Skyrim was switched from " + source_version() + L" to " + target_version() +
                 L"." +
                 (backup_result.changed
                      ? L" A verified fallback backup of the managed 1.7.104 files was created."
-                     : L"")};
+                     : L"") +
+                performance_summary(total_duration, recovery_duration,
+                                    preflight_duration, source_vault_duration,
+                                    staging_duration, commit_duration,
+                                    target_cache_hits,
+                                    target_cache_candidates)};
   } catch (const std::exception&) {
     return {ExitCode::internal_error, false,
             L"An unexpected internal error occurred during the runtime swap."};

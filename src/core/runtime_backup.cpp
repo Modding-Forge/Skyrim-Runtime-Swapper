@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <string>
 #include <system_error>
+#include <vector>
 
 namespace runtime_swapper::core {
 namespace {
@@ -44,34 +45,52 @@ std::uint64_t required_source_backup_space(const std::filesystem::path& game_roo
 }
 
 SourceBackupResult ensure_source_backups(const std::filesystem::path& game_root) {
-  const auto required = required_source_backup_space(game_root);
   std::wstring vault_error;
-  const auto vault = resolve_vault_layout(game_root, required, &vault_error);
+  const auto candidate =
+      resolve_vault_layout(game_root, 0, &vault_error, false);
+  if (!candidate) {
+    return {ExitCode::backup_failed, false,
+            L"A safe recovery vault is unavailable: " + vault_error};
+  }
+
+  std::vector<bool> verified_objects(patch_plan.size(), false);
+  std::uint64_t required{};
+  bool complete = true;
+  for (std::size_t index = 0; index < patch_plan.size(); ++index) {
+    const auto& plan = patch_plan[index];
+    if (!plan.source_present) continue;
+    verified_objects[index] = vault_object_matches(
+        *candidate, plan.source_sha256, plan.source_size);
+    if (!verified_objects[index]) {
+      complete = false;
+      required += plan.source_size;
+    }
+  }
+
+  const auto vault =
+      resolve_vault_layout(game_root, required, &vault_error, true);
   if (!vault) {
     return {ExitCode::backup_failed, false,
             L"A safe recovery vault is unavailable: " + vault_error};
   }
-  if (runtime_manifest_matches(*vault)) {
-    bool complete = true;
-    for (const auto& plan : patch_plan) {
-      if (plan.source_present &&
-          !vault_object_matches(*vault, plan.source_sha256, plan.source_size)) {
-        complete = false;
-        break;
-      }
-    }
-    if (complete) {
-      return {ExitCode::success, false,
-              L"The verified source runtime is available in the recovery vault."};
-    }
+  if (candidate->probe.installation_id != vault->probe.installation_id ||
+      candidate->probe.vault_path != vault->probe.vault_path ||
+      candidate->probe.target_volume.stable_id !=
+          vault->probe.target_volume.stable_id ||
+      candidate->probe.vault_volume.stable_id !=
+          vault->probe.vault_volume.stable_id) {
+    return {ExitCode::backup_failed, false,
+            L"The recovery-vault identity changed while it was being verified."};
+  }
+  if (complete && runtime_manifest_matches(*vault)) {
+    return {ExitCode::success, false,
+            L"The verified source runtime is available in the recovery vault."};
   }
 
   bool changed = false;
-  for (const auto& plan : patch_plan) {
-    if (!plan.source_present ||
-        vault_object_matches(*vault, plan.source_sha256, plan.source_size)) {
-      continue;
-    }
+  for (std::size_t index = 0; index < patch_plan.size(); ++index) {
+    const auto& plan = patch_plan[index];
+    if (!plan.source_present || verified_objects[index]) continue;
     std::wstring path_error;
     const auto managed = resolve_managed_file(
         game_root, utf8_path(plan.relative_file), &path_error);
@@ -81,13 +100,15 @@ SourceBackupResult ensure_source_backups(const std::filesystem::path& game_root)
     }
     const auto& live = managed->effective;
     const auto legacy = legacy_backup_path(game_root, plan);
-    const auto source = hash_matches(live, plan.source_sha256) ? live : legacy;
-    if (!hash_matches(source, plan.source_sha256)) {
+    const bool live_verified = hash_matches(live, plan.source_sha256);
+    const auto& source = live_verified ? live : legacy;
+    if (!live_verified && !hash_matches(legacy, plan.source_sha256)) {
       return {ExitCode::backup_failed, changed,
               L"A verified source file is unavailable for the recovery vault: " +
                   quote_path(managed->logical)};
     }
-    if (!commit_vault_object(*vault, source, plan.source_sha256, plan.source_size)) {
+    if (!commit_verified_vault_object(*vault, source, plan.source_sha256,
+                                      plan.source_size)) {
       return {ExitCode::backup_failed, changed,
               L"A source-runtime object could not be committed and verified in: " +
                   quote_path(vault->probe.vault_path) + L"\n\nManaged file: " +
@@ -97,9 +118,11 @@ SourceBackupResult ensure_source_backups(const std::filesystem::path& game_root)
                        : L"")};
     }
     changed = true;
+    verified_objects[index] = true;
   }
 
-  if (!commit_runtime_manifest(*vault, game_root) || !runtime_manifest_matches(*vault)) {
+  if (!commit_verified_runtime_manifest(*vault, game_root) ||
+      !runtime_manifest_matches(*vault)) {
     return {ExitCode::backup_failed, changed,
             L"The versioned recovery-vault manifest could not be committed."};
   }

@@ -29,18 +29,39 @@ enum class PersistentMarkerState { inactive, active, invalid };
                                         std::string_view sha256,
                                         std::uint64_t expected_size);
 
+// Cheap structural check used only to select a cache candidate. Callers must
+// still verify the materialized destination hash before any live mutation.
+[[nodiscard]] bool vault_object_available(const VaultLayout& vault,
+                                          std::string_view sha256,
+                                          std::uint64_t expected_size);
+
 [[nodiscard]] bool commit_vault_object(const VaultLayout& vault,
                                        const std::filesystem::path& source,
                                        std::string_view sha256,
                                        std::uint64_t expected_size);
+
+// Commits a source that was already verified by the caller. The destination
+// is always flushed and independently hashed before success is returned.
+[[nodiscard]] bool commit_verified_vault_object(
+    const VaultLayout& vault, const std::filesystem::path& verified_source,
+    std::string_view sha256, std::uint64_t expected_size);
 
 [[nodiscard]] bool restore_vault_object(const VaultLayout& vault,
                                         std::string_view sha256,
                                         std::uint64_t expected_size,
                                         const std::filesystem::path& destination);
 
+// Materializes an object verified earlier in the current transaction. The
+// resulting destination is independently hashed before it can be used.
+[[nodiscard]] bool materialize_verified_vault_object(
+    const VaultLayout& vault, std::string_view sha256,
+    std::uint64_t expected_size,
+    const std::filesystem::path& destination);
+
 [[nodiscard]] bool commit_runtime_manifest(const VaultLayout& vault,
                                            const std::filesystem::path& game_root);
+[[nodiscard]] bool commit_verified_runtime_manifest(
+    const VaultLayout& vault, const std::filesystem::path& game_root);
 [[nodiscard]] bool runtime_manifest_matches(const VaultLayout& vault);
 
 [[nodiscard]] bool preserve_conflict(const VaultLayout& vault,
