@@ -104,4 +104,4 @@ jobs:
         run: |
           mkdir -p /tmp/srs-wine-game
           chmod 0644 bridge/SkyrimRuntimeSwapper.Native
-          wine64 bridge/WineSidecarProbe.exe 'Z:\tmp\srs-wine-game'
+          wine bridge/WineSidecarProbe.exe 'Z:\tmp\srs-wine-game'
