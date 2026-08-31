@@ -8,6 +8,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <iterator>
 #include <string>
 
@@ -74,7 +75,7 @@ std::string utf8_path(const std::filesystem::path& path) {
 
 }  // namespace
 
-int main() {
+int run_tests() {
   using namespace runtime_swapper;
   using namespace runtime_swapper::core;
 
@@ -250,4 +251,12 @@ int main() {
     return 13;
   }
   return 0;
+}
+
+int main() {
+  const int result = run_tests();
+  if (result != 0) {
+    std::cerr << "vault_store_tests failed at assertion " << result << '\n';
+  }
+  return result;
 }

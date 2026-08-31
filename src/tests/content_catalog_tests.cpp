@@ -71,7 +71,7 @@ std::string read_file(const std::filesystem::path& path) {
 
 }  // namespace
 
-int main() {
+int run_tests() {
   using namespace runtime_swapper::app;
   const TestEnvironment environment;
   const auto catalog = environment.catalog();
@@ -129,4 +129,12 @@ int main() {
     return 8;
   }
   return 0;
+}
+
+int main() {
+  const int result = run_tests();
+  if (result != 0) {
+    std::cerr << "content_catalog_tests failed at assertion " << result << '\n';
+  }
+  return result;
 }
