@@ -2,7 +2,7 @@
 
 Skyrim Runtime Swapper lets a Skyrim mod collection built for an older runtime start through the unmodified `skse64_loader.exe`. On trusted internal filesystems it restores the original Steam runtime automatically after every game session. On external, removable, exFAT, or otherwise uncertain local storage it offers a recoverable persistent downgrade instead.
 
-Current release: `1.2.0-rc17`.
+Current release: `1.2.0`.
 
 Release archives include `SHA256SUMS.txt` beside the four packages. Windows
 binaries are currently not Authenticode-signed; release integrity is provided
