@@ -2,7 +2,7 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
-## 1.2.0-rc19 - 2026-09-01
+## 1.2.0 - 2026-09-01
 
 - Safely retires verified v1.0.0 and v1.1.0 in-game recovery storage on the
   first v1.2.0 launch, including fallback backups, runtime caches, staging
