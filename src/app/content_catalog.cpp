@@ -283,10 +283,19 @@ struct CatalogWorkspace {
   std::error_code error;
   const auto status = std::filesystem::symlink_status(workspace.root, error);
   if (error == std::errc::no_such_file_or_directory) return true;
-  return !error && std::filesystem::is_directory(status) &&
-         !std::filesystem::is_symlink(status) &&
-         std::filesystem::is_empty(workspace.root, error) && !error &&
-         transaction_backend().durable_remove_tree(workspace.root);
+  if (error || !std::filesystem::is_directory(status) ||
+      std::filesystem::is_symlink(status)) {
+    return false;
+  }
+  const bool empty = std::filesystem::is_empty(workspace.root, error);
+  if (error) return false;
+  if (!empty) {
+    // The v1 workspace was shared with runtime backups and its lock file.
+    // Catalog cleanup owns only ContentCatalog.hold and .journal.
+    return workspace.legacy;
+  }
+  return static_cast<bool>(
+      transaction_backend().durable_remove_tree(workspace.root));
 }
 
 [[nodiscard]] std::optional<ContentCatalogResult> recover_legacy_game_backup(

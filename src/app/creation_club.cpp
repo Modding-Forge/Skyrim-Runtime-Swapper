@@ -273,8 +273,6 @@ constexpr std::string_view metadata_name = "creation-club";
 
 CreationClubResult recover_creation_club_content(
     const std::filesystem::path& game_root) {
-  if constexpr (!quarantines_creation_club_content) return {true, false, {}};
-
   const auto metadata = read_recovery_metadata(game_root, metadata_name);
   if (metadata.failed()) {
     return {false, false,

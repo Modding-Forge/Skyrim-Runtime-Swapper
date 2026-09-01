@@ -2,7 +2,12 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
-## 1.2.0-rc18 - 2026-09-01
+## 1.2.0-rc19 - 2026-09-01
+
+- Safely retires verified v1.0.0 and v1.1.0 in-game recovery storage on the
+  first v1.2.0 launch, including fallback backups, runtime caches, staging
+  directories, completion markers, and stale transaction lock files. Unknown,
+  linked, active, or unverifiable legacy state is preserved and blocks cleanup.
 
 - Added portable storage classification and automatically selected recovery
   storage for Windows, Linux, Wine, and Proton. Trusted internal NTFS, ext4,

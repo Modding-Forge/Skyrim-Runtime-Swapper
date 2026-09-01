@@ -9,6 +9,7 @@
 #include <windows.h>
 
 #include <filesystem>
+#include <array>
 #include <fstream>
 #include <iostream>
 #include <cstdint>
@@ -91,6 +92,23 @@ std::string previous_inventory(std::string_view name, std::string_view contents)
   return "SRS-CC-QUARANTINE-2\nchecksum=" + checksum.str() + "\n" + body;
 }
 
+std::string v1_inventory(std::wstring_view name, std::string_view contents) {
+  constexpr char digits[] = "0123456789abcdef";
+  std::string encoded;
+  for (const wchar_t character : name) {
+    const auto value = static_cast<std::uint16_t>(character);
+    for (const unsigned shift : std::array{12U, 8U, 4U, 0U}) {
+      encoded.push_back(digits[(value >> shift) & 0x0fU]);
+    }
+  }
+  const auto hash = runtime_swapper::sha256_string(contents).value();
+  const auto body = "count=1\n" + hash + "|" +
+                    std::to_string(contents.size()) + "|" + encoded + "\n";
+  std::ostringstream checksum;
+  checksum << std::hex << std::setfill('0') << std::setw(8) << crc32(body);
+  return "SRS-CC-QUARANTINE-1\nchecksum=" + checksum.str() + "\n" + body;
+}
+
 }  // namespace
 
 int main() {
@@ -127,6 +145,17 @@ int main() {
         !std::filesystem::is_regular_file(unicode_plugin) ||
         std::filesystem::exists(quarantine)) {
       return 1;
+    }
+    std::filesystem::create_directories(legacy_quarantine);
+    std::filesystem::rename(plugin, legacy_quarantine / plugin.filename());
+    write_file(legacy_quarantine / L"CreationClub.journal",
+               v1_inventory(plugin.filename().wstring(), "plugin"));
+    const auto legacy_recovery =
+        runtime_swapper::app::recover_creation_club_content(game_root);
+    if (!legacy_recovery.success || !legacy_recovery.changed ||
+        read_file(plugin) != "plugin" ||
+        std::filesystem::exists(legacy_quarantine)) {
+      return 26;
     }
     return 0;
   }

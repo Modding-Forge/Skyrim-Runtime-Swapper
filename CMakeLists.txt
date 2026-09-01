@@ -5,7 +5,7 @@ project(SkyrimRuntimeSwapper VERSION 1.2.0 LANGUAGES C CXX)
 option(SKYRIM_RUNTIME_BUILD_FUZZER
   "Build the Linux libFuzzer target for the handle-bound HDiffPatch adapter" OFF)
 
-set(SKYRIM_RUNTIME_RELEASE_VERSION "1.2.0-rc18")
+set(SKYRIM_RUNTIME_RELEASE_VERSION "1.2.0-rc19")
 if(SKYRIM_RUNTIME_RELEASE_VERSION MATCHES "-")
   set(SKYRIM_RUNTIME_VERSION_FLAGS "VS_FF_PRERELEASE")
 else()
@@ -152,12 +152,17 @@ foreach(REQUIRED_FILE IN LISTS PROFILE_FILES)
 endforeach()
 list(LENGTH PROFILE_FILES PROFILE_FILE_COUNT)
 
+include(cmake/legacy_storage_plan.cmake)
+generate_legacy_storage_plan_entries(LEGACY_STORAGE_PLAN_ENTRIES)
+
 set(GENERATED_INCLUDE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${GENERATED_INCLUDE}/runtime_swapper")
 string(SHA256 SKYRIM_RUNTIME_PATCH_PLAN_HASH
   "${PATCH_MANIFEST_JSON};${SKYRIM_RUNTIME_BUILD_PROFILE}")
 configure_file(cmake/runtime_version.hpp.in "${GENERATED_INCLUDE}/runtime_swapper/runtime_version.hpp" @ONLY)
 configure_file(cmake/patch_plan.hpp.in "${GENERATED_INCLUDE}/runtime_swapper/patch_plan.hpp" @ONLY)
+configure_file(cmake/legacy_storage_plan.hpp.in
+  "${GENERATED_INCLUDE}/runtime_swapper/legacy_storage_plan.hpp" @ONLY)
 configure_file(cmake/release_version.hpp.in
   "${GENERATED_INCLUDE}/runtime_swapper/release_version.hpp" @ONLY)
 
@@ -273,6 +278,7 @@ add_library(runtime_swapper_core STATIC
   src/core/file_operations.cpp
   src/core/fault_injection.cpp
   src/core/hdiff_patch.cpp
+  src/core/legacy_storage_cleanup.cpp
   src/core/path_presentation.cpp
   src/core/persistent_runtime.cpp
   src/core/prepared_storage.cpp
@@ -335,6 +341,21 @@ if(BUILD_TESTING)
       -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
   endif()
   add_test(NAME runtime_layout_tests COMMAND runtime_layout_tests)
+
+  add_executable(legacy_storage_cleanup_tests
+    src/tests/legacy_storage_cleanup_tests.cpp)
+  target_include_directories(legacy_storage_cleanup_tests BEFORE PRIVATE
+    "${GENERATED_INCLUDE}" src/include src/core)
+  target_link_libraries(legacy_storage_cleanup_tests PRIVATE runtime_swapper_core)
+  if(MSVC)
+    target_compile_options(legacy_storage_cleanup_tests PRIVATE
+      /W4 /permissive- /EHsc /utf-8)
+  else()
+    target_compile_options(legacy_storage_cleanup_tests PRIVATE
+      -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+  endif()
+  add_test(NAME legacy_storage_cleanup_tests
+    COMMAND legacy_storage_cleanup_tests)
 endif()
 
 add_executable(storage_backend_probe src/tools/storage_backend_probe.cpp)
@@ -437,6 +458,7 @@ if(BUILD_TESTING)
       /W4 /permissive- /EHsc /utf-8)
   endif()
   add_test(NAME recovery_lifecycle_tests COMMAND recovery_lifecycle_tests)
+
   add_windows_version_resource(runtime_version_tests "runtime_version_tests.exe"
     "Skyrim Runtime Swapper Runtime Version Tests" "runtime_version_tests" "VFT_APP")
   add_windows_version_resource(runtime_layout_tests "runtime_layout_tests.exe"

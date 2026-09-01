@@ -2,12 +2,12 @@
 
 #include "internal/vault_store.hpp"
 #include "internal/file_operations.hpp"
+#include "internal/legacy_storage_cleanup.hpp"
 #include "internal/storage_entry_policy.hpp"
 #include "internal/transaction_workspace.hpp"
 
 #include <runtime_swapper/transaction_backend.hpp>
 #include <runtime_swapper/downgrade.hpp>
-#include <runtime_swapper/patch_plan.hpp>
 #include <runtime_swapper/runtime_version.hpp>
 
 #include <algorithm>
@@ -29,39 +29,6 @@ namespace {
     const core::VaultLayout& vault, std::string_view name) {
   return vault.probe.vault_path / L"attachments" /
          std::filesystem::path(name.begin(), name.end());
-}
-
-[[nodiscard]] bool remove_verified_legacy_runtime_backups(
-    const std::filesystem::path& game_root) {
-  auto& backend = transaction_backend();
-  const auto backup_root =
-      game_root / L".skyrim-runtime-swapper" / L"backups" /
-      std::wstring(source_version_label);
-  for (const auto& plan : patch_plan) {
-    if (!plan.source_present) continue;
-    const auto backup = backup_root / core::utf8_path(plan.relative_file);
-    std::error_code error;
-    (void)std::filesystem::symlink_status(backup, error);
-    if (error == std::errc::no_such_file_or_directory) continue;
-    if (error || !core::private_regular_file(backup) ||
-        !core::hash_matches(backup, plan.source_sha256) ||
-        !backend.durable_remove(backup)) {
-      return false;
-    }
-  }
-
-  // Remove only empty directories on the known legacy path. A foreign file
-  // makes cleanup pending and is never traversed or deleted.
-  for (auto directory : {backup_root / L"Data", backup_root,
-                         backup_root.parent_path()}) {
-    std::error_code error;
-    if (std::filesystem::is_directory(directory, error) && !error &&
-        std::filesystem::is_empty(directory, error) && !error &&
-        !backend.durable_remove_tree(directory)) {
-      return false;
-    }
-  }
-  return true;
 }
 
 }  // namespace
@@ -357,13 +324,13 @@ RecoveryLifecycleResult finalize_recovery_storage(
     recovery_parent = next;
   }
 
-  // Only a known-empty program directory is removed. Unknown user content is
-  // never traversed or deleted as part of installation cleanup.
-  if (!remove_verified_legacy_runtime_backups(game_root)) {
+  const auto legacy_cleanup =
+      core::cleanup_legacy_installation_storage(game_root);
+  if (!legacy_cleanup.success) {
     return result(ExitCode::commit_failed,
                   RecoveryLifecycleState::cleanup_pending,
                   RecoveryLifecyclePhase::delete_installation_metadata,
-                  L"Legacy Skyrim recovery data could not be removed safely.");
+                  legacy_cleanup.detail);
   }
   error.clear();
   const auto metadata_status = std::filesystem::symlink_status(metadata_root, error);
