@@ -241,7 +241,14 @@ jobs:
       - name: Build
         run: cmake --build build/windows --config Release --parallel
       - name: Unit tests
-        run: ctest --test-dir build/windows -C Release --output-on-failure
+        shell: pwsh
+        run: |
+          ctest --test-dir build/windows -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) {
+            & build/windows/Release/core_storage_tests.exe
+            Write-Host "core_storage_tests exit code: $LASTEXITCODE"
+            exit 1
+          }
       - name: Verify PE hardening
         shell: pwsh
         run: |
