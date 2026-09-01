@@ -30,7 +30,7 @@ namespace runtime_swapper::app {
 namespace {
 
 constexpr std::uint32_t protocol_magic = 0x50535253U;
-constexpr std::uint16_t protocol_version = 4;
+constexpr std::uint16_t protocol_version = 5;
 constexpr std::uint32_t maximum_payload = 1024U * 1024U;
 
 #pragma pack(push, 1)
@@ -94,6 +94,52 @@ static_assert(sizeof(Elf64ProgramHeader) == 56);
   return size == 0 || size >= buffer.size()
              ? std::filesystem::path{}
              : std::filesystem::path(std::wstring_view(buffer.data(), size)).parent_path();
+}
+
+struct SidecarIdentity {
+  DWORD volume{};
+  std::uint64_t file{};
+  std::uint64_t size{};
+  std::uint64_t modified{};
+
+  [[nodiscard]] bool operator==(const SidecarIdentity&) const noexcept = default;
+};
+
+struct VerifiedSidecar {
+  UniqueHandle handle;
+  SidecarIdentity identity;
+};
+
+[[nodiscard]] std::optional<VerifiedSidecar> verify_sidecar(
+    const std::filesystem::path& path,
+    const std::optional<SidecarIdentity>& expected = std::nullopt) {
+  UniqueHandle handle(CreateFileW(
+      path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+      FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
+  BY_HANDLE_FILE_INFORMATION info{};
+  FILE_ATTRIBUTE_TAG_INFO attributes{};
+  if (!handle || GetFileType(handle.get()) != FILE_TYPE_DISK ||
+      !GetFileInformationByHandle(handle.get(), &info) ||
+      !GetFileInformationByHandleEx(handle.get(), FileAttributeTagInfo,
+                                    &attributes, sizeof(attributes)) ||
+      (attributes.FileAttributes &
+       (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+    return std::nullopt;
+  }
+  const SidecarIdentity identity{
+      info.dwVolumeSerialNumber,
+      (static_cast<std::uint64_t>(info.nFileIndexHigh) << 32U) |
+          info.nFileIndexLow,
+      (static_cast<std::uint64_t>(info.nFileSizeHigh) << 32U) |
+          info.nFileSizeLow,
+      (static_cast<std::uint64_t>(info.ftLastWriteTime.dwHighDateTime) << 32U) |
+          info.ftLastWriteTime.dwLowDateTime};
+  if ((expected && identity != *expected) ||
+      sha256_native_file(reinterpret_cast<std::intptr_t>(handle.get())) !=
+          std::optional<std::string>(posix_sidecar_sha256)) {
+    return std::nullopt;
+  }
+  return VerifiedSidecar{std::move(handle), identity};
 }
 
 [[nodiscard]] std::optional<std::filesystem::path> local_app_data_path() {
@@ -338,6 +384,7 @@ template <typename Value>
   const auto vault = take_string(payload);
   const auto target_cache = take_string(payload);
   const auto coordination_lock = take_string(payload);
+  const auto transaction_work = take_string(payload);
   const auto target_id = take_string(payload);
   const auto target_filesystem = take_string(payload);
   const auto target_medium = take_integer<std::uint32_t>(payload);
@@ -361,7 +408,7 @@ template <typename Value>
       *lifecycle_phase >
           static_cast<std::uint32_t>(RecoveryLifecyclePhase::complete) ||
       !installation || !vault || !target_cache ||
-      !coordination_lock || !target_id ||
+      !coordination_lock || !transaction_work || !target_id ||
       !target_filesystem || !target_medium ||
       *target_medium > static_cast<std::uint32_t>(StorageMedium::unknown) ||
       !target_flags || *target_flags > 7U || !vault_id || !vault_filesystem ||
@@ -408,6 +455,10 @@ template <typename Value>
         reinterpret_cast<const char8_t*>(coordination_lock->data());
     result.backend.coordination_lock.value = std::filesystem::path(
         std::u8string(lock_begin, lock_begin + coordination_lock->size()));
+    const auto* work_begin =
+        reinterpret_cast<const char8_t*>(transaction_work->data());
+    result.backend.transaction_work.value = std::filesystem::path(
+        std::u8string(work_begin, work_begin + transaction_work->size()));
     result.backend.recovery_vault.value = result.backend.vault_path;
   } catch (const std::filesystem::filesystem_error&) {
     return std::nullopt;
@@ -450,8 +501,8 @@ InstallationOperationResult run_wine_sidecar(
                         L"This build does not contain a trusted native Linux helper hash.");
   }
   const auto sidecar = module_directory() / L"SkyrimRuntimeSwapper.Native";
-  if (!std::filesystem::is_regular_file(sidecar) ||
-      sha256_file(sidecar) != std::optional<std::string>(posix_sidecar_sha256)) {
+  const auto initially_verified = verify_sidecar(sidecar);
+  if (!initially_verified) {
     return error_result(L"native-sidecar-hash-mismatch",
                         L"The native Linux helper is missing or failed hash verification.");
   }
@@ -534,7 +585,7 @@ InstallationOperationResult run_wine_sidecar(
       !write_exact(request_file.get(), payload.data(), payload.size()) ||
       !FlushFileBuffers(request_file.get())) {
     return error_result(L"sidecar-request-failed",
-                        L"The authenticated native-helper request could not be committed.");
+                        L"The nonce-bound native-helper request could not be committed.");
   }
   request_file.reset();
 
@@ -551,8 +602,17 @@ InstallationOperationResult run_wine_sidecar(
   STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
   PROCESS_INFORMATION process_info{};
+  bool sidecar_identity_changed = false;
   const auto start_process = [&](const std::filesystem::path& application,
                                  const std::wstring& command) {
+    // Hold a non-write-sharing handle across CreateProcess and rehash the exact
+    // object immediately before every direct or interpreter launch attempt.
+    auto launch_guard = verify_sidecar(sidecar, initially_verified->identity);
+    if (!launch_guard) {
+      sidecar_identity_changed = true;
+      SetLastError(ERROR_FILE_INVALID);
+      return FALSE;
+    }
     process_info = {};
     std::vector<wchar_t> mutable_command(command.begin(), command.end());
     mutable_command.push_back(L'\0');
@@ -598,8 +658,7 @@ InstallationOperationResult run_wine_sidecar(
         }
         for (unsigned attempt = 0; attempt != 200 && !started; ++attempt) {
           Sleep(10);
-          if (sha256_file(sidecar) !=
-              std::optional<std::string>(posix_sidecar_sha256)) {
+          if (!verify_sidecar(sidecar, initially_verified->identity)) {
             return error_result(
                 L"native-sidecar-hash-mismatch",
                 L"The native Linux helper changed while its executable permission was restored.");
@@ -633,6 +692,11 @@ InstallationOperationResult run_wine_sidecar(
     }
   }
   if (!started) {
+    if (sidecar_identity_changed) {
+      return error_result(
+          L"native-sidecar-hash-mismatch",
+          L"The native Linux helper changed before it could be started safely.");
+    }
     return error_result(L"native-sidecar-start-failed",
                         L"Wine could not start the verified native Linux helper (direct error " +
                             std::to_wstring(direct_error) + L", interpreter error " +
@@ -685,7 +749,7 @@ InstallationOperationResult run_wine_sidecar(
       response_size.QuadPart !=
           static_cast<LONGLONG>(sizeof(response) + response.payload_size)) {
     return error_result(L"sidecar-response-invalid",
-                        L"The native helper returned an invalid or unauthenticated response.");
+                        L"The native helper returned an invalid or mismatched response.");
   }
   std::vector<std::byte> response_payload(response.payload_size);
   if (!read_exact(response_file.get(), response_payload.data(),

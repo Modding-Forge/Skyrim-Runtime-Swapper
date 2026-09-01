@@ -2,13 +2,17 @@
 
 #include "internal/file_operations.hpp"
 #include "internal/runtime_backup.hpp"
+#include "internal/runtime_transaction_support.hpp"
 #include "internal/transaction_journal.hpp"
+#include "internal/transaction_workspace.hpp"
 #include "internal/vault_store.hpp"
 
 #include <runtime_swapper/hdiff_patch.hpp>
 #include <runtime_swapper/file_status.hpp>
 #include <runtime_swapper/patch_plan.hpp>
 #include <runtime_swapper/prepared_storage.hpp>
+#include <runtime_swapper/checked_arithmetic.hpp>
+#include <runtime_swapper/release_version.hpp>
 #include <runtime_swapper/runtime_layout.hpp>
 #include <runtime_swapper/runtime_version.hpp>
 #include <runtime_swapper/sha256.hpp>
@@ -29,65 +33,12 @@
 namespace runtime_swapper::core {
 namespace {
 
-enum class FileState { source, target, unknown };
-
-struct WorkItem {
-  std::size_t index{};
-  const PatchPlanEntry* plan{};
-  ManagedFilePath managed;
-  std::filesystem::path patch;
-  std::filesystem::path staged;
-  std::filesystem::path rollback;
-  bool cached_target{};
-};
-
 struct CleanupResult {
   bool success{};
   std::wstring detail;
 };
 
-using SteadyClock = std::chrono::steady_clock;
-
-[[nodiscard]] std::int64_t elapsed_milliseconds(
-    SteadyClock::time_point start) {
-  return std::chrono::duration_cast<std::chrono::milliseconds>(
-             SteadyClock::now() - start)
-      .count();
-}
-
-[[nodiscard]] std::wstring performance_summary(
-    std::int64_t total, std::int64_t recovery, std::int64_t preflight,
-    std::int64_t source_vault, std::int64_t staging, std::int64_t commit,
-    std::size_t cache_hits, std::size_t cache_candidates) {
-  return L"\nPerformance: total=" + std::to_wstring(total) +
-         L" ms; recovery=" + std::to_wstring(recovery) +
-         L" ms; preflight=" + std::to_wstring(preflight) +
-         L" ms; source-vault=" + std::to_wstring(source_vault) +
-         L" ms; staging=" + std::to_wstring(staging) +
-         L" ms; commit=" + std::to_wstring(commit) +
-         L" ms; target-cache=" + std::to_wstring(cache_hits) + L"/" +
-         std::to_wstring(cache_candidates) + L".";
-}
-
-void add_unique_directory(std::vector<std::filesystem::path>& directories,
-                          const std::filesystem::path& directory) {
-  if (std::ranges::find(directories, directory) == directories.end()) {
-    directories.push_back(directory);
-  }
-}
-
-[[nodiscard]] bool sync_directories(
-    TransactionBackend& backend,
-    const std::vector<std::filesystem::path>& directories) {
-  return std::ranges::all_of(directories, [&backend](const auto& directory) {
-    return backend.sync_directory(directory);
-  });
-}
-
-[[nodiscard]] std::wstring source_version() { return std::wstring(source_version_label); }
-[[nodiscard]] std::wstring target_version() { return std::wstring(target_version_label); }
-
-[[nodiscard]] std::string profile_fingerprint(RuntimeLayout layout) {
+[[nodiscard]] std::string legacy_profile_name(RuntimeLayout layout) {
   std::string fingerprint = std::string(source_version_label_utf8) + "-to-" +
          std::string(target_version_label_utf8) + "-" +
          std::to_string(patch_plan.size());
@@ -97,7 +48,7 @@ void add_unique_directory(std::vector<std::filesystem::path>& directories,
   return fingerprint;
 }
 
-[[nodiscard]] std::string profile_fingerprint(
+[[nodiscard]] std::string legacy_profile_fingerprint(
     const std::filesystem::path& game_root,
     const std::vector<ManagedFilePath>& managed_files, RuntimeLayout runtime_layout) {
   std::error_code error;
@@ -111,47 +62,75 @@ void add_unique_directory(std::vector<std::filesystem::path>& directories,
     layout.push_back('\n');
   }
   const auto hash = sha256_string(layout);
-  return hash ? profile_fingerprint(runtime_layout) + "-" + hash->substr(0, 8)
-              : std::string{};
+  return hash ? legacy_profile_name(runtime_layout) + "-" + hash->substr(0, 8)
+               : std::string{};
 }
 
-[[nodiscard]] std::filesystem::path work_root(const std::filesystem::path& game_root) {
-  return game_root / L".skyrim-runtime-swapper";
+[[nodiscard]] std::string journal_truncated_profile(std::string profile) {
+  constexpr std::size_t disk_profile_size = 32;
+  if (profile.size() > disk_profile_size) profile.resize(disk_profile_size);
+  return profile;
 }
 
-[[nodiscard]] std::filesystem::path active_root(const std::filesystem::path& game_root) {
-  return work_root(game_root) / L"transaction";
+[[nodiscard]] bool recognized_legacy_profile(
+    std::string_view recorded, const std::filesystem::path& game_root,
+    const std::vector<ManagedFilePath>& managed_files,
+    RuntimeLayout runtime_layout) {
+  return recorded == journal_truncated_profile(legacy_profile_name(runtime_layout)) ||
+         recorded == journal_truncated_profile(legacy_profile_fingerprint(
+                         game_root, managed_files, runtime_layout));
+}
+
+[[nodiscard]] bool compact_profile_format(std::string_view profile) {
+  if (profile.size() != 31 || !profile.starts_with("p3-")) return false;
+  return std::ranges::all_of(profile.substr(3), [](char value) {
+    return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
+  });
 }
 
 [[nodiscard]] std::filesystem::path legacy_journal_path(
     const std::filesystem::path& game_root) {
-  return active_root(game_root) / L"runtime.journal";
+  return legacy_transaction_root(game_root) / L"runtime.journal";
 }
 
-[[nodiscard]] std::filesystem::path session_marker(const std::filesystem::path& game_root) {
-  return work_root(game_root) / L"target-session.pending";
+[[nodiscard]] std::filesystem::path legacy_session_marker(
+    const std::filesystem::path& game_root) {
+  return legacy_installation_work_root(game_root) / L"target-session.pending";
 }
 
-[[nodiscard]] bool matches_state(const std::filesystem::path& file, bool present,
-                                 std::string_view hash) {
+[[nodiscard]] std::filesystem::path journal_transaction_root(
+    const BackendProbeResult& probe, const JournalReadResult& journal) {
+  if (journal.status != JournalReadStatus::valid || journal.records.empty()) {
+    return {};
+  }
+  return transaction_root(probe, journal.records.front().transaction_id);
+}
+
+[[nodiscard]] bool path_exists(const std::filesystem::path& path) {
+  if (path.empty()) return false;
   std::error_code error;
-  const bool exists = std::filesystem::exists(file, error);
-  if (error) return false;
-  if (!present) return !exists;
-  return std::filesystem::is_regular_file(file, error) && !error && hash_matches(file, hash);
+  const auto status = std::filesystem::symlink_status(path, error);
+  return !error && std::filesystem::exists(status);
 }
 
-[[nodiscard]] FileState inspect_file(const std::filesystem::path& file,
-                                     const PatchPlanEntry& plan) {
-  if (matches_state(file, plan.source_present, plan.source_sha256)) return FileState::source;
-  if (matches_state(file, plan.target_present, plan.target_sha256)) return FileState::target;
-  return FileState::unknown;
+[[nodiscard]] std::filesystem::path existing_transaction_root(
+    const std::filesystem::path& game_root, const BackendProbeResult& probe,
+    const JournalReadResult& journal, std::string_view fresh_transaction_id) {
+  const auto external = journal_transaction_root(probe, journal);
+  if (path_exists(external)) return external;
+  if (!external.empty() && path_exists(legacy_transaction_root(game_root))) {
+    // RC5 through RC11 journaled a random transaction ID while their staged
+    // files lived in the deterministic Skyrim-local tree.
+    return legacy_transaction_root(game_root);
+  }
+  if (!external.empty()) return external;
+  return transaction_root(probe, fresh_transaction_id);
 }
 
-[[nodiscard]] DowngradeResult probe_backend(const std::filesystem::path& game_root) {
-  const auto probe = probe_prepared_storage(game_root);
-  if (!probe.success()) return {probe.code, false, probe.message};
-  return {ExitCode::success, false, probe.description};
+[[nodiscard]] std::filesystem::path existing_session_marker(
+    const std::filesystem::path& game_root, const BackendProbeResult& probe) {
+  const auto external = workspace_session_marker(probe);
+  return path_exists(external) ? external : legacy_session_marker(game_root);
 }
 
 [[nodiscard]] CleanupResult cleanup_failure(
@@ -272,9 +251,35 @@ void add_unique_directory(std::vector<std::filesystem::path>& directories,
   return {true, {}};
 }
 
+[[nodiscard]] CleanupResult remove_empty_transaction_parent(
+    const std::filesystem::path& root) {
+  std::error_code error;
+  const auto status = std::filesystem::symlink_status(root, error);
+  if (error == std::errc::no_such_file_or_directory ||
+      (!error && !std::filesystem::exists(status))) {
+    return {true, {}};
+  }
+  if (error || !std::filesystem::is_directory(status) ||
+      managed_path_entry_is_redirected(root)) {
+    return cleanup_failure(L"Refused to inspect an unsafe legacy transaction parent",
+                           root, error);
+  }
+  if (!std::filesystem::is_empty(root, error)) {
+    return error ? cleanup_failure(L"Could not inspect the legacy transaction parent",
+                                   root, error)
+                 : CleanupResult{true, {}};
+  }
+  if (!std::filesystem::remove(root, error) || error ||
+      !transaction_backend().sync_parent(root)) {
+    return cleanup_failure(L"Could not remove the empty legacy transaction parent",
+                           root, error);
+  }
+  return {true, {}};
+}
+
 [[nodiscard]] CleanupResult clean_transaction_tree(
-    const std::filesystem::path& game_root) {
-  const auto active = active_root(game_root);
+    const std::filesystem::path& game_root,
+    const std::filesystem::path& active) {
   const auto legacy_journal = legacy_journal_path(game_root);
   const auto vault = resolve_vault_layout(game_root);
   if (!vault) {
@@ -285,7 +290,60 @@ void add_unique_directory(std::vector<std::filesystem::path>& directories,
     const auto removed = remove_transaction_file(journal);
     if (!removed.success) return removed;
   }
-  return remove_transaction_directory(active);
+  const auto active_cleanup = remove_transaction_directory(active);
+  if (!active_cleanup.success) return active_cleanup;
+  const auto legacy_active = legacy_transaction_root(game_root);
+  if (active != legacy_active) {
+    const auto legacy_cleanup = remove_transaction_directory(legacy_active);
+    if (!legacy_cleanup.success) return legacy_cleanup;
+  }
+  return remove_empty_transaction_parent(
+      legacy_installation_work_root(game_root));
+}
+
+struct SourceCandidateRestore {
+  bool success{};
+  std::wstring detail;
+};
+
+[[nodiscard]] SourceCandidateRestore restore_source_candidate(
+    const std::filesystem::path& game_root, const PatchPlanEntry& plan,
+    const std::filesystem::path& live, const std::filesystem::path& staged,
+    const std::filesystem::path& discarded) {
+  auto& backend = transaction_backend();
+  if (!hash_matches(staged, plan.source_sha256)) {
+    std::error_code staged_error;
+    const auto staged_status = inspect_regular_file(staged, staged_error);
+    if (staged_status == RegularFileStatus::regular) {
+      const auto removed = backend.durable_remove(staged);
+      if (!removed) return {false, mutation_failure_detail(removed)};
+    } else if (staged_status != RegularFileStatus::missing) {
+      return {false, L"The source recovery candidate is not a regular file."};
+    }
+    if (!materialize_source_backup(game_root, plan, staged) ||
+        !hash_matches(staged, plan.source_sha256)) {
+      return {false, L"The verified source backup could not be materialized."};
+    }
+  }
+
+  std::error_code live_error;
+  const auto live_status = inspect_regular_file(live, live_error);
+  MutationResult installed;
+  if (live_status == RegularFileStatus::missing) {
+    installed = backend.atomic_install(staged, live);
+  } else if (live_status == RegularFileStatus::regular) {
+    installed = backend.atomic_replace(live, staged, discarded);
+  } else {
+    return {false, L"The live recovery destination is not a regular file."};
+  }
+  const auto live_verification = verify_hash(live, plan.source_sha256);
+  if (live_verification.matches) return {true, {}};
+  return {false,
+          installed
+              ? L"The installed source backup failed final hash verification." +
+                    runtime_hash_verification_detail(plan,
+                                                     live_verification.actual)
+              : mutation_failure_detail(installed)};
 }
 
 [[nodiscard]] DowngradeResult recover_to_source(const std::filesystem::path& game_root,
@@ -304,18 +362,33 @@ void add_unique_directory(std::vector<std::filesystem::path>& directories,
   const auto runtime_layout = vault->runtime_layout;
   const auto active_count = active_patch_plan_size(runtime_layout);
 
-  const auto active = active_root(game_root);
   const auto journal = runtime_journal_path(*vault);
   const auto legacy_journal = legacy_journal_path(game_root);
-  const auto marker = session_marker(game_root);
+  const auto recovery_path = recovery_journal_path(*vault);
   auto journal_state = read_transaction_journal(journal);
   if (journal_state.status == JournalReadStatus::missing) {
     journal_state = read_transaction_journal(legacy_journal);
   }
+  if (journal_state.status == JournalReadStatus::missing) {
+    journal_state = read_transaction_journal(recovery_path);
+  }
   if (journal_state.status == JournalReadStatus::corrupt) {
     return {ExitCode::recovery_failed, false,
-            L"The runtime transaction journal is corrupt. No managed file was changed."};
+             L"The runtime transaction journal is corrupt. No managed file was changed."};
   }
+  const auto fresh_transaction_id = make_transaction_id();
+  const auto active = existing_transaction_root(
+      game_root, vault->probe, journal_state, fresh_transaction_id);
+  if (active.empty()) {
+    return {ExitCode::recovery_failed, false,
+            L"A unique recovery transaction path could not be resolved."};
+  }
+  const auto active_transaction_id =
+      journal_state.status == JournalReadStatus::valid &&
+              !journal_state.records.empty()
+          ? journal_state.records.front().transaction_id
+          : fresh_transaction_id;
+  const auto marker = existing_session_marker(game_root, vault->probe);
   std::error_code error;
   const auto marker_status = inspect_regular_file(marker, error);
   if (marker_status != RegularFileStatus::missing &&
@@ -326,7 +399,10 @@ void add_unique_directory(std::vector<std::filesystem::path>& directories,
   const bool marker_exists = marker_status == RegularFileStatus::regular;
 
   std::vector<FileState> states(patch_plan.size(), FileState::unknown);
+  std::vector<std::optional<std::string>> actual_hashes(patch_plan.size());
   std::vector<std::optional<ManagedFilePath>> managed_files(patch_plan.size());
+  std::vector<std::optional<RuntimeTransactionPaths>> transaction_paths(
+      patch_plan.size());
   std::vector<ManagedFilePath> transaction_files;
   transaction_files.reserve(active_count);
   std::size_t source_count{};
@@ -350,16 +426,35 @@ void add_unique_directory(std::vector<std::filesystem::path>& directories,
       break;
     }
     managed_files[index] = *managed;
+    auto paths = resolve_runtime_transaction_paths(
+        backend, active, *managed, active_transaction_id, index);
+    if (!paths) {
+      preflight_failed = true;
+      preflight_message =
+          L"A recovery workspace cannot be placed on the effective runtime "
+          L"mount: " + quote_path(managed->logical) +
+          managed_link_verification_detail(*managed);
+      break;
+    }
+    const auto old_rollback = active / L"rollback" / std::to_wstring(index);
+    if (paths->adjacent && path_exists(old_rollback)) {
+      // RC12 through RC14 staged all rollbacks in the Steam-library workspace.
+      // Keep reading an interrupted legacy rollback, while all new recovery
+      // outputs use the mount-local names above.
+      paths->rollback = old_rollback;
+    }
+    transaction_paths[index] = *paths;
     transaction_files.push_back(*managed);
     const auto& live = managed->effective;
-    const auto rollback = active / L"rollback" / std::to_wstring(index);
-    const auto state = inspect_file(live, plan);
-    states[index] = state;
-    if (state == FileState::source) {
+    const auto& rollback = paths->rollback;
+    const auto inspection = inspect_runtime_file(live, plan);
+    states[index] = inspection.state;
+    actual_hashes[index] = inspection.actual_sha256;
+    if (inspection.state == FileState::source) {
       ++source_count;
       continue;
     }
-    if (state == FileState::target) {
+    if (inspection.state == FileState::target) {
       ++target_count;
       continue;
     }
@@ -369,7 +464,10 @@ void add_unique_directory(std::vector<std::filesystem::path>& directories,
          !has_verified_source_backup(game_root, plan))) {
       preflight_failed = true;
       preflight_message = L"A game file is neither supported nor recoverable: " +
-                          quote_path(managed->logical);
+                          quote_path(managed->logical) +
+                          runtime_hash_verification_detail(
+                              plan, inspection.actual_sha256) +
+                          managed_link_verification_detail(*managed);
       break;
     }
   }
@@ -382,24 +480,55 @@ void add_unique_directory(std::vector<std::filesystem::path>& directories,
   }
   error.clear();
   const bool active_exists = std::filesystem::exists(active_status);
-  const bool transaction_present = journal_state.status != JournalReadStatus::missing ||
-                                   marker_exists || active_exists;
-  if (journal_state.status == JournalReadStatus::valid &&
+  const bool transaction_present =
+      journal_state.status != JournalReadStatus::missing || marker_exists ||
+      active_exists || path_exists(legacy_transaction_root(game_root));
+  bool recovery_layout_rebound = false;
+  if (!preflight_failed && journal_state.status == JournalReadStatus::valid &&
       !journal_state.records.empty()) {
     const auto current_profile =
         profile_fingerprint(game_root, transaction_files, runtime_layout);
-    const bool redirected = std::ranges::any_of(
-        transaction_files, [](const ManagedFilePath& managed) {
-          return managed.redirected;
-        });
     const auto& recorded_profile = journal_state.records.front().profile;
-    if (current_profile.empty() ||
-        (recorded_profile != current_profile &&
-         (redirected ||
-          recorded_profile != profile_fingerprint(runtime_layout)))) {
+    if (current_profile.empty()) {
       return {ExitCode::recovery_failed, false,
-              L"A managed runtime link changed since the transaction was committed. "
+              L"The current managed runtime layout could not be authenticated. "
               L"Recovery was stopped before writing any file."};
+    }
+    if (recorded_profile != current_profile) {
+      const auto legacy_name =
+          journal_truncated_profile(legacy_profile_name(runtime_layout));
+      const auto legacy_current = journal_truncated_profile(
+          legacy_profile_fingerprint(game_root, transaction_files,
+                                     runtime_layout));
+      const bool legacy_bound = recorded_profile == legacy_current &&
+                                legacy_current != legacy_name;
+      const bool recoverable_profile = legacy_bound ||
+          recognized_legacy_profile(recorded_profile, game_root,
+                                    transaction_files, runtime_layout) ||
+          compact_profile_format(recorded_profile);
+      if (!recoverable_profile) {
+        return {ExitCode::recovery_failed, false,
+                L"The pending runtime transaction uses an incompatible layout "
+                L"profile. Recovery was stopped before writing any file."};
+      }
+      recovery_layout_rebound = !legacy_bound;
+      if (recovery_layout_rebound && unknown_count != 0) {
+        const auto unknown = std::ranges::find(states, FileState::unknown);
+        const auto index = static_cast<std::size_t>(unknown - states.begin());
+        const auto logical = index < managed_files.size() && managed_files[index]
+                                 ? managed_files[index]->logical
+                                 : game_root;
+        return {ExitCode::recovery_failed, false,
+                L"A managed runtime link was rebuilt, but its current content is "
+                L"unknown: " + quote_path(logical) +
+                L". Recovery was stopped before writing any file." +
+                    runtime_hash_verification_detail(
+                        patch_plan[index], actual_hashes[index]) +
+                    (index < managed_files.size() && managed_files[index]
+                         ? managed_link_verification_detail(
+                               *managed_files[index])
+                         : L"")};
+      }
     }
   }
   if (!transaction_present && !mixed_runtime && source_count == active_count) {
@@ -417,7 +546,7 @@ void add_unique_directory(std::vector<std::filesystem::path>& directories,
     if (!patch_plan_entry_enabled(runtime_layout, patch_plan[index])) continue;
     if (states[index] != FileState::target) continue;
     const auto& plan = patch_plan[index];
-    const auto rollback = active / L"rollback" / std::to_wstring(index);
+    const auto& rollback = transaction_paths[index]->rollback;
     const auto patch = patch_root / utf8_path(plan.reverse_patch);
     if (plan.source_present && !hash_matches(rollback, plan.source_sha256) &&
         !hash_matches(patch, plan.reverse_patch_sha256) &&
@@ -438,7 +567,6 @@ void add_unique_directory(std::vector<std::filesystem::path>& directories,
     return {ExitCode::recovery_failed, false,
             L"The runtime recovery directory could not be created."};
   }
-  const auto recovery_path = recovery_journal_path(*vault);
   if (std::filesystem::is_regular_file(recovery_path) &&
       !backend.durable_remove(recovery_path)) {
     return {ExitCode::recovery_failed, false,
@@ -449,7 +577,7 @@ void add_unique_directory(std::vector<std::filesystem::path>& directories,
             L"The managed runtime layout changed before recovery began."};
   }
   TransactionJournal recovery(
-      recovery_path, make_transaction_id(),
+      recovery_path, active_transaction_id,
       profile_fingerprint(game_root, transaction_files, runtime_layout), false);
   if (!recovery.append(JournalPhase::recovery_started,
                        std::numeric_limits<std::uint32_t>::max())) {
@@ -464,7 +592,8 @@ void add_unique_directory(std::vector<std::filesystem::path>& directories,
     if (!patch_plan_entry_enabled(runtime_layout, plan)) continue;
     const auto& managed = *managed_files[index];
     const auto& live = managed.effective;
-    const auto rollback = active / L"rollback" / std::to_wstring(index);
+    const auto& paths = *transaction_paths[index];
+    const auto& rollback = paths.rollback;
     if (states[index] == FileState::source) continue;
 
     if (!runtime_layout_matches(game_root, runtime_layout) ||
@@ -474,11 +603,20 @@ void add_unique_directory(std::vector<std::filesystem::path>& directories,
                   quote_path(managed.logical)};
     }
 
-    if (states[index] == FileState::unknown &&
-        !preserve_conflict(*vault, live, recovery.transaction_id())) {
-      return {ExitCode::recovery_failed, changed,
-              L"An unknown live file could not be preserved in the recovery vault: " +
-                  quote_path(live)};
+    if (states[index] == FileState::unknown) {
+      std::error_code live_error;
+      const auto live_status = inspect_regular_file(live, live_error);
+      if (live_status == RegularFileStatus::regular) {
+        if (!preserve_conflict(*vault, live, recovery.transaction_id())) {
+          return {ExitCode::recovery_failed, changed,
+                  L"An unknown live file could not be preserved in the recovery vault: " +
+                      quote_path(live)};
+        }
+      } else if (live_status != RegularFileStatus::missing) {
+        return {ExitCode::recovery_failed, changed,
+                L"An unknown managed path could not be inspected safely: " +
+                    quote_path(live)};
+      }
     }
 
     if (!plan.source_present) {
@@ -499,35 +637,83 @@ void add_unique_directory(std::vector<std::filesystem::path>& directories,
       }
 
       bool restored = false;
+      std::optional<MutationResult> rollback_restore;
+      std::wstring reverse_patch_detail;
+      const auto& staged = paths.recovery;
+      const auto& discarded = paths.discarded;
+      auto used_discarded = discarded;
       if (hash_matches(rollback, plan.source_sha256)) {
-        restored = backend.restore_file(rollback, live) &&
-                   hash_matches(live, plan.source_sha256);
+        rollback_restore = backend.restore_file(rollback, live);
+        used_discarded = paths.rollback_discarded;
+        restored = hash_matches(live, plan.source_sha256);
       } else if (states[index] == FileState::target) {
-        const auto staged = active / L"recovery" / std::to_wstring(index);
         const auto reverse_patch = patch_root / utf8_path(plan.reverse_patch);
-        if (hash_matches(reverse_patch, plan.reverse_patch_sha256)) {
+        const auto reverse_patch_verification =
+            verify_hash(reverse_patch, plan.reverse_patch_sha256);
+        if (reverse_patch_verification.matches) {
           const auto patched = apply_hdiff_patch(live, reverse_patch, staged);
-          if (patched.success && backend.flush_file(staged) &&
-              hash_matches(staged, plan.source_sha256)) {
-            const auto discarded = active / L"discarded" / std::to_wstring(index);
-            restored = backend.atomic_replace(live, staged, discarded) &&
-                       hash_matches(live, plan.source_sha256);
+          if (!patched.success) {
+            reverse_patch_detail = patched.error;
+          } else {
+            const auto flushed = backend.flush_file(staged);
+            if (!flushed) {
+              reverse_patch_detail = mutation_failure_detail(flushed);
+            } else {
+              const auto reconstructed =
+                  verify_hash(staged, plan.source_sha256);
+              if (!reconstructed.matches) {
+                reverse_patch_detail =
+                    L"The reconstructed source hash did not match." +
+                    runtime_hash_verification_detail(
+                        plan, reconstructed.actual);
+              } else {
+                const auto replaced =
+                    backend.atomic_replace(live, staged, discarded);
+                const auto installed_source =
+                    verify_hash(live, plan.source_sha256);
+                restored = installed_source.matches;
+                if (!restored) {
+                  reverse_patch_detail = mutation_failure_detail(replaced) +
+                                         runtime_hash_verification_detail(
+                                             plan, installed_source.actual);
+                }
+              }
+            }
           }
+        } else {
+          reverse_patch_detail =
+              L"The reverse patch failed verification." +
+              hash_verification_detail(
+                  L"Expected reverse-patch SHA-256", true,
+                  plan.reverse_patch_sha256,
+                  reverse_patch_verification.actual);
         }
       }
 
-      if (!restored && restore_source_backup(game_root, plan, live)) {
-        restored = true;
-        backup_fallback_used = true;
+      if (!restored) {
+        const auto fallback = restore_source_candidate(
+            game_root, plan, live, staged, discarded);
+        restored = fallback.success;
+        if (restored) {
+          backup_fallback_used = true;
+        } else if (reverse_patch_detail.empty()) {
+          reverse_patch_detail = fallback.detail;
+        }
       }
       if (!restored) {
         return {ExitCode::recovery_failed, changed,
                 L"A source-runtime file could not be restored from its reverse patch or "
-                L"fallback backup: " + quote_path(managed.logical)};
+                L"fallback backup: " + quote_path(managed.logical) +
+                    managed_link_verification_detail(managed) +
+                    (rollback_restore
+                         ? L"\n\n" + mutation_failure_detail(*rollback_restore)
+                         : reverse_patch_detail.empty()
+                               ? L""
+                               : L"\n\n" + reverse_patch_detail)};
       }
 
-      const auto discarded = active / L"discarded" / std::to_wstring(index);
-      if (std::filesystem::is_regular_file(discarded) && !backend.durable_remove(discarded)) {
+      if (std::filesystem::is_regular_file(used_discarded) &&
+          !backend.durable_remove(used_discarded)) {
         return {ExitCode::recovery_failed, true,
                 L"A temporary recovery file could not be removed safely."};
       }
@@ -551,12 +737,27 @@ void add_unique_directory(std::vector<std::filesystem::path>& directories,
                   quote_path(managed.logical)};
     }
     const auto& live = managed.effective;
-    if (!matches_state(live, plan.source_present, plan.source_sha256) &&
-        !(plan.source_present && restore_source_backup(game_root, plan, live) &&
-          (backup_fallback_used = true))) {
-      return {ExitCode::recovery_failed, changed,
-              L"Final source-runtime verification failed: " +
-                  quote_path(managed.logical)};
+    if (!matches_state(live, plan.source_present, plan.source_sha256)) {
+      const auto& paths = *transaction_paths[index];
+      const auto& staged = paths.recovery;
+      const auto& discarded = paths.discarded;
+      const auto fallback = plan.source_present
+                                ? restore_source_candidate(game_root, plan, live,
+                                                           staged, discarded)
+                                : SourceCandidateRestore{};
+      if (!fallback.success) {
+        return {ExitCode::recovery_failed, changed,
+                L"Final source-runtime verification failed: " +
+                    quote_path(managed.logical) +
+                    managed_link_verification_detail(managed) +
+                    (fallback.detail.empty() ? L"" : L"\n\n" + fallback.detail)};
+      }
+      backup_fallback_used = true;
+      if (std::filesystem::is_regular_file(discarded) &&
+          !backend.durable_remove(discarded)) {
+        return {ExitCode::recovery_failed, true,
+                L"A final recovery discard could not be removed safely."};
+      }
     }
   }
   if (!recovery.append(JournalPhase::recovery_completed,
@@ -564,13 +765,20 @@ void add_unique_directory(std::vector<std::filesystem::path>& directories,
     return {ExitCode::recovery_failed, changed,
             L"The completed recovery could not be recorded."};
   }
+  const auto adjacent_cleanup =
+      cleanup_adjacent_runtime_transaction_files(transaction_paths);
+  if (!adjacent_cleanup.success) {
+    return {ExitCode::recovery_failed, changed,
+            L"Runtime recovery completed, but mount-local transaction cleanup "
+            L"failed.\n\n" + adjacent_cleanup.detail};
+  }
   const auto marker_cleanup = remove_transaction_file(marker);
   if (!marker_cleanup.success) {
     return {ExitCode::recovery_failed, changed,
             L"The stale runtime session marker could not be removed.\n\n" +
                 marker_cleanup.detail};
   }
-  const auto cleanup = clean_transaction_tree(game_root);
+  const auto cleanup = clean_transaction_tree(game_root, active);
   if (!cleanup.success) {
     return {ExitCode::recovery_failed, changed,
             L"Runtime recovery completed, but transaction cleanup failed.\n\n" +
@@ -578,13 +786,34 @@ void add_unique_directory(std::vector<std::filesystem::path>& directories,
   }
   return {ExitCode::success, changed,
           changed ? L"Skyrim " + source_version() + L" was recovered successfully." +
-                        (backup_fallback_used
-                             ? L" A verified fallback backup was used."
-                             : L"")
-                  : L"The interrupted transaction was cleaned up."};
+                         (backup_fallback_used
+                              ? L" A verified fallback backup was used."
+                              : L"") +
+                         (recovery_layout_rebound
+                              ? L" Rebuilt managed links were rebound safely."
+                              : L"")
+                  : recovery_layout_rebound
+                        ? L"The source runtime was verified through rebuilt managed "
+                          L"links and the interrupted transaction was cleaned up."
+                        : L"The interrupted transaction was cleaned up."};
 }
 
 }  // namespace
+
+void clean_runtime_transaction_best_effort(
+    const std::filesystem::path& game_root,
+    const std::filesystem::path& transaction_root) noexcept {
+  try {
+    (void)clean_transaction_tree(game_root, transaction_root);
+  } catch (...) {
+  }
+}
+
+DowngradeResult recover_to_source_internal(
+    const std::filesystem::path& game_root,
+    const std::filesystem::path& patch_root, bool restore_clean_target) {
+  return recover_to_source(game_root, patch_root, restore_clean_target);
+}
 
 DowngradeResult recover_runtime_transaction(const std::filesystem::path& game_root,
                                             const std::filesystem::path& patch_root) {
@@ -645,14 +874,27 @@ DowngradeResult finalize_fixed_target_runtime_internal(
       return {ExitCode::source_hash_mismatch, false,
               L"The managed target runtime is incomplete or modified."};
     }
-    const auto marker = session_marker(game_root);
-    const auto marker_cleanup = remove_transaction_file(marker);
-    if (!marker_cleanup.success) {
+    const auto vault = resolve_vault_layout(game_root);
+    if (!vault) {
       return {ExitCode::commit_failed, false,
-              L"The temporary runtime session marker could not be removed.\n\n" +
-                  marker_cleanup.detail};
+              L"The fixed runtime recovery vault could not be resolved."};
     }
-    const auto cleanup = clean_transaction_tree(game_root);
+    auto journal = read_transaction_journal(runtime_journal_path(*vault));
+    if (journal.status == JournalReadStatus::missing) {
+      journal = read_transaction_journal(legacy_journal_path(game_root));
+    }
+    const auto active = existing_transaction_root(
+        game_root, vault->probe, journal, make_transaction_id());
+    for (const auto& marker : {workspace_session_marker(vault->probe),
+                               legacy_session_marker(game_root)}) {
+      const auto marker_cleanup = remove_transaction_file(marker);
+      if (!marker_cleanup.success) {
+        return {ExitCode::commit_failed, false,
+                L"The temporary runtime session marker could not be removed.\n\n" +
+                    marker_cleanup.detail};
+      }
+    }
+    const auto cleanup = clean_transaction_tree(game_root, active);
     if (!cleanup.success) {
       return {ExitCode::commit_failed, false,
               L"The fixed target runtime could not be finalized.\n\n" +
@@ -666,320 +908,5 @@ DowngradeResult finalize_fixed_target_runtime_internal(
   }
 }
 
-DowngradeResult transform_runtime(const std::filesystem::path& game_root,
-                                  const std::filesystem::path& patch_root,
-                                  bool to_target, bool recover_first,
-                                  bool risk_accepted) {
-  try {
-    if (!to_target) return recover_to_source(game_root, patch_root, true);
-
-    const auto total_started = SteadyClock::now();
-    std::int64_t recovery_duration{};
-    std::int64_t preflight_duration{};
-    std::int64_t source_vault_duration{};
-    std::int64_t staging_duration{};
-    std::int64_t commit_duration{};
-    std::size_t target_cache_hits{};
-    std::size_t target_cache_candidates{};
-
-    if (recover_first) {
-      const auto recovery_started = SteadyClock::now();
-      const auto recovered = recover_to_source(game_root, patch_root);
-      recovery_duration = elapsed_milliseconds(recovery_started);
-      if (!recovered.success()) return recovered;
-    }
-    const auto runtime_layout = detect_runtime_layout(game_root);
-
-    const auto preflight_started = SteadyClock::now();
-    auto& backend = transaction_backend();
-    const auto active = active_root(game_root);
-    std::error_code error;
-    std::filesystem::create_directories(active / L"staged", error);
-    std::filesystem::create_directories(active / L"rollback", error);
-    if (error) {
-      return {ExitCode::patch_failed, false,
-              L"The runtime transaction directory could not be created."};
-    }
-
-    std::vector<WorkItem> work;
-    std::vector<ManagedFilePath> transaction_files;
-    transaction_files.reserve(patch_plan.size());
-    std::uint64_t required_space = 64ULL * 1024ULL * 1024ULL;
-    for (std::size_t index = 0; index < patch_plan.size(); ++index) {
-      const auto& plan = patch_plan[index];
-      if (!patch_plan_entry_enabled(runtime_layout, plan)) continue;
-      std::wstring path_error;
-      const auto managed = resolve_managed_file(
-          game_root, utf8_path(plan.relative_file), &path_error);
-      if (!managed || (!plan.source_present && managed->redirected)) {
-        (void)clean_transaction_tree(game_root);
-        return {ExitCode::source_hash_mismatch, false,
-                managed
-                    ? L"An added runtime file is unexpectedly redirected: " +
-                          quote_path(managed->logical)
-                    : L"A managed runtime path is unsafe: " + path_error};
-      }
-      const auto& live = managed->effective;
-      transaction_files.push_back(*managed);
-      const auto state = inspect_file(live, plan);
-      if (state == FileState::unknown) {
-        (void)clean_transaction_tree(game_root);
-        return {ExitCode::source_hash_mismatch, false,
-                L"Unknown, modified, or unexpected game file: " + quote_path(live)};
-      }
-      if (state == FileState::target) continue;
-
-      WorkItem item{
-          .index = index,
-          .plan = &plan,
-          .managed = *managed,
-          .patch = patch_root / utf8_path(plan.forward_patch),
-          .staged = active / L"staged" / std::to_wstring(index),
-          .rollback = active / L"rollback" / std::to_wstring(index),
-      };
-      required_space += plan.target_size;
-      work.push_back(std::move(item));
-    }
-
-    if (work.empty()) {
-      (void)clean_transaction_tree(game_root);
-      return {ExitCode::success, false,
-              L"Skyrim " + target_version() + L" is already active."};
-    }
-    if (!has_minimum_free_space(game_root, required_space)) {
-      (void)clean_transaction_tree(game_root);
-      return {ExitCode::insufficient_disk_space, false,
-              L"There is not enough free space to stage the verified runtime swap."};
-    }
-    preflight_duration = elapsed_milliseconds(preflight_started);
-
-    const auto source_vault_started = SteadyClock::now();
-    const auto backup_result = ensure_source_backups(game_root);
-    if (!backup_result.success()) {
-      (void)clean_transaction_tree(game_root);
-      return {backup_result.code, false, backup_result.message};
-    }
-
-    const auto vault = resolve_vault_layout(game_root);
-    if (!vault || vault->runtime_layout != runtime_layout ||
-        !runtime_layout_matches(game_root, runtime_layout) ||
-        !runtime_manifest_matches(*vault)) {
-      (void)clean_transaction_tree(game_root);
-      return {ExitCode::backup_failed, false,
-              L"The verified recovery-vault manifest became unavailable."};
-    }
-    source_vault_duration = elapsed_milliseconds(source_vault_started);
-
-    const auto staging_started = SteadyClock::now();
-    const bool cache_targets = vault->probe.mode == SafetyMode::automatic;
-    const auto target_cache = cache_targets
-                                  ? resolve_target_cache_layout(game_root)
-                                  : std::nullopt;
-    std::vector<JournalAppend> staged_records;
-    staged_records.reserve(work.size());
-    for (auto& item : work) {
-      if (target_cache && item.plan->target_present) {
-        ++target_cache_candidates;
-        item.cached_target = target_cache_object_available(
-            *target_cache, item.plan->target_sha256, item.plan->target_size);
-      }
-      if (!hash_matches(item.patch, item.plan->forward_patch_sha256)) {
-        (void)clean_transaction_tree(game_root);
-        return {ExitCode::patch_files_missing, false,
-                L"A required patch is missing or modified for " +
-                    quote_path(item.managed.logical)};
-      }
-    }
-    const auto transaction_profile =
-        profile_fingerprint(game_root, transaction_files, runtime_layout);
-    if (transaction_profile.empty()) {
-      (void)clean_transaction_tree(game_root);
-      return {ExitCode::commit_failed, false,
-              L"The managed runtime layout could not be authenticated."};
-    }
-    TransactionJournal journal(runtime_journal_path(*vault), make_transaction_id(),
-                               transaction_profile, true, risk_accepted);
-    if (!journal.append(JournalPhase::begin,
-                        std::numeric_limits<std::uint32_t>::max())) {
-      (void)clean_transaction_tree(game_root);
-      return {ExitCode::commit_failed, false,
-              L"The runtime transaction journal could not be created."};
-    }
-
-    for (auto& item : work) {
-      if (!runtime_layout_matches(game_root, runtime_layout) ||
-          !managed_file_mapping_matches(game_root, item.managed)) {
-        const auto rollback = recover_to_source(game_root, patch_root);
-        return {ExitCode::patch_failed, !rollback.success(),
-                L"A managed runtime path changed while staging: " +
-                    quote_path(item.managed.logical)};
-      }
-      bool staged = false;
-      if (item.cached_target) {
-        staged = materialize_target_cache_object(
-            *target_cache, item.plan->target_sha256, item.plan->target_size,
-            item.staged);
-        if (staged) ++target_cache_hits;
-      }
-      if (!staged) {
-        item.cached_target = false;
-        auto patch_input = item.managed.effective;
-        if (!item.plan->source_present) {
-          patch_input = active / L"empty-input" / std::to_wstring(item.index);
-          if (!backend.write_atomic(patch_input, {})) {
-            const auto rollback = recover_to_source(game_root, patch_root);
-            return {ExitCode::patch_failed, !rollback.success(),
-                    L"An empty patch input could not be prepared: " +
-                        quote_path(item.managed.logical)};
-          }
-        }
-        const auto patched = apply_hdiff_patch(patch_input, item.patch, item.staged);
-        staged = patched.success && backend.flush_file(item.staged) &&
-                 hash_matches(item.staged, item.plan->target_sha256);
-        if (staged && target_cache && item.plan->target_present) {
-          (void)commit_target_cache_object(
-              *target_cache, item.staged, item.plan->target_sha256,
-              item.plan->target_size);
-        }
-      }
-      if (!staged) {
-        const auto rollback = recover_to_source(game_root, patch_root);
-        return {ExitCode::patch_failed, !rollback.success(),
-                L"A staged runtime file failed verification: " +
-                    quote_path(item.managed.logical)};
-      }
-      staged_records.push_back(
-          {JournalPhase::staged, static_cast<std::uint32_t>(item.index),
-           item.plan->target_sha256});
-    }
-    if (!journal.append_batch(staged_records)) {
-      const auto rollback = recover_to_source(game_root, patch_root);
-      return {ExitCode::patch_failed, !rollback.success(),
-              L"The staged runtime boundary could not be committed."};
-    }
-    staging_duration = elapsed_milliseconds(staging_started);
-
-    const auto commit_started = SteadyClock::now();
-    std::vector<JournalAppend> replace_intents;
-    replace_intents.reserve(work.size());
-    for (const auto& item : work) {
-      if (!runtime_layout_matches(game_root, runtime_layout) ||
-          !managed_file_mapping_matches(game_root, item.managed)) {
-        const auto rollback = recover_to_source(game_root, patch_root);
-        return {ExitCode::commit_failed, !rollback.success(),
-                L"A managed runtime path changed before commit."};
-      }
-      replace_intents.push_back(
-          {JournalPhase::replace_pending,
-           static_cast<std::uint32_t>(item.index),
-           item.plan->target_sha256});
-    }
-    if (!journal.append_batch(replace_intents)) {
-      const auto rollback = recover_to_source(game_root, patch_root);
-      return {ExitCode::commit_failed, !rollback.success(),
-              L"The complete runtime replacement intent could not be committed."};
-    }
-
-    std::vector<JournalAppend> replaced_records;
-    replaced_records.reserve(work.size());
-    std::vector<std::filesystem::path> commit_directories;
-    for (const auto& item : work) {
-      if (!runtime_layout_matches(game_root, runtime_layout) ||
-          !managed_file_mapping_matches(game_root, item.managed) ||
-          !(item.plan->source_present
-                ? backend.atomic_replace_deferred_sync(
-                      item.managed.effective, item.staged, item.rollback)
-                : backend.atomic_install_deferred_sync(
-                      item.staged, item.managed.effective)) ||
-          !hash_matches(item.managed.effective, item.plan->target_sha256)) {
-        const auto rollback = recover_to_source(game_root, patch_root);
-        return {ExitCode::commit_failed, !rollback.success(),
-                rollback.success()
-                    ? L"The runtime swap failed and Skyrim was restored."
-                    : L"The runtime swap failed and automatic recovery was incomplete."};
-      }
-      replaced_records.push_back(
-          {JournalPhase::replaced, static_cast<std::uint32_t>(item.index),
-           item.plan->target_sha256});
-      add_unique_directory(commit_directories,
-                           item.managed.effective.parent_path());
-      add_unique_directory(commit_directories, item.staged.parent_path());
-      if (item.plan->source_present) {
-        add_unique_directory(commit_directories, item.rollback.parent_path());
-      }
-    }
-    if (!sync_directories(backend, commit_directories)) {
-      const auto rollback = recover_to_source(game_root, patch_root);
-      return {ExitCode::commit_failed, !rollback.success(),
-              L"The runtime directory boundary could not be synchronized."};
-    }
-    if (!journal.append_batch(replaced_records)) {
-      const auto rollback = recover_to_source(game_root, patch_root);
-      return {ExitCode::commit_failed, !rollback.success(),
-              L"The completed runtime replacement boundary could not be committed."};
-    }
-
-    const auto marker_text =
-        "Skyrim " + std::string(target_version_label_utf8) + " session pending\n";
-    if (!backend.write_atomic(session_marker(game_root), marker_text) ||
-        !journal.append(JournalPhase::session_committed,
-                        std::numeric_limits<std::uint32_t>::max())) {
-      const auto rollback = recover_to_source(game_root, patch_root);
-      return {ExitCode::commit_failed, !rollback.success(),
-              L"The runtime session could not be committed durably."};
-    }
-
-    std::vector<JournalAppend> cleanup_records;
-    cleanup_records.reserve(work.size());
-    std::vector<std::filesystem::path> cleanup_directories;
-    for (const auto& item : work) {
-      if (std::filesystem::is_regular_file(item.rollback) &&
-          !backend.durable_remove_deferred_sync(item.rollback)) {
-        const auto rollback = recover_to_source(game_root, patch_root);
-        return {ExitCode::commit_failed, !rollback.success(),
-                L"A temporary original could not be cleaned up safely."};
-      }
-      cleanup_records.push_back(
-          {JournalPhase::cleanup, static_cast<std::uint32_t>(item.index), {}});
-      if (item.plan->source_present) {
-        add_unique_directory(cleanup_directories, item.rollback.parent_path());
-      }
-    }
-    if (!sync_directories(backend, cleanup_directories)) {
-      const auto rollback = recover_to_source(game_root, patch_root);
-      return {ExitCode::commit_failed, !rollback.success(),
-              L"The runtime cleanup boundary could not be synchronized."};
-    }
-    if (!journal.append_batch(cleanup_records)) {
-      const auto rollback = recover_to_source(game_root, patch_root);
-      return {ExitCode::commit_failed, !rollback.success(),
-              L"Runtime transaction cleanup could not be recorded."};
-    }
-    if (!journal.append(JournalPhase::completed,
-                        std::numeric_limits<std::uint32_t>::max())) {
-      const auto rollback = recover_to_source(game_root, patch_root);
-      return {ExitCode::commit_failed, !rollback.success(),
-              L"The completed runtime transaction could not be recorded."};
-    }
-
-    commit_duration = elapsed_milliseconds(commit_started);
-    const auto total_duration = elapsed_milliseconds(total_started);
-
-    return {ExitCode::success, true,
-            L"Skyrim was switched from " + source_version() + L" to " + target_version() +
-                L"." +
-                (backup_result.changed
-                     ? L" A verified fallback backup of the managed 1.7.104 files was created."
-                     : L"") +
-                performance_summary(total_duration, recovery_duration,
-                                    preflight_duration, source_vault_duration,
-                                    staging_duration, commit_duration,
-                                    target_cache_hits,
-                                    target_cache_candidates)};
-  } catch (const std::exception&) {
-    return {ExitCode::internal_error, false,
-            L"An unexpected internal error occurred during the runtime swap."};
-  }
-}
 
 }  // namespace runtime_swapper::core

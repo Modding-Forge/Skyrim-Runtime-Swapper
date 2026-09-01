@@ -13,7 +13,7 @@ import tempfile
 
 
 MAGIC = 0x50535253
-VERSION = 3
+VERSION = 5
 MAXIMUM_PAYLOAD = 1024 * 1024
 HEADER = struct.Struct("<IHHI32s")
 OPERATIONS = {
@@ -71,7 +71,7 @@ def parse_response(response: bytes, operation: int, nonce: bytes) -> dict[str, o
         or size != len(payload)
         or size > MAXIMUM_PAYLOAD
     ):
-        raise AssertionError("the sidecar response is not authenticated or well framed")
+        raise AssertionError("the sidecar response is not nonce-bound or well framed")
 
     offset = 0
     code, offset = take_signed_integer(payload, offset)
@@ -84,6 +84,7 @@ def parse_response(response: bytes, operation: int, nonce: bytes) -> dict[str, o
     vault, offset = take_string(payload, offset)
     target_cache, offset = take_string(payload, offset)
     coordination_lock, offset = take_string(payload, offset)
+    transaction_work, offset = take_string(payload, offset)
     target_id, offset = take_string(payload, offset)
     target_filesystem, offset = take_string(payload, offset)
     target_medium, offset = take_integer(payload, offset)
@@ -110,6 +111,7 @@ def parse_response(response: bytes, operation: int, nonce: bytes) -> dict[str, o
         "vault": vault,
         "target_cache": target_cache,
         "coordination_lock": coordination_lock,
+        "transaction_work": transaction_work,
         "target_id": target_id,
         "target_filesystem": target_filesystem,
         "target_medium": target_medium,
@@ -134,6 +136,7 @@ def main() -> int:
     parser.add_argument("game_root", type=pathlib.Path)
     parser.add_argument("catalog", type=pathlib.Path)
     parser.add_argument("--risk-accepted", action="store_true")
+    parser.add_argument("--allow-persistent-fallback", action="store_true")
     parser.add_argument("--expect-mode", choices=MODES)
     persistent = parser.add_mutually_exclusive_group()
     persistent.add_argument("--expect-persistent", action="store_true")
@@ -149,6 +152,7 @@ def main() -> int:
         field(str(game_root))
         + field(str(catalog))
         + bytes([1 if args.risk_accepted else 0])
+        + bytes([1 if args.allow_persistent_fallback else 0])
     )
     request = HEADER.pack(MAGIC, VERSION, operation, len(payload), nonce) + payload
 

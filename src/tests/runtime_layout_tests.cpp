@@ -87,5 +87,28 @@ int main() {
     return 12;
   }
 
+#if !defined(_WIN32)
+  // Symlink deployments such as Amethyst may expose the read-only SKSE loader
+  // from a deployment store outside the game directory. This must not grant
+  // mutation authority outside Skyrim, but it is valid classification input.
+  const auto deployed_loader = temporary.path().parent_path() /
+                               (temporary.path().filename().string() +
+                                "-deployment-loader");
+  write_file(deployed_loader, "deployed-skse-loader");
+  std::error_code error;
+  std::filesystem::remove(loader, error);
+  error.clear();
+  std::filesystem::create_symlink(deployed_loader, loader, error);
+  if (error) return 17;
+  write_file(launcher, "deployed-skse-loader");
+  if (!is_skse_loader_entry_image(launcher) ||
+      detect_runtime_layout(temporary.path()) !=
+          RuntimeLayout::skse_launcher_alias) {
+    std::filesystem::remove(deployed_loader, error);
+    return 18;
+  }
+  std::filesystem::remove(deployed_loader, error);
+#endif
+
   return 0;
 }

@@ -3,6 +3,7 @@
 #include <runtime_swapper/transaction_backend.hpp>
 
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include <array>
 #include <cstdlib>
@@ -87,6 +88,7 @@ int main() {
   const auto live = temporary.path() / "live";
   const auto staged = temporary.path() / "staged";
   const auto rollback = temporary.path() / "rollback";
+  const auto restore_discarded = temporary.path() / "rollback.discarded";
   write_file(live, "source");
   write_file(staged, "target");
   fault("replace.after-source-move");
@@ -105,7 +107,25 @@ int main() {
       return 6;
     }
     clear_fault();
-    if (!backend.restore_file(rollback, live)) return 7;
+    if (!backend.restore_file(rollback, live) ||
+        read_file(restore_discarded) != "target" ||
+        !backend.durable_remove(restore_discarded)) {
+      return 7;
+    }
+  }
+
+  write_file(staged, "target");
+  if (!backend.atomic_replace(live, staged, rollback)) return 41;
+  fault("replace.after-source-move");
+  if (backend.restore_file(rollback, live) || std::filesystem::exists(live) ||
+      read_file(rollback) != "source" ||
+      read_file(restore_discarded) != "target") {
+    return 42;
+  }
+  clear_fault();
+  if (!backend.restore_file(rollback, live) || read_file(live) != "source" ||
+      !backend.durable_remove(restore_discarded)) {
+    return 43;
   }
 
   const auto deferred_root = temporary.path() / "deferred";
@@ -242,6 +262,9 @@ int main() {
   std::filesystem::create_directories(game);
   std::filesystem::create_directories(state);
   std::filesystem::create_directories(home);
+  if (::chmod(state.c_str(), 0751) != 0) return 32;
+  struct stat state_before {};
+  if (::stat(state.c_str(), &state_before) != 0) return 33;
   if (::setenv("XDG_STATE_HOME", state.c_str(), 1) != 0 ||
       ::setenv("HOME", home.c_str(), 1) != 0) {
     return 17;
@@ -251,9 +274,19 @@ int main() {
       vault_probe.recovery_vault.value != vault_probe.vault_path ||
       !vault_probe.target_cache.value.is_absolute() ||
       !vault_probe.coordination_lock.value.is_absolute() ||
+      !vault_probe.transaction_work.value.is_absolute() ||
       vault_probe.target_cache.value == vault_probe.vault_path ||
-      vault_probe.coordination_lock.value == vault_probe.vault_path) {
+      vault_probe.coordination_lock.value == vault_probe.vault_path ||
+      vault_probe.transaction_work.value == vault_probe.vault_path) {
     return 18;
+  }
+  struct stat state_after {};
+  struct stat created_root {};
+  if (::stat(state.c_str(), &state_after) != 0 ||
+      (state_after.st_mode & 0777U) != (state_before.st_mode & 0777U) ||
+      ::stat((state / "modding-forge").c_str(), &created_root) != 0 ||
+      (created_root.st_mode & 0777U) != 0700U) {
+    return 34;
   }
   const auto steam_game = temporary.path() / "SteamLibrary" / "steamapps" /
                           "common" / "Skyrim Special Edition";
@@ -265,10 +298,40 @@ int main() {
     if (steam_probe.vault_path.lexically_relative(local_storage).empty() ||
         steam_probe.target_cache.value.parent_path().parent_path() !=
             local_storage ||
+        steam_probe.transaction_work.value.parent_path().parent_path() !=
+            local_storage ||
         steam_probe.coordination_lock.value.parent_path().parent_path() !=
             local_storage) {
       return 21;
     }
+    // RC10 created the lock hierarchy with the process umask and then rejected
+    // its own 0755 storage root during vault preparation. Existing SRS-owned,
+    // non-writable-by-others directories must be tightened without changing
+    // the Steam library itself.
+    std::filesystem::create_directories(local_storage);
+    if (::chmod(local_storage.c_str(), 0755) != 0) return 37;
+    struct stat library_before {};
+    struct stat library_after {};
+    struct stat storage_after {};
+    struct stat locks_after {};
+    const auto library = local_storage.parent_path();
+    if (::stat(library.c_str(), &library_before) != 0 ||
+        !backend.prepare_coordination_lock(steam_probe.coordination_lock) ||
+        ::stat(library.c_str(), &library_after) != 0 ||
+        ::stat(local_storage.c_str(), &storage_after) != 0 ||
+        ::stat(steam_probe.coordination_lock.value.parent_path().c_str(),
+               &locks_after) != 0 ||
+        (library_before.st_mode & 0777U) !=
+            (library_after.st_mode & 0777U) ||
+        (storage_after.st_mode & 0777U) != 0700U ||
+        (locks_after.st_mode & 0777U) != 0700U) {
+      return 38;
+    }
+    if (::chmod(local_storage.c_str(), 0770) != 0 ||
+        backend.prepare_coordination_lock(steam_probe.coordination_lock)) {
+      return 39;
+    }
+    if (::chmod(local_storage.c_str(), 0700) != 0) return 40;
   }
   const auto manifest = vault_probe.vault_path / "manifest.v2";
   const auto identity_manifest =
@@ -278,7 +341,7 @@ int main() {
       utf8_path(vault_probe.target_volume.stable_id) + "\nvaultVolume=" +
       utf8_path(vault_probe.vault_volume.stable_id) + "\nentries=0\n";
   write_file(manifest, identity_manifest);
-  const auto locator = game / ".skyrim-runtime-swapper" / "vault.locator";
+  const auto locator = vault_probe.transaction_work.value / "vault.locator";
   write_file(locator, "torn-locator");
   const auto recoverable_locator_probe = backend.probe(game);
   if (!recoverable_locator_probe.success() ||
@@ -289,6 +352,21 @@ int main() {
   if (!repaired_locator_probe.success() ||
       !read_file(locator).starts_with("SRS-VAULT-LOCATOR-1\n")) {
     return 20;
+  }
+  const auto unsafe_state = temporary.path() / "unsafe-state";
+  const auto unsafe_app_root = unsafe_state / "modding-forge";
+  const auto unsafe_game = temporary.path() / "unsafe-game";
+  std::filesystem::create_directories(unsafe_app_root);
+  std::filesystem::create_directories(unsafe_game);
+  if (::chmod(unsafe_app_root.c_str(), 0777) != 0 ||
+      ::setenv("XDG_STATE_HOME", unsafe_state.c_str(), 1) != 0) {
+    return 35;
+  }
+  const auto unsafe_probe = backend.probe(unsafe_game, 0, true);
+  if (unsafe_probe.success() ||
+      unsafe_probe.mode != SafetyMode::hard_blocked ||
+      unsafe_probe.technical_reason != L"vault-create-failed") {
+    return 36;
   }
   return 0;
 }

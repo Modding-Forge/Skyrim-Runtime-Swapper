@@ -26,8 +26,10 @@ struct SourceBackupResult {
 [[nodiscard]] bool has_verified_source_backup(
     const std::filesystem::path& game_root, const PatchPlanEntry& plan);
 
-[[nodiscard]] bool restore_source_backup(const std::filesystem::path& game_root,
-                                         const PatchPlanEntry& plan,
-                                         const std::filesystem::path& live);
+// Materializes a verified source object at an unoccupied transaction path.
+// Installing it into the live namespace remains the caller's journaled step.
+[[nodiscard]] bool materialize_source_backup(
+    const std::filesystem::path& game_root, const PatchPlanEntry& plan,
+    const std::filesystem::path& destination);
 
 }  // namespace runtime_swapper::core

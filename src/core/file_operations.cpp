@@ -78,11 +78,98 @@ std::filesystem::path utf8_path(std::string_view value) {
 }
 
 bool hash_matches(const std::filesystem::path& file, std::string_view expected) {
-  if (const auto prepared = prepared_hash_matches(file, expected)) {
-    return *prepared;
+  return verify_hash(file, expected).matches;
+}
+
+HashVerification verify_hash(const std::filesystem::path& file,
+                             std::string_view expected) {
+  std::string prepared_actual;
+  if (const auto prepared =
+          prepared_hash_matches(file, expected, &prepared_actual)) {
+    return {*prepared,
+            prepared_actual.empty()
+                ? std::nullopt
+                : std::optional<std::string>(std::move(prepared_actual))};
   }
   const auto actual = sha256_file(file);
-  return actual && *actual == expected;
+  return {actual && *actual == expected, actual};
+}
+
+std::wstring hash_verification_detail(
+    std::wstring_view expected_label, bool expected_present,
+    std::string_view expected_sha256,
+    const std::optional<std::string>& actual_sha256) {
+  const auto widen = [](std::string_view value) {
+    return std::wstring(value.begin(), value.end());
+  };
+  return L"\n" + std::wstring(expected_label) + L": " +
+         (expected_present ? widen(expected_sha256) : L"<file absent>") +
+         L"\nActual SHA-256: " +
+         (actual_sha256 ? widen(*actual_sha256) : L"<unavailable>");
+}
+
+std::wstring runtime_hash_verification_detail(
+    bool source_present, std::string_view source_sha256,
+    bool target_present, std::string_view target_sha256,
+    const std::optional<std::string>& actual_sha256) {
+  const auto widen = [](std::string_view value) {
+    return std::wstring(value.begin(), value.end());
+  };
+  return L"\nExpected source SHA-256: " +
+         (source_present ? widen(source_sha256) : L"<file absent>") +
+         L"\nExpected target SHA-256: " +
+         (target_present ? widen(target_sha256) : L"<file absent>") +
+         L"\nActual SHA-256: " +
+         (actual_sha256 ? widen(*actual_sha256) : L"<unavailable>");
+}
+
+std::wstring managed_link_verification_detail(
+    const ManagedFilePath& managed) {
+  if (managed.redirected) {
+    std::error_code error;
+    const auto stored_target =
+        std::filesystem::read_symlink(managed.logical, error);
+    std::wstring detail = L"\nLink type: symbolic link or file reparse point";
+    if (!error) {
+      detail += L"\nStored link target: " + quote_path(stored_target);
+    }
+    detail += L"\nResolved link target: " + quote_path(managed.effective);
+    return detail;
+  }
+
+#if defined(_WIN32)
+  constexpr DWORD sharing = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+  HANDLE handle = CreateFileW(managed.effective.c_str(), FILE_READ_ATTRIBUTES,
+                              sharing, nullptr, OPEN_EXISTING,
+                              FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  if (handle == INVALID_HANDLE_VALUE) return {};
+  BY_HANDLE_FILE_INFORMATION info{};
+  const bool inspected = GetFileInformationByHandle(handle, &info) != FALSE;
+  CloseHandle(handle);
+  if (!inspected || info.nNumberOfLinks <= 1) return {};
+  const auto file_id =
+      (static_cast<std::uint64_t>(info.nFileIndexHigh) << 32U) |
+      static_cast<std::uint64_t>(info.nFileIndexLow);
+  return std::wstring(L"\nLink type: hard link") +
+         L"\nHard-link volume ID: " +
+         std::to_wstring(info.dwVolumeSerialNumber) +
+         L"\nHard-link file ID: " + std::to_wstring(file_id) +
+         L"\nHard-link name count: " + std::to_wstring(info.nNumberOfLinks) +
+         L"\nHard-link origin: <not defined; all hard-link names are equal>";
+#else
+  struct stat info {};
+  if (::stat(managed.effective.c_str(), &info) != 0 || info.st_nlink <= 1) {
+    return {};
+  }
+  return std::wstring(L"\nLink type: hard link") +
+         L"\nHard-link device ID: " +
+         std::to_wstring(static_cast<std::uint64_t>(info.st_dev)) +
+         L"\nHard-link inode: " +
+         std::to_wstring(static_cast<std::uint64_t>(info.st_ino)) +
+         L"\nHard-link name count: " +
+         std::to_wstring(static_cast<std::uint64_t>(info.st_nlink)) +
+         L"\nHard-link origin: <not defined; all hard-link names are equal>";
+#endif
 }
 
 std::wstring quote_path(const std::filesystem::path& path) {

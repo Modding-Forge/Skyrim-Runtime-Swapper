@@ -476,7 +476,7 @@ CreationClubResult recover_creation_club_content(
                 L"A conflicting Creation Club file could not be preserved."};
       }
       const bool restored = held_valid
-                                ? backend.move_atomic(held, live)
+                                ? static_cast<bool>(backend.move_atomic(held, live))
                                 : restore_recovery_file(game_root, file.hash, file.size, live);
       if (!restored || !matches(live, file)) {
         return {false, changed,

@@ -165,8 +165,10 @@ int run(int argc, wchar_t** argv) {
     probe = probe_installation_storage(*options.game_root).backend;
   }
   log_diagnostic(L"Storage backend: " + probe.description + L"; vault: " +
-                 probe.vault_path.wstring() + L"; technical reason: " +
-                 probe.technical_reason + L"; message: " + probe.message);
+                 probe.vault_path.wstring() + L"; transaction workspace: " +
+                 probe.transaction_work.value.wstring() +
+                 L"; technical reason: " + probe.technical_reason +
+                 L"; message: " + probe.message);
   if (!probe.success()) {
     mutex_lock.unlock();
     if (!options.quiet) show_hard_blocked_dialog(probe);

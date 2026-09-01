@@ -1,7 +1,10 @@
 #include "internal/file_operations.hpp"
+#include "internal/fault_injection.hpp"
 #include "internal/transaction_journal.hpp"
+#include "internal/transaction_workspace.hpp"
 
 #include <runtime_swapper/transaction_backend.hpp>
+#include <runtime_swapper/sha256.hpp>
 
 #include <windows.h>
 
@@ -11,10 +14,35 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <string>
 #include <system_error>
 
 namespace {
+
+std::filesystem::path race_parent;
+std::filesystem::path race_held_parent;
+bool race_exchange_succeeded{};
+int race_exchange_error{};
+
+void exchange_parent_at_resolve(std::string_view point) noexcept {
+  if (point != "replace.after-resolve") return;
+  runtime_swapper::core::set_fault_injection_hook_for_testing(nullptr);
+  try {
+    std::error_code error;
+    std::filesystem::rename(race_parent / L"staged.bin",
+                            race_held_parent / L"staged.bin", error);
+    if (error) {
+      race_exchange_error = error.value();
+      return;
+    }
+    std::ofstream(race_parent / L"staged.bin", std::ios::binary | std::ios::trunc)
+        << "unrelated-staged";
+    race_exchange_succeeded = true;
+  } catch (...) {
+    race_exchange_succeeded = false;
+  }
+}
 
 class TemporaryDirectory {
  public:
@@ -138,6 +166,28 @@ int main() {
   }
 
   const TemporaryDirectory temporary;
+  const auto diagnostic_file = temporary.path() / L"diagnostic.bin";
+  const auto diagnostic_alias = temporary.path() / L"diagnostic.alias";
+  write_file(diagnostic_file, "diagnostic-content");
+  const auto diagnostic_verification =
+      verify_hash(diagnostic_file, std::string(64, '0'));
+  if (diagnostic_verification.matches || !diagnostic_verification.actual) {
+    return 60;
+  }
+  const auto diagnostic_text = hash_verification_detail(
+      L"Expected test SHA-256", true, std::string(64, '0'),
+      diagnostic_verification.actual);
+  if (diagnostic_text.find(std::wstring(64, L'0')) == std::wstring::npos ||
+      diagnostic_text.find(std::wstring(diagnostic_verification.actual->begin(),
+                                        diagnostic_verification.actual->end())) ==
+          std::wstring::npos ||
+      !CreateHardLinkW(diagnostic_alias.c_str(), diagnostic_file.c_str(),
+                       nullptr) ||
+      managed_link_verification_detail(
+          {diagnostic_file, diagnostic_file, false})
+              .find(L"Link type: hard link") == std::wstring::npos) {
+    return 61;
+  }
   const auto journal_path = temporary.path() / L"journal" / L"runtime.journal";
   TransactionJournal journal(journal_path, "0123456789abcdef0123456789abcdef",
                              "test-profile", true);
@@ -156,6 +206,14 @@ int main() {
   if (!accepted.append(JournalPhase::begin, 0xffffffffU) ||
       read_transaction_journal(accepted_path).records.front().risk_accepted != true) {
     return 25;
+  }
+  const auto oversized_path = temporary.path() / L"journal" / L"oversized.journal";
+  TransactionJournal oversized(
+      oversized_path, "00112233445566778899aabbccddeeff",
+      std::string(32, 'p'), true);
+  if (oversized.append(JournalPhase::begin, 0xffffffffU) ||
+      std::filesystem::exists(oversized_path)) {
+    return 46;
   }
   const auto batch_path = temporary.path() / L"journal" / L"batch.journal";
   TransactionJournal batch(batch_path, "abcdef0123456789abcdef0123456789",
@@ -235,11 +293,24 @@ int main() {
       backend_probe.recovery_vault.value != backend_probe.vault_path ||
       !backend_probe.target_cache.value.is_absolute() ||
       !backend_probe.coordination_lock.value.is_absolute() ||
+      !backend_probe.transaction_work.value.is_absolute() ||
       backend_probe.target_cache.value == backend_probe.vault_path ||
       backend_probe.coordination_lock.value == backend_probe.vault_path ||
+      backend_probe.transaction_work.value == backend_probe.vault_path ||
       backend_probe.installation_id.find("skyrimse-") != 0 ||
       !backend_probe.allows(runtime_swapper::StorageOperation::recover)) {
     return 5;
+  }
+  constexpr std::string_view transaction_id =
+      "0123456789abcdef0123456789abcdef";
+  if (!runtime_swapper::core::valid_transaction_id(transaction_id) ||
+      runtime_swapper::core::valid_transaction_id(
+          "0123456789ABCDEF0123456789ABCDEF") ||
+      runtime_swapper::core::valid_transaction_id("../transaction") ||
+      runtime_swapper::core::transaction_root(backend_probe, transaction_id) !=
+          backend_probe.transaction_work.value /
+              std::filesystem::path(transaction_id)) {
+    return 44;
   }
   const auto removable_tree = temporary.path() / L"private-tree";
   write_file(removable_tree / L"nested" / L"object", "verified");
@@ -266,6 +337,8 @@ int main() {
       steam_probe.mode != runtime_swapper::SafetyMode::automatic ||
       steam_probe.vault_path.lexically_relative(local_storage).empty() ||
       steam_probe.target_cache.value.parent_path().parent_path() !=
+          local_storage ||
+      steam_probe.transaction_work.value.parent_path().parent_path() !=
           local_storage ||
       steam_probe.coordination_lock.value.parent_path().parent_path() !=
           local_storage) {
@@ -323,11 +396,60 @@ int main() {
   const auto rollback = temporary.path() / L"replace" / L"rollback.bin";
   write_file(live, "source");
   write_file(staged, "target");
-  if (!backend.flush_file(staged) || !backend.atomic_replace(live, staged, rollback) ||
+  const auto flushed = backend.flush_file(staged);
+  const auto replaced = flushed ? backend.atomic_replace(live, staged, rollback)
+                                : runtime_swapper::MutationResult{};
+  if (!flushed || !replaced ||
       read_file(live) != "target" || read_file(rollback) != "source") {
+    std::wcerr << L"flush=" << flushed.succeeded
+               << L" replace=" << replaced.succeeded
+               << L" step=" << static_cast<int>(replaced.step)
+               << L" state=" << static_cast<int>(replaced.state)
+               << L" error=" << replaced.error.value()
+               << L" detail=" << replaced.detail << L'\n';
     return 6;
   }
-  if (!backend.restore_file(rollback, live) || read_file(live) != "source") return 7;
+  const auto restore_discarded = temporary.path() / L"replace" /
+                                 L"rollback.bin.discarded";
+  if (!backend.restore_file(rollback, live) || read_file(live) != "source" ||
+      read_file(restore_discarded) != "target" ||
+      !backend.durable_remove(restore_discarded)) {
+    return 7;
+  }
+
+  race_parent = temporary.path() / L"race-parent";
+  race_held_parent = temporary.path() / L"race-parent-held";
+  const auto race_live = race_parent / L"live.bin";
+  const auto race_staged = race_parent / L"staged.bin";
+  const auto race_rollback = race_parent / L"rollback.bin";
+  std::filesystem::create_directories(race_held_parent);
+  write_file(race_live, "race-source");
+  write_file(race_staged, "race-target");
+  race_exchange_succeeded = false;
+  race_exchange_error = 0;
+  runtime_swapper::core::set_fault_injection_hook_for_testing(
+      exchange_parent_at_resolve);
+  const auto race_result =
+      backend.atomic_replace(race_live, race_staged, race_rollback);
+  runtime_swapper::core::set_fault_injection_hook_for_testing(nullptr);
+  if (!race_exchange_succeeded || !race_result ||
+      read_file(race_parent / L"live.bin") != "race-target" ||
+      read_file(race_parent / L"staged.bin") != "unrelated-staged" ||
+      read_file(race_parent / L"rollback.bin") != "race-source" ||
+      std::filesystem::exists(race_held_parent / L"staged.bin")) {
+    std::cerr << "race exchanged=" << race_exchange_succeeded
+              << " exchange-error=" << race_exchange_error
+              << " result=" << race_result.succeeded
+              << " step=" << static_cast<int>(race_result.step)
+              << " state=" << static_cast<int>(race_result.state)
+              << " fresh-live=" << read_file(race_parent / L"live.bin")
+              << " fresh-staged=" << read_file(race_parent / L"staged.bin")
+              << " rollback=" << read_file(race_parent / L"rollback.bin")
+              << " held-staged-exists="
+              << std::filesystem::exists(race_held_parent / L"staged.bin")
+              << '\n';
+    return 37;
+  }
   const auto copied = temporary.path() / L"backup" / L"copied.bin";
   if (!backend.copy_atomic(live, copied) || read_file(copied) != "source" ||
       read_file(live) != "source") {

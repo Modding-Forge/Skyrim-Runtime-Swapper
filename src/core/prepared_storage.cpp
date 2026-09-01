@@ -196,7 +196,8 @@ std::optional<PreparedStorageContext> prepare_storage_context(
     implementation->directory_handles.push_back(std::move(handle));
   }
   for (const auto& optional_directory :
-       {backend.target_cache.value, backend.coordination_lock.value.parent_path()}) {
+       {backend.target_cache.value, backend.coordination_lock.value.parent_path(),
+        backend.transaction_work.value}) {
     std::error_code error;
     if (optional_directory.empty() ||
         !std::filesystem::is_directory(optional_directory, error) || error) {
@@ -213,6 +214,7 @@ std::optional<PreparedStorageContext> prepare_storage_context(
   context.recovery_vault = context.backend.recovery_vault;
   context.target_cache = context.backend.target_cache;
   context.coordination_lock = context.backend.coordination_lock;
+  context.transaction_work = context.backend.transaction_work;
   context.target_volume_id = context.backend.target_volume.stable_id;
   context.vault_volume_id = context.backend.vault_volume.stable_id;
   return context;
@@ -227,7 +229,9 @@ PreparedStorageScope::PreparedStorageScope(
 PreparedStorageScope::~PreparedStorageScope() { active_context = previous_; }
 
 std::optional<bool> prepared_hash_matches(
-    const std::filesystem::path& file, std::string_view expected_sha256) {
+    const std::filesystem::path& file, std::string_view expected_sha256,
+    std::string* actual_sha256) {
+  if (actual_sha256 != nullptr) actual_sha256->clear();
   if (active_context == nullptr || expected_sha256.size() != 64) {
     return std::nullopt;
   }
@@ -245,6 +249,7 @@ std::optional<bool> prepared_hash_matches(
     if (current_identity && held_identity &&
         *current_identity == iterator->identity &&
         *held_identity == iterator->identity) {
+      if (actual_sha256 != nullptr) *actual_sha256 = iterator->sha256;
       ++active_context->implementation_->metrics.verified_cache_hits;
       return true;
     }
@@ -272,6 +277,7 @@ std::optional<bool> prepared_hash_matches(
     if (same_file != verified.end()) {
       same_file->path = path;
       same_file->identity = *current_identity;
+      if (actual_sha256 != nullptr) *actual_sha256 = same_file->sha256;
       ++active_context->implementation_->metrics.identity_rebinds;
       return true;
     }
@@ -281,10 +287,19 @@ std::optional<bool> prepared_hash_matches(
   const auto before = handle ? identity_from_handle(*handle) : std::nullopt;
   if (!before) return false;
   ++active_context->implementation_->metrics.files_hashed;
-  const auto actual = sha256_file(path);
+#if defined(_WIN32)
+  const auto actual = sha256_native_file(
+      reinterpret_cast<std::intptr_t>(handle->value));
+#else
+  const auto actual = sha256_native_file(
+      static_cast<std::intptr_t>(handle->value));
+#endif
   const auto current = open_native(path, false);
   const auto after = current ? identity_from_handle(*current) : std::nullopt;
-  if (!actual || !after || *before != *after || *actual != expected_sha256) {
+  const auto held_after = identity_from_handle(*handle);
+  if (actual && actual_sha256 != nullptr) *actual_sha256 = *actual;
+  if (!actual || !after || !held_after || *before != *after ||
+      *before != *held_after || *actual != expected_sha256) {
     return false;
   }
   verified.push_back(
@@ -312,6 +327,12 @@ BackendProbeResult probe_prepared_storage(
   const bool identity_matches =
       refreshed.installation_id == context.backend.installation_id &&
       normalized(refreshed.vault_path) == normalized(context.backend.vault_path) &&
+      normalized(refreshed.target_cache.value) ==
+          normalized(context.target_cache.value) &&
+      normalized(refreshed.transaction_work.value) ==
+          normalized(context.transaction_work.value) &&
+      normalized(refreshed.coordination_lock.value) ==
+          normalized(context.coordination_lock.value) &&
       refreshed.target_volume.stable_id == context.target_volume_id &&
       refreshed.vault_volume.stable_id == context.vault_volume_id;
   if (!identity_matches) {

@@ -14,10 +14,36 @@ struct ManagedFilePath {
   bool redirected{};
 };
 
+struct HashVerification {
+  bool matches{};
+  std::optional<std::string> actual;
+};
+
 [[nodiscard]] std::filesystem::path utf8_path(std::string_view value);
 
 [[nodiscard]] bool hash_matches(const std::filesystem::path& file,
                                 std::string_view expected);
+
+// Returns the digest produced by the same verification pass. Callers can add
+// actionable diagnostics without hashing large runtime files a second time.
+[[nodiscard]] HashVerification verify_hash(
+    const std::filesystem::path& file, std::string_view expected);
+
+[[nodiscard]] std::wstring hash_verification_detail(
+    std::wstring_view expected_label, bool expected_present,
+    std::string_view expected_sha256,
+    const std::optional<std::string>& actual_sha256);
+
+[[nodiscard]] std::wstring runtime_hash_verification_detail(
+    bool source_present, std::string_view source_sha256,
+    bool target_present, std::string_view target_sha256,
+    const std::optional<std::string>& actual_sha256);
+
+// Produces additional failure-only diagnostics for final symbolic/reparse
+// links and multiply linked regular files. Hard links have no distinguished
+// source name, so their stable object identity and link count are reported.
+[[nodiscard]] std::wstring managed_link_verification_detail(
+    const ManagedFilePath& managed);
 
 [[nodiscard]] std::wstring quote_path(const std::filesystem::path& path);
 

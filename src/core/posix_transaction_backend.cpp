@@ -1,18 +1,24 @@
 #include <runtime_swapper/transaction_backend.hpp>
 
+#include <runtime_swapper/checked_arithmetic.hpp>
 #include <runtime_swapper/sha256.hpp>
 #include <runtime_swapper/release_version.hpp>
 
 #include "internal/fault_injection.hpp"
+#include "internal/posix_storage_probe.hpp"
 
 #include <fcntl.h>
 #include <dirent.h>
+#include <linux/btrfs.h>
 #include <linux/fs.h>
+#include <linux/openat2.h>
+#include <sys/random.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/statvfs.h>
 #include <sys/sysmacros.h>
 #include <sys/ioctl.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -22,12 +28,14 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iterator>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 namespace runtime_swapper {
@@ -44,6 +52,14 @@ struct FileDescriptor {
   }
   FileDescriptor(const FileDescriptor&) = delete;
   FileDescriptor& operator=(const FileDescriptor&) = delete;
+  FileDescriptor(FileDescriptor&& other) noexcept
+      : value(std::exchange(other.value, -1)) {}
+  FileDescriptor& operator=(FileDescriptor&& other) noexcept {
+    if (this == &other) return *this;
+    if (value >= 0) ::close(value);
+    value = std::exchange(other.value, -1);
+    return *this;
+  }
   explicit operator bool() const noexcept { return value >= 0; }
 };
 
@@ -100,71 +116,6 @@ struct FileDescriptor {
   return ::fsync(parent) == 0;
 }
 
-struct MountEntry {
-  std::filesystem::path mount_point;
-  std::filesystem::path filesystem_root;
-  std::string filesystem;
-  std::string source;
-  unsigned major_number{};
-  unsigned minor_number{};
-};
-
-[[nodiscard]] std::string unescape_mount(std::string_view text) {
-  std::string result;
-  result.reserve(text.size());
-  for (std::size_t index = 0; index < text.size(); ++index) {
-    if (text[index] == '\\' && index + 3 < text.size() &&
-        text[index + 1] >= '0' && text[index + 1] <= '7' &&
-        text[index + 2] >= '0' && text[index + 2] <= '7' &&
-        text[index + 3] >= '0' && text[index + 3] <= '7') {
-      const auto value = static_cast<char>((text[index + 1] - '0') * 64 +
-                                           (text[index + 2] - '0') * 8 +
-                                           (text[index + 3] - '0'));
-      result.push_back(value);
-      index += 3;
-    } else {
-      result.push_back(text[index]);
-    }
-  }
-  return result;
-}
-
-[[nodiscard]] std::optional<MountEntry> find_mount(
-    const std::filesystem::path& absolute) {
-  std::ifstream stream("/proc/self/mountinfo");
-  if (!stream) return std::nullopt;
-  std::optional<MountEntry> best;
-  std::string line;
-  while (std::getline(stream, line)) {
-    std::istringstream fields(line);
-    std::vector<std::string> tokens;
-    std::string token;
-    while (fields >> token) tokens.push_back(std::move(token));
-    const auto separator = std::ranges::find(tokens, "-");
-    if (separator == tokens.end() || tokens.size() < 10 ||
-        std::distance(tokens.begin(), separator) < 6 || separator + 2 >= tokens.end()) {
-      continue;
-    }
-    const auto separator_index = static_cast<std::size_t>(separator - tokens.begin());
-    const auto device_separator = tokens[2].find(':');
-    if (device_separator == std::string::npos) continue;
-    MountEntry entry;
-    entry.major_number = static_cast<unsigned>(std::strtoul(tokens[2].c_str(), nullptr, 10));
-    entry.minor_number = static_cast<unsigned>(
-        std::strtoul(tokens[2].c_str() + device_separator + 1, nullptr, 10));
-    entry.filesystem_root = unescape_mount(tokens[3]);
-    entry.mount_point = unescape_mount(tokens[4]);
-    entry.filesystem = tokens[separator_index + 1];
-    entry.source = unescape_mount(tokens[separator_index + 2]);
-    const auto relative = absolute.lexically_relative(entry.mount_point);
-    if (relative.empty() || relative.native().starts_with("..")) continue;
-    if (!best || entry.mount_point.native().size() > best->mount_point.native().size()) {
-      best = std::move(entry);
-    }
-  }
-  return best;
-}
-
 [[nodiscard]] bool has_symlink_component(const std::filesystem::path& path) {
   if (!path.is_absolute()) return true;
   auto current = path.root_path();
@@ -180,152 +131,200 @@ struct MountEntry {
   return false;
 }
 
-[[nodiscard]] bool read_boolean_file(const std::filesystem::path& path) {
-  std::ifstream stream(path);
-  int value{};
-  return stream && stream >> value && value != 0;
+[[nodiscard]] bool fsync_directory_descriptor(int descriptor) {
+  if (::fsync(descriptor) == 0) return true;
+  const int error = errno;
+  return (error == EINVAL || error == ENOTSUP || error == EBADF) &&
+         ::syncfs(descriptor) == 0;
 }
 
-[[nodiscard]] std::optional<StorageMedium> udev_medium(
-    const MountEntry& mount) {
-  const auto path = std::filesystem::path("/run/udev/data") /
-                    ("b" + std::to_string(mount.major_number) + ":" +
-                     std::to_string(mount.minor_number));
-  std::ifstream stream(path);
-  if (!stream) return std::nullopt;
-  std::string line;
-  bool external = false;
-  while (std::getline(stream, line)) {
-    if (line == "E:ID_DRIVE_FLASH_SD=1" ||
-        line == "E:ID_DRIVE_FLASH_MMC=1" ||
-        line == "E:ID_DRIVE_THUMB=1") {
-      return StorageMedium::removable;
-    }
-    if (line == "E:ID_DRIVE_EXTERNAL=1" || line == "E:ID_BUS=usb" ||
-        line == "E:ID_BUS=firewire" || line == "E:ID_BUS=thunderbolt" ||
-        (line.starts_with("E:ID_PATH=") &&
-         (line.find("usb-") != std::string::npos ||
-          line.find("thunderbolt-") != std::string::npos))) {
-      external = true;
-    }
-  }
-  return external ? std::optional(StorageMedium::external) : std::nullopt;
+[[nodiscard]] bool valid_component(std::string_view name) noexcept {
+  return !name.empty() && name != "." && name != ".." &&
+         name.find('/') == std::string_view::npos &&
+         name.find('\0') == std::string_view::npos;
 }
 
-[[nodiscard]] StorageMedium storage_medium(const MountEntry& mount) {
-  const auto fs = mount.filesystem;
-  if (fs == "nfs" || fs.starts_with("nfs") || fs == "cifs" || fs == "smb3" ||
-      fs == "9p" || fs.starts_with("fuse.")) {
-    return StorageMedium::network;
+[[nodiscard]] FileDescriptor open_directory_secure(
+    const std::filesystem::path& path, bool create_missing = false) {
+  if (!path.is_absolute()) return {};
+  const auto normalized = path.lexically_normal();
+  FileDescriptor root(
+      ::open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+  if (!root) return {};
+
+  const auto relative = normalized.lexically_relative("/");
+  if (relative.empty() || relative == ".") return root;
+  if (relative.native().starts_with("..")) return {};
+
+#if defined(SYS_openat2)
+  if (!create_missing) {
+    open_how how{};
+    how.flags = static_cast<std::uint64_t>(O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    how.resolve = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS |
+                  RESOLVE_NO_SYMLINKS;
+    const int descriptor = static_cast<int>(
+        ::syscall(SYS_openat2, root.value, relative.c_str(), &how, sizeof(how)));
+    if (descriptor >= 0) return FileDescriptor(descriptor);
+    if (errno != ENOSYS && errno != EINVAL && errno != E2BIG) return {};
   }
-  if (const auto medium = udev_medium(mount)) return *medium;
-  auto sys_path = std::filesystem::path("/sys/dev/block") /
-                  (std::to_string(mount.major_number) + ":" +
-                   std::to_string(mount.minor_number));
-  std::error_code error;
-  auto canonical = std::filesystem::canonical(sys_path, error);
-  if (error && mount.source.starts_with("/dev/")) {
-    struct stat source_status {};
-    if (::stat(mount.source.c_str(), &source_status) == 0 &&
-        S_ISBLK(source_status.st_mode)) {
-      sys_path = std::filesystem::path("/sys/dev/block") /
-                 (std::to_string(::major(source_status.st_rdev)) + ":" +
-                  std::to_string(::minor(source_status.st_rdev)));
-      error.clear();
-      canonical = std::filesystem::canonical(sys_path, error);
+#endif
+
+  auto current = std::move(root);
+  for (const auto& component : relative) {
+    const auto name = component.native();
+    if (!valid_component(name)) return {};
+    int next = ::openat(current.value, name.c_str(),
+                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (next < 0 && create_missing && errno == ENOENT) {
+      if (::mkdirat(current.value, name.c_str(), S_IRWXU) != 0 ||
+          !fsync_directory_descriptor(current.value)) {
+        return {};
+      }
+      next = ::openat(current.value, name.c_str(),
+                      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     }
+    if (next < 0) return {};
+    FileDescriptor child(next);
+    struct stat status {};
+    if (::fstat(child.value, &status) != 0 || !S_ISDIR(status.st_mode)) {
+      return {};
+    }
+    current = std::move(child);
   }
-  if (!error) {
-    const auto sysfs = canonical.generic_string();
-    if (sysfs.find("/usb") != std::string::npos ||
-        sysfs.find("/thunderbolt") != std::string::npos) {
-      return StorageMedium::external;
-    }
-    auto current = canonical;
-    while (!current.empty() && current != current.root_path()) {
-      if (read_boolean_file(current / "removable")) return StorageMedium::removable;
-      current = current.parent_path();
-    }
-    return StorageMedium::internal;
-  }
-  return mount.source.starts_with("/dev/") ? StorageMedium::unknown
-                                            : StorageMedium::unknown;
+  return current;
 }
 
-[[nodiscard]] std::optional<std::string> filesystem_uuid(
-    const std::string& source) {
-  std::error_code error;
-  const auto source_path = std::filesystem::canonical(source, error);
-  if (error) return std::nullopt;
-  const std::filesystem::path uuid_root("/dev/disk/by-uuid");
-  for (std::filesystem::directory_iterator iterator(uuid_root, error), end;
-       !error && iterator != end; iterator.increment(error)) {
-    const auto target = std::filesystem::canonical(iterator->path(), error);
-    if (!error && target == source_path) return iterator->path().filename().string();
-    error.clear();
+struct ResolvedParent {
+  FileDescriptor directory;
+  std::string name;
+  dev_t device{};
+};
+
+[[nodiscard]] std::optional<ResolvedParent> resolve_parent_secure(
+    const std::filesystem::path& path, bool create_parent = false) {
+  if (!path.is_absolute()) return std::nullopt;
+  const auto normalized = path.lexically_normal();
+  const auto name = normalized.filename().native();
+  if (!valid_component(name)) return std::nullopt;
+  auto parent = open_directory_secure(normalized.parent_path(), create_parent);
+  struct stat status {};
+  if (!parent || ::fstat(parent.value, &status) != 0 ||
+      !S_ISDIR(status.st_mode)) {
+    return std::nullopt;
+  }
+  return ResolvedParent{std::move(parent), name, status.st_dev};
+}
+
+[[nodiscard]] FileDescriptor open_regular_at(const ResolvedParent& parent,
+                                             int access_flags) {
+  FileDescriptor file(::openat(parent.directory.value, parent.name.c_str(),
+                               access_flags | O_CLOEXEC | O_NOFOLLOW));
+  struct stat status {};
+  if (!file || ::fstat(file.value, &status) != 0 ||
+      !S_ISREG(status.st_mode)) {
+    return {};
+  }
+  return file;
+}
+
+[[nodiscard]] bool entry_absent_at(const ResolvedParent& parent) {
+  struct stat status {};
+  if (::fstatat(parent.directory.value, parent.name.c_str(), &status,
+                AT_SYMLINK_NOFOLLOW) == 0) {
+    return false;
+  }
+  return errno == ENOENT;
+}
+
+[[nodiscard]] std::optional<std::string> random_token() {
+  std::array<unsigned char, 16> bytes{};
+  std::size_t offset{};
+  while (offset < bytes.size()) {
+    const auto count = ::getrandom(bytes.data() + offset, bytes.size() - offset,
+                                   0);
+    if (count < 0 && errno == EINTR) continue;
+    if (count <= 0) return std::nullopt;
+    offset += static_cast<std::size_t>(count);
+  }
+  std::ostringstream text;
+  text << std::hex << std::setfill('0');
+  for (const auto byte : bytes) {
+    text << std::setw(2) << static_cast<unsigned>(byte);
+  }
+  return text.str();
+}
+
+struct TemporaryFile {
+  FileDescriptor file;
+  std::string name;
+};
+
+[[nodiscard]] bool write_all(int descriptor, std::string_view bytes);
+
+[[nodiscard]] std::optional<TemporaryFile> create_temporary_at(
+    int parent, std::string_view purpose) {
+  for (unsigned attempt = 0; attempt != 32; ++attempt) {
+    const auto token = random_token();
+    if (!token) return std::nullopt;
+    const auto name = ".srs-" + std::string(purpose) + "-" + *token;
+    FileDescriptor file(::openat(parent, name.c_str(),
+                                 O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC |
+                                     O_NOFOLLOW,
+                                 S_IRUSR | S_IWUSR));
+    if (file) return TemporaryFile{std::move(file), name};
+    if (errno != EEXIST) return std::nullopt;
   }
   return std::nullopt;
 }
 
-[[nodiscard]] std::optional<VolumeIdentity> inspect_volume(
-    const std::filesystem::path& path) {
-  std::error_code error;
-  const auto absolute = std::filesystem::weakly_canonical(path, error);
-  if (error || !absolute.is_absolute()) return std::nullopt;
-  const auto mount = find_mount(absolute);
-  if (!mount) return std::nullopt;
-  struct statfs info {};
-  if (::statfs(absolute.c_str(), &info) != 0) return std::nullopt;
-  const auto medium = storage_medium(*mount);
-  const bool local = medium != StorageMedium::network;
-  const bool trusted_fs = mount->filesystem == "ext4" || mount->filesystem == "xfs" ||
-                          mount->filesystem == "btrfs";
-  const auto uuid = filesystem_uuid(mount->source);
-  std::ostringstream identity;
-  if (uuid) {
-    identity << "uuid:" << *uuid;
-  } else {
-    identity << "fsid:" << std::hex
-             << static_cast<unsigned long long>(info.f_fsid.__val[0]) << ':'
-             << static_cast<unsigned long long>(info.f_fsid.__val[1]);
+[[nodiscard]] bool copy_descriptor(int source, int destination) {
+  if (::lseek(source, 0, SEEK_SET) < 0 ||
+      ::ftruncate(destination, 0) != 0 ||
+      ::lseek(destination, 0, SEEK_SET) < 0) {
+    return false;
   }
-  const bool has_fsid = info.f_fsid.__val[0] != 0 || info.f_fsid.__val[1] != 0;
-  const bool stable = uuid.has_value() ||
-                      (mount->source.starts_with("/dev/") && has_fsid) ||
-                      mount->filesystem == "btrfs";
-  std::wstring description(mount->filesystem.begin(), mount->filesystem.end());
-  description += L" on ";
-  const auto mount_text = mount->mount_point.wstring();
-  description += mount_text;
-  const auto identity_text = identity.str();
-  return VolumeIdentity{std::wstring(identity_text.begin(), identity_text.end()),
-                        std::wstring(mount->filesystem.begin(), mount->filesystem.end()),
-                        std::move(description), medium, local, stable,
-                        local && medium == StorageMedium::internal && trusted_fs};
+  std::array<char, 1024 * 1024> buffer{};
+  for (;;) {
+    const auto count = ::read(source, buffer.data(), buffer.size());
+    if (count == 0) break;
+    if (count < 0 ||
+        !write_all(destination,
+                   std::string_view(buffer.data(),
+                                    static_cast<std::size_t>(count)))) {
+      return false;
+    }
+  }
+  return ::fsync(destination) == 0;
 }
 
-[[nodiscard]] bool fsync_file(const std::filesystem::path& path) {
-  FileDescriptor file(::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
-  return file && ::fsync(file.value) == 0;
+[[nodiscard]] bool entry_matches_open(const ResolvedParent& parent,
+                                      int descriptor) {
+  struct stat held {};
+  struct stat current {};
+  return ::fstat(descriptor, &held) == 0 &&
+         ::fstatat(parent.directory.value, parent.name.c_str(), &current,
+                   AT_SYMLINK_NOFOLLOW) == 0 &&
+         S_ISREG(current.st_mode) && held.st_dev == current.st_dev &&
+         held.st_ino == current.st_ino;
 }
 
-[[nodiscard]] bool fsync_directory(const std::filesystem::path& path) {
-  FileDescriptor directory(::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC |
-                                                    O_NOFOLLOW));
-  if (!directory) return false;
-  if (::fsync(directory.value) == 0) return true;
-  const int error = errno;
-  return (error == EINVAL || error == ENOTSUP || error == EBADF) &&
-         ::syncfs(directory.value) == 0;
+void discard_temporary_at(int parent, const TemporaryFile& temporary) noexcept {
+  struct stat held {};
+  struct stat current {};
+  if (::fstat(temporary.file.value, &held) == 0 &&
+      ::fstatat(parent, temporary.name.c_str(), &current,
+                AT_SYMLINK_NOFOLLOW) == 0 &&
+      S_ISREG(current.st_mode) && held.st_dev == current.st_dev &&
+      held.st_ino == current.st_ino) {
+    (void)::unlinkat(parent, temporary.name.c_str(), 0);
+  }
 }
 
-[[nodiscard]] bool same_device(const std::filesystem::path& left,
-                               const std::filesystem::path& right) {
-  struct stat left_status {};
-  struct stat right_status {};
-  return ::stat(left.c_str(), &left_status) == 0 &&
-         ::stat(right.c_str(), &right_status) == 0 &&
-         left_status.st_dev == right_status.st_dev;
+[[nodiscard]] MutationResult posix_failure(MutationStep step,
+                                           MutationState state) {
+  return MutationResult::failure(step, state,
+                                 std::error_code(errno,
+                                                 std::generic_category()));
 }
 
 [[nodiscard]] bool write_all(int descriptor, std::string_view bytes) {
@@ -335,74 +334,6 @@ struct MountEntry {
     bytes.remove_prefix(static_cast<std::size_t>(count));
   }
   return true;
-}
-
-[[nodiscard]] bool copy_file_synced(const std::filesystem::path& source,
-                                    const std::filesystem::path& destination) {
-  FileDescriptor input(::open(source.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
-  FileDescriptor output(::open(destination.c_str(), O_WRONLY | O_CREAT | O_EXCL |
-                                                        O_CLOEXEC | O_NOFOLLOW,
-                               S_IRUSR | S_IWUSR));
-  if (!input || !output) return false;
-  std::array<char, 1024 * 1024> buffer{};
-  for (;;) {
-    const auto count = ::read(input.value, buffer.data(), buffer.size());
-    if (count == 0) break;
-    if (count < 0 || !write_all(output.value,
-                                std::string_view(buffer.data(),
-                                                 static_cast<std::size_t>(count)))) {
-      return false;
-    }
-  }
-  return ::fsync(output.value) == 0;
-}
-
-[[nodiscard]] bool clone_file_synced(const std::filesystem::path& source,
-                                     const std::filesystem::path& destination) {
-  FileDescriptor input(::open(source.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
-  FileDescriptor output(::open(destination.c_str(), O_WRONLY | O_CREAT | O_EXCL |
-                                                        O_CLOEXEC | O_NOFOLLOW,
-                               S_IRUSR | S_IWUSR));
-  if (!input || !output || ::ioctl(output.value, FICLONE, input.value) != 0) {
-    return false;
-  }
-  return ::fsync(output.value) == 0;
-}
-
-[[nodiscard]] std::optional<std::filesystem::path> state_home() {
-  const char* home_value = std::getenv("HOME");
-  std::optional<std::filesystem::path> raw_home;
-  std::optional<std::filesystem::path> resolved_home;
-  if (home_value != nullptr && *home_value != '\0') {
-    const std::filesystem::path candidate(home_value);
-    if (candidate.is_absolute()) {
-      raw_home = candidate.lexically_normal();
-      std::error_code error;
-      const auto canonical = std::filesystem::canonical(*raw_home, error);
-      struct stat status {};
-      if (!error && canonical.is_absolute() &&
-          ::lstat(canonical.c_str(), &status) == 0 && S_ISDIR(status.st_mode) &&
-          status.st_uid == ::geteuid() &&
-          (status.st_mode & (S_IWGRP | S_IWOTH)) == 0) {
-        resolved_home = canonical;
-      }
-    }
-  }
-  if (const char* xdg = std::getenv("XDG_STATE_HOME"); xdg != nullptr && *xdg != '\0') {
-    const std::filesystem::path path =
-        std::filesystem::path(xdg).lexically_normal();
-    if (!path.is_absolute()) return std::nullopt;
-    if (raw_home && resolved_home) {
-      const auto relative = path.lexically_relative(*raw_home);
-      if (!relative.empty() &&
-          (relative.begin() == relative.end() || *relative.begin() != "..")) {
-        return (*resolved_home / relative).lexically_normal();
-      }
-    }
-    return path;
-  }
-  return resolved_home ? std::optional(*resolved_home / ".local" / "state")
-                       : std::nullopt;
 }
 
 [[nodiscard]] std::optional<std::filesystem::path> existing_directory_ancestor(
@@ -425,155 +356,62 @@ struct MountEntry {
          (status.st_mode & (S_IWGRP | S_IWOTH)) == 0;
 }
 
-[[nodiscard]] bool secure_vault_hierarchy(
-    const std::filesystem::path& state,
-    const std::filesystem::path& vault_path) {
-  std::error_code error;
-  std::filesystem::create_directories(vault_path, error);
-  if (error) return false;
-  auto current = state;
-  for (;;) {
-    if (::chmod(current.c_str(), S_IRWXU) != 0 ||
-        !directory_controlled_by_user(current)) {
+[[nodiscard]] bool ensure_directory_hierarchy(
+    const std::filesystem::path& anchor,
+    const std::filesystem::path& target, bool private_children) {
+  if (!directory_controlled_by_user(anchor)) return false;
+  if (anchor.lexically_normal() == target.lexically_normal()) return true;
+  const auto relative = target.lexically_relative(anchor);
+  if (relative.empty() || relative.native().starts_with("..") ||
+      has_symlink_component(anchor)) {
+    return false;
+  }
+  FileDescriptor current(::open(anchor.c_str(), O_RDONLY | O_DIRECTORY |
+                                                    O_CLOEXEC | O_NOFOLLOW));
+  if (!current) return false;
+  for (const auto& component : relative) {
+    const auto name = component.native();
+    if (name.empty() || name == "." || name == ".." ||
+        name.find('/') != std::string::npos) {
       return false;
     }
-    if (current == vault_path) break;
-    const auto relative = vault_path.lexically_relative(current);
-    if (relative.empty() || relative.native().starts_with("..")) return false;
-    current /= *relative.begin();
+    bool created = false;
+    struct stat status {};
+    if (::fstatat(current.value, name.c_str(), &status,
+                  AT_SYMLINK_NOFOLLOW) != 0) {
+      if (errno != ENOENT ||
+          ::mkdirat(current.value, name.c_str(), S_IRWXU) != 0) {
+        return false;
+      }
+      created = true;
+    }
+    FileDescriptor child(::openat(current.value, name.c_str(),
+                                  O_RDONLY | O_DIRECTORY | O_CLOEXEC |
+                                      O_NOFOLLOW));
+    if (!child || ::fstat(child.value, &status) != 0 ||
+        !S_ISDIR(status.st_mode) || status.st_uid != ::geteuid() ||
+        (status.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+      return false;
+    }
+    const bool repair_mode =
+        private_children && (status.st_mode & 0777U) != 0700U;
+    // Private descendants are resolver-derived SRS storage. RC10's read-only
+    // exposure may be tightened, while shared anchors and writable-by-others
+    // directories are never modified.
+    if ((repair_mode && ::fchmod(child.value, 0700) != 0) ||
+        ((created || repair_mode) &&
+         (::fsync(child.value) != 0 || ::fsync(current.value) != 0))) {
+      return false;
+    }
+    current = std::move(child);
   }
   return true;
 }
 
-[[nodiscard]] std::string utf8_path(const std::filesystem::path& path) {
-  const auto value = path.generic_u8string();
-  return std::string(reinterpret_cast<const char*>(value.data()), value.size());
-}
-
-[[nodiscard]] std::string locator_contents(
-    std::string_view id, const std::filesystem::path& vault,
-    const VolumeIdentity& vault_volume) {
-  return "SRS-VAULT-LOCATOR-1\ninstallation=" + std::string(id) +
-         "\nvault=" + utf8_path(vault) + "\nvolume=" +
-         utf8_path(vault_volume.stable_id) + "\n";
-}
-
-[[nodiscard]] bool locator_matches(const std::filesystem::path& locator,
-                                   std::string_view id,
-                                   const std::filesystem::path& vault,
-                                   const VolumeIdentity& vault_volume) {
-  std::ifstream stream(locator, std::ios::binary);
-  if (!stream) return false;
-  const std::string text(std::istreambuf_iterator<char>(stream), {});
-  return !stream.bad() && text == locator_contents(id, vault, vault_volume);
-}
-
-[[nodiscard]] std::optional<std::filesystem::path> locator_vault_path(
-    const std::filesystem::path& locator, std::string_view id) {
-  std::ifstream stream(locator, std::ios::binary);
-  std::string magic;
-  std::string installation;
-  std::string vault;
-  if (!std::getline(stream, magic) || !std::getline(stream, installation) ||
-      !std::getline(stream, vault) || magic != "SRS-VAULT-LOCATOR-1" ||
-      installation != "installation=" + std::string(id) ||
-      !vault.starts_with("vault=")) {
-    return std::nullopt;
-  }
-  const auto encoded = vault.substr(6);
-  const std::u8string utf8(reinterpret_cast<const char8_t*>(encoded.data()),
-                           encoded.size());
-  auto path = std::filesystem::path(utf8);
-  return path.is_absolute() ? std::optional(path.lexically_normal())
-                            : std::nullopt;
-}
-
-[[nodiscard]] std::optional<std::filesystem::path> steam_library_root(
-    const std::filesystem::path& game_root) {
-  const auto common = game_root.parent_path();
-  const auto steamapps = common.parent_path();
-  if (common.filename() != "common" || steamapps.filename() != "steamapps" ||
-      steamapps.parent_path().empty()) {
-    return std::nullopt;
-  }
-  return steamapps.parent_path();
-}
-
-[[nodiscard]] bool vault_manifest_identity_matches(
-    const std::filesystem::path& vault, std::string_view id,
-    const VolumeIdentity& target_volume, const VolumeIdentity& vault_volume) {
-  const auto manifest = vault / "manifest.v2";
-  std::error_code error;
-  if (!std::filesystem::is_regular_file(manifest, error) || error ||
-      has_symlink_component(manifest)) {
-    return false;
-  }
-  std::ifstream stream(manifest, std::ios::binary);
-  std::array<std::string, 6> lines;
-  for (auto& line : lines) {
-    if (!std::getline(stream, line)) return false;
-  }
-  return lines[0] == "SRS-VAULT-MANIFEST-2" &&
-         lines[1] == "installation=" + std::string(id) &&
-         lines[2].starts_with("source=") && lines[2].size() > 7 &&
-         lines[3].starts_with("target=") && lines[3].size() > 7 &&
-         lines[4] == "targetVolume=" + utf8_path(target_volume.stable_id) &&
-         lines[5] == "vaultVolume=" + utf8_path(vault_volume.stable_id);
-}
-
-[[nodiscard]] std::optional<std::string> installation_id(
-    const std::filesystem::path& root, const MountEntry& mount,
-    const VolumeIdentity& volume) {
-  const auto relative = root.lexically_relative(mount.mount_point);
-  if (relative.empty() || relative.native().starts_with("..")) return std::nullopt;
-  const auto volume_relative =
-      (mount.filesystem_root / relative).lexically_normal();
-  if (!volume_relative.is_absolute() ||
-      volume_relative.native().starts_with("..")) {
-    return std::nullopt;
-  }
-  auto relative_id = volume_relative.generic_u8string();
-  while (relative_id.size() > 1 && relative_id.back() == u8'/') {
-    relative_id.pop_back();
-  }
-  std::string identity(volume.stable_id.begin(), volume.stable_id.end());
-  identity += '\n';
-  identity.append(reinterpret_cast<const char*>(relative_id.data()), relative_id.size());
-  const auto hash = sha256_string(identity);
-  return hash ? std::optional("skyrimse-" + hash->substr(0, 16)) : std::nullopt;
-}
-
-[[nodiscard]] StorageOperation operations_for(SafetyMode mode) noexcept {
-  const auto persistent = StorageOperation::activate_persistent |
-                          StorageOperation::restore_persistent |
-                          StorageOperation::recover;
-  return mode == SafetyMode::automatic
-             ? persistent | StorageOperation::activate_session
-             : (mode == SafetyMode::hard_blocked ? StorageOperation::none : persistent);
-}
-
-[[nodiscard]] BackendProbeResult blocked(std::wstring technical,
-                                         std::wstring message,
-                                         VolumeIdentity target = {},
-                                         VolumeIdentity vault = {},
-                                         std::filesystem::path vault_path = {},
-                                         std::string id = {}) {
-  return {ExitCode::unsupported_filesystem, SafetyMode::hard_blocked,
-          std::move(target), std::move(vault), std::move(vault_path), std::move(id),
-          L"Hard blocked", std::move(technical), std::move(message),
-          StorageOperation::none};
-}
-
-[[nodiscard]] BackendProbeResult attach_storage_paths(
-    BackendProbeResult result, const std::filesystem::path& base,
-    std::string_view id) {
-  result.recovery_vault.value = result.vault_path;
-  result.target_cache.value =
-      base / "cache" /
-      std::filesystem::path(patch_plan_hash_utf8.substr(0, 16));
-  result.coordination_lock.value =
-      base / "locks" / (std::string(id) + ".lock");
-  return result;
+[[nodiscard]] bool secure_private_hierarchy(
+    const std::filesystem::path& anchor,
+    const std::filesystem::path& target) {
+  return ensure_directory_hierarchy(anchor, target, true);
 }
 
 class PosixTransactionBackend final : public TransactionBackend {
@@ -581,440 +419,599 @@ class PosixTransactionBackend final : public TransactionBackend {
   BackendProbeResult probe(const std::filesystem::path& managed_root,
                            std::uint64_t required_vault_bytes,
                            bool prepare_vault) override {
+    return probe_posix_storage(*this, managed_root, required_vault_bytes,
+                               prepare_vault);
+  }
+
+  MutationResult prepare_coordination_lock(
+      const CoordinationLockPath& resolved_lock) override {
+    const auto& lock_path = resolved_lock.value;
+    const auto lock_directory = lock_path.parent_path();
+    const auto storage_root = lock_directory.parent_path();
+    const auto storage_name = storage_root.filename().native();
+    const auto controlled_anchor =
+        existing_directory_ancestor(storage_root.parent_path());
+    if (lock_path.empty() || !lock_path.is_absolute() ||
+        lock_directory.filename().native() != "locks" ||
+        (storage_name != ".runtime-swapper" &&
+         storage_name != "skyrim-runtime-swapper") ||
+        !controlled_anchor ||
+        !ensure_directory_hierarchy(*controlled_anchor,
+                                    storage_root.parent_path(), false) ||
+        !secure_private_hierarchy(storage_root.parent_path(), lock_directory) ||
+        has_symlink_component(lock_directory)) {
+      return MutationResult::failure(
+          MutationStep::validate, MutationState::untouched, {},
+          L"The coordination-lock hierarchy is not private and safe.");
+    }
+    return MutationResult::success(MutationState::fully_durable);
+  }
+
+  bool atomic_rename_compatible(
+      const std::filesystem::path& left,
+      const std::filesystem::path& right) override {
     std::error_code error;
-    const auto requested = std::filesystem::absolute(managed_root, error);
-    if (error || !requested.is_absolute() || has_symlink_component(requested)) {
-      return blocked(L"unsafe-target-path",
-                     L"The managed path is not absolute or contains a symbolic link.");
-    }
-    const auto absolute = std::filesystem::weakly_canonical(requested, error);
-    if (error || !absolute.is_absolute() || has_symlink_component(absolute)) {
-      return blocked(L"unsafe-target-path",
-                     L"The managed path could not be resolved safely.");
-    }
-    const auto target_anchor = existing_directory_ancestor(absolute);
-    auto target = target_anchor ? inspect_volume(*target_anchor) : std::nullopt;
-    const auto mount = find_mount(absolute);
-    if (!target || !mount || !target->local || !target->stable) {
-      return blocked(L"target-volume-unrecoverable",
-                     L"The target is a network, FUSE, or unstably identified volume.",
-                     target.value_or(VolumeIdentity{}));
-    }
-    const auto id = installation_id(absolute, *mount, *target);
-    const auto state = state_home();
-    if (!id || !state) {
-      return blocked(L"state-home-unavailable",
-                     L"XDG_STATE_HOME or HOME does not resolve to a safe absolute path.",
-                     *target);
-    }
-    const auto system_base = *state / "modding-forge" /
-                             "skyrim-runtime-swapper";
-    const auto local_base = target->medium == StorageMedium::internal &&
-                                    target->native_durability
-                                ? steam_library_root(absolute)
-                                : std::nullopt;
-    const auto storage_base = local_base
-                                  ? *local_base / ".runtime-swapper"
-                                  : system_base;
-    auto vault_path = local_base
-                          ? storage_base / "recovery" / *id / "active"
-                          : system_base / "vaults" / *id;
-    const auto state_anchor = existing_directory_ancestor(*state);
-    if (!state_anchor || !directory_controlled_by_user(*state_anchor)) {
-      return blocked(L"state-home-not-controlled",
-                     L"The state directory is not owned and controlled by the current "
-                     L"user.", *target, {}, vault_path, *id);
-    }
-    const auto locator =
-        absolute / ".skyrim-runtime-swapper" / "vault.locator";
-    const auto locator_status = std::filesystem::symlink_status(locator, error);
-    const bool locator_exists = !error && std::filesystem::exists(locator_status);
-    if (error && error != std::errc::no_such_file_or_directory) {
-      return blocked(L"vault-locator-unreadable",
-                     L"The active recovery-vault locator could not be inspected.",
-                     *target, {}, vault_path, *id);
-    }
-    std::optional<std::filesystem::path> recorded_vault;
-    if (locator_exists) {
-      recorded_vault = locator_vault_path(locator, *id);
-      const auto& recorded = recorded_vault;
-      if (recorded) {
-        if (has_symlink_component(recorded->parent_path())) {
-          return blocked(L"active-vault-locator-invalid",
-                         L"The active recovery-vault locator is invalid.",
-                         *target, {}, vault_path, *id);
-        }
-        vault_path = *recorded;
-      }
-    }
-    error.clear();
-    const bool vault_exists = std::filesystem::is_directory(vault_path, error) && !error;
-    if (recorded_vault && !vault_exists) {
-      return blocked(L"active-vault-directory-missing",
-                     L"The recorded recovery-vault directory is missing.",
-                     *target, {}, vault_path, *id);
-    }
-    if (recorded_vault &&
-        !std::filesystem::is_regular_file(vault_path / "manifest.v2", error)) {
-      return blocked(L"active-vault-manifest-missing",
-                     L"The recorded recovery-vault manifest is missing.",
-                     *target, {}, vault_path, *id);
-    }
-    error.clear();
-    if (has_symlink_component(vault_path.parent_path())) {
-      return blocked(L"vault-parent-symlink",
-                     L"The automatic vault path contains a symbolic link.", *target, {},
-                     vault_path, *id);
-    }
-    const auto vault_anchor = vault_exists
-                                  ? std::optional(vault_path)
-                                  : existing_directory_ancestor(storage_base);
-    auto vault = vault_anchor ? inspect_volume(*vault_anchor) : std::nullopt;
-    const bool locator_matches_vault =
-        locator_exists && std::filesystem::is_regular_file(locator_status) &&
-        vault_exists && vault && locator_matches(locator, *id, vault_path, *vault);
-    const bool locator_recoverable =
-        locator_exists && std::filesystem::is_regular_file(locator_status) &&
-        vault_exists && vault && !locator_matches_vault &&
-        vault_manifest_identity_matches(vault_path, *id, *target, *vault);
-    if (locator_exists && !locator_matches_vault && !locator_recoverable) {
-      return blocked(L"active-vault-unavailable",
-                     L"The recorded recovery vault is missing, changed, or unavailable. "
-                     L"The pending installation will not be redirected to a new vault.",
-                     *target, {}, vault_path, *id);
-    }
-    if (!vault || !vault->native_durability || !vault->stable) {
-      return blocked(L"vault-volume-not-durable",
-                     L"The recovery vault is not on an internal ext4, XFS, or Btrfs "
-                     L"volume.", *target, vault.value_or(VolumeIdentity{}), vault_path, *id);
-    }
-    struct statvfs space {};
-    if (!vault_anchor || ::statvfs(vault_anchor->c_str(), &space) != 0 ||
-        static_cast<std::uint64_t>(space.f_bavail) * space.f_frsize <
-            required_vault_bytes + vault_reserve_bytes) {
-      return blocked(L"vault-insufficient-space",
-                     L"The recovery vault does not have enough free space.", *target,
-                     *vault, vault_path, *id);
-    }
-    const auto candidate_mode = classify_storage(
-        *target, *vault, target->stable_id != vault->stable_id);
-    if (candidate_mode == SafetyMode::hard_blocked) {
-      return blocked(L"independent-vault-required",
-                     L"This target requires a vault on a different durable volume.",
-                     *target, *vault, vault_path, *id);
-    }
-
-    struct stat vault_status {};
-    if (vault_exists &&
-        (::lstat(vault_path.c_str(), &vault_status) != 0 ||
-         !S_ISDIR(vault_status.st_mode) || vault_status.st_uid != ::geteuid() ||
-         (vault_status.st_mode & 0777U) != 0700U)) {
-      return blocked(L"vault-owner-or-mode",
-                     L"The vault is not owned by the current user with mode 0700.",
-                     *target, *vault, vault_path, *id);
-    }
-    if (!prepare_vault) {
-      return attach_storage_paths({ExitCode::success, candidate_mode, *target, *vault, vault_path, *id,
-              safety_mode_label(candidate_mode) + L": " + target->description,
-              candidate_mode == SafetyMode::automatic
-                  ? L"native-session-durability"
-                  : L"persistent-recovery-required",
-              candidate_mode == SafetyMode::automatic
-                  ? L"Native filesystem durability supports automatic restoration."
-                  : L"Verified persistent recovery is required for this target.",
-              operations_for(candidate_mode)}, storage_base, *id);
-    }
-
-    if (local_base) {
-      std::filesystem::create_directories(storage_base, error);
-    }
-    const auto secure_root = local_base ? storage_base : *state;
-    if (error || !secure_vault_hierarchy(secure_root, vault_path) ||
-        has_symlink_component(vault_path)) {
-      return blocked(L"vault-create-failed",
-                     L"The automatic vault could not be created with mode 0700.", *target,
-                     {}, vault_path, *id);
-    }
-    if (::lstat(vault_path.c_str(), &vault_status) != 0 ||
-        !S_ISDIR(vault_status.st_mode) || vault_status.st_uid != ::geteuid() ||
-        (vault_status.st_mode & 0777U) != 0700U) {
-      return blocked(L"vault-owner-or-mode",
-                     L"The vault is not owned by the current user with mode 0700.",
-                     *target, {}, vault_path, *id);
-    }
-    vault = inspect_volume(vault_path);
-    if (!vault || !vault->native_durability || !vault->stable) {
-      return blocked(L"vault-volume-not-durable",
-                     L"The recovery vault is not on an internal ext4, XFS, or Btrfs "
-                     L"volume.", *target, vault.value_or(VolumeIdentity{}), vault_path, *id);
-    }
-    if (::statvfs(vault_path.c_str(), &space) != 0 ||
-        static_cast<std::uint64_t>(space.f_bavail) * space.f_frsize <
-            required_vault_bytes + vault_reserve_bytes) {
-      return blocked(L"vault-insufficient-space",
-                     L"The recovery vault does not have enough free space.", *target,
-                     *vault, vault_path, *id);
-    }
-    const auto mode = classify_storage(*target, *vault,
-                                       target->stable_id != vault->stable_id);
-    if (mode == SafetyMode::hard_blocked) {
-      return blocked(L"independent-vault-required",
-                     L"This target requires a vault on a different durable volume.",
-                     *target, *vault, vault_path, *id);
-    }
-    if (locator_recoverable &&
-        (!write_atomic(locator, locator_contents(*id, vault_path, *vault)) ||
-         !locator_matches(locator, *id, vault_path, *vault))) {
-      return blocked(L"vault-locator-repair-failed",
-                     L"The verified recovery vault was found, but its damaged locator "
-                     L"could not be repaired.", *target, *vault, vault_path, *id);
-    }
-    return attach_storage_paths({ExitCode::success, mode, *target, *vault, vault_path, *id,
-            safety_mode_label(mode) + L": " + target->description,
-            mode == SafetyMode::automatic ? L"native-session-durability"
-                                          : L"persistent-recovery-required",
-            mode == SafetyMode::automatic
-                ? L"Native filesystem durability supports automatic restoration."
-                : L"Verified persistent recovery is required for this target.",
-            operations_for(mode)}, storage_base, *id);
+    const auto absolute_left = std::filesystem::absolute(left, error);
+    if (error) return false;
+    const auto absolute_right = std::filesystem::absolute(right, error);
+    if (error) return false;
+    const auto left_mount = posix_mount_id(absolute_left.lexically_normal());
+    const auto right_mount = posix_mount_id(absolute_right.lexically_normal());
+    return left_mount && right_mount && *left_mount == *right_mount;
   }
 
-  bool flush_file(const std::filesystem::path& file) override {
-    if (core::fault_injected("file.before-flush")) return false;
-    const bool synced = fsync_file(file);
-    return synced && !core::fault_injected("file.after-flush");
+  MutationResult flush_file(const std::filesystem::path& file) override {
+    if (core::fault_injected("file.before-flush")) {
+      return MutationResult::failure(MutationStep::flush_file,
+                                     MutationState::untouched);
+    }
+    const auto parent = resolve_parent_secure(file);
+    auto opened = parent ? open_regular_at(*parent, O_RDONLY) : FileDescriptor{};
+    if (!parent || !opened || !entry_matches_open(*parent, opened.value) ||
+        ::fsync(opened.value) != 0) {
+      return posix_failure(MutationStep::flush_file,
+                           MutationState::untouched);
+    }
+    if (core::fault_injected("file.after-flush")) {
+      return MutationResult::failure(MutationStep::flush_file,
+                                     MutationState::file_durable);
+    }
+    return MutationResult::success(MutationState::file_durable);
   }
 
-  bool atomic_replace(const std::filesystem::path& live,
+  MutationResult atomic_replace(const std::filesystem::path& live,
                       const std::filesystem::path& staged,
                       const std::filesystem::path& rollback) override {
-    if (core::fault_injected("replace.before")) return false;
-    std::error_code error;
-    std::filesystem::create_directories(rollback.parent_path(), error);
-    if (error || has_symlink_component(live) || has_symlink_component(staged) ||
-        has_symlink_component(rollback.parent_path()) || !fsync_file(staged) ||
-        !same_device(live.parent_path(), staged.parent_path()) ||
-        !same_device(live.parent_path(), rollback.parent_path())) {
-      return false;
+    if (core::fault_injected("replace.before")) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
     }
-    (void)::unlink(rollback.c_str());
-    if (::rename(live.c_str(), rollback.c_str()) != 0 ||
-        !fsync_file(rollback) || !fsync_directory(rollback.parent_path())) {
-      return false;
+    const auto live_parent = resolve_parent_secure(live);
+    const auto staged_parent = resolve_parent_secure(staged);
+    const auto rollback_parent = resolve_parent_secure(rollback, true);
+    auto live_file = live_parent ? open_regular_at(*live_parent, O_RDONLY)
+                                 : FileDescriptor{};
+    auto staged_file = staged_parent ? open_regular_at(*staged_parent, O_RDONLY)
+                                     : FileDescriptor{};
+    if (!live_parent || !staged_parent || !rollback_parent || !live_file ||
+        !staged_file || live_parent->device != staged_parent->device ||
+        live_parent->device != rollback_parent->device ||
+        !entry_absent_at(*rollback_parent) ||
+        !entry_matches_open(*live_parent, live_file.value) ||
+        !entry_matches_open(*staged_parent, staged_file.value) ||
+        ::fsync(staged_file.value) != 0) {
+      return posix_failure(MutationStep::validate,
+                           MutationState::untouched);
     }
-    if (core::fault_injected("replace.after-source-move")) return false;
-    if (::rename(staged.c_str(), live.c_str()) != 0) {
-      (void)::rename(rollback.c_str(), live.c_str());
-      (void)fsync_directory(live.parent_path());
-      return false;
+    (void)core::fault_injected("replace.after-resolve");
+    if (::renameat(live_parent->directory.value, live_parent->name.c_str(),
+                   rollback_parent->directory.value,
+                   rollback_parent->name.c_str()) != 0) {
+      return posix_failure(MutationStep::move_source,
+                           MutationState::untouched);
     }
-    if (core::fault_injected("replace.after-rename")) return false;
-    const bool synced = fsync_file(live) && fsync_directory(live.parent_path());
-    return synced && !core::fault_injected("replace.after-sync");
+    if (!entry_matches_open(*rollback_parent, live_file.value) ||
+        ::fsync(live_file.value) != 0 ||
+        !fsync_directory_descriptor(rollback_parent->directory.value)) {
+      return posix_failure(MutationStep::flush_directory,
+                           MutationState::source_relocated);
+    }
+    if (core::fault_injected("replace.after-source-move")) {
+      return MutationResult::failure(MutationStep::move_source,
+                                     MutationState::source_relocated);
+    }
+    if (!entry_matches_open(*staged_parent, staged_file.value) ||
+        ::renameat(staged_parent->directory.value, staged_parent->name.c_str(),
+                   live_parent->directory.value, live_parent->name.c_str()) != 0) {
+      if (::renameat(rollback_parent->directory.value,
+                     rollback_parent->name.c_str(),
+                     live_parent->directory.value,
+                     live_parent->name.c_str()) == 0) {
+        (void)fsync_directory_descriptor(live_parent->directory.value);
+      }
+      return posix_failure(MutationStep::install_replacement,
+                           MutationState::source_relocated);
+    }
+    if (!entry_matches_open(*live_parent, staged_file.value)) {
+      return posix_failure(MutationStep::install_replacement,
+                           MutationState::replacement_installed);
+    }
+    if (core::fault_injected("replace.after-rename")) {
+      return MutationResult::failure(MutationStep::install_replacement,
+                                     MutationState::replacement_installed);
+    }
+    if (::fsync(staged_file.value) != 0 ||
+        !fsync_directory_descriptor(live_parent->directory.value)) {
+      return posix_failure(MutationStep::flush_directory,
+                           MutationState::replacement_installed);
+    }
+    if (core::fault_injected("replace.after-sync")) {
+      return MutationResult::failure(MutationStep::flush_directory,
+                                     MutationState::fully_durable);
+    }
+    return MutationResult::success();
   }
 
-  bool atomic_install(const std::filesystem::path& staged,
+  MutationResult atomic_install(const std::filesystem::path& staged,
                       const std::filesystem::path& live) override {
-    std::error_code error;
-    std::filesystem::create_directories(live.parent_path(), error);
-    if (error || std::filesystem::exists(live, error) || error ||
-        has_symlink_component(staged) ||
-        has_symlink_component(live.parent_path()) ||
-        !same_device(staged.parent_path(), live.parent_path()) || !fsync_file(staged) ||
-        ::rename(staged.c_str(), live.c_str()) != 0) {
-      return false;
+    const auto staged_parent = resolve_parent_secure(staged);
+    const auto live_parent = resolve_parent_secure(live, true);
+    auto staged_file = staged_parent ? open_regular_at(*staged_parent, O_RDONLY)
+                                     : FileDescriptor{};
+    if (!staged_parent || !live_parent || !staged_file ||
+        staged_parent->device != live_parent->device ||
+        !entry_absent_at(*live_parent) ||
+        !entry_matches_open(*staged_parent, staged_file.value) ||
+        ::fsync(staged_file.value) != 0) {
+      return posix_failure(MutationStep::validate,
+                           MutationState::untouched);
     }
-    return fsync_file(live) && fsync_directory(live.parent_path());
+    if (::renameat(staged_parent->directory.value, staged_parent->name.c_str(),
+                   live_parent->directory.value, live_parent->name.c_str()) != 0) {
+      return posix_failure(MutationStep::install_replacement,
+                           MutationState::untouched);
+    }
+    if (!entry_matches_open(*live_parent, staged_file.value)) {
+      return posix_failure(MutationStep::install_replacement,
+                           MutationState::replacement_installed);
+    }
+    if (::fsync(staged_file.value) != 0 ||
+        !fsync_directory_descriptor(live_parent->directory.value)) {
+      return posix_failure(MutationStep::flush_directory,
+                           MutationState::replacement_installed);
+    }
+    return MutationResult::success();
   }
 
-  bool atomic_replace_deferred_sync(
+  MutationResult atomic_replace_deferred_sync(
       const std::filesystem::path& live,
       const std::filesystem::path& staged,
       const std::filesystem::path& rollback) override {
-    if (core::fault_injected("replace.before")) return false;
-    std::error_code error;
-    std::filesystem::create_directories(rollback.parent_path(), error);
-    if (error || has_symlink_component(live) || has_symlink_component(staged) ||
-        has_symlink_component(rollback.parent_path()) || !fsync_file(staged) ||
-        !same_device(live.parent_path(), staged.parent_path()) ||
-        !same_device(live.parent_path(), rollback.parent_path())) {
-      return false;
+    if (core::fault_injected("replace.before")) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
     }
-    (void)::unlink(rollback.c_str());
-    if (::rename(live.c_str(), rollback.c_str()) != 0 ||
-        !fsync_file(rollback)) {
-      return false;
+    const auto live_parent = resolve_parent_secure(live);
+    const auto staged_parent = resolve_parent_secure(staged);
+    const auto rollback_parent = resolve_parent_secure(rollback, true);
+    auto live_file = live_parent ? open_regular_at(*live_parent, O_RDONLY)
+                                 : FileDescriptor{};
+    auto staged_file = staged_parent ? open_regular_at(*staged_parent, O_RDONLY)
+                                     : FileDescriptor{};
+    if (!live_parent || !staged_parent || !rollback_parent || !live_file ||
+        !staged_file || live_parent->device != staged_parent->device ||
+        live_parent->device != rollback_parent->device ||
+        !entry_absent_at(*rollback_parent) ||
+        !entry_matches_open(*live_parent, live_file.value) ||
+        !entry_matches_open(*staged_parent, staged_file.value) ||
+        ::fsync(staged_file.value) != 0) {
+      return posix_failure(MutationStep::validate,
+                           MutationState::untouched);
     }
-    if (core::fault_injected("replace.after-source-move")) return false;
-    if (::rename(staged.c_str(), live.c_str()) != 0) {
-      (void)::rename(rollback.c_str(), live.c_str());
-      return false;
+    if (::renameat(live_parent->directory.value, live_parent->name.c_str(),
+                   rollback_parent->directory.value,
+                   rollback_parent->name.c_str()) != 0) {
+      return posix_failure(MutationStep::move_source,
+                           MutationState::untouched);
     }
-    if (core::fault_injected("replace.after-rename")) return false;
-    return fsync_file(live);
+    if (!entry_matches_open(*rollback_parent, live_file.value) ||
+        ::fsync(live_file.value) != 0) {
+      return posix_failure(MutationStep::flush_file,
+                           MutationState::source_relocated);
+    }
+    if (core::fault_injected("replace.after-source-move")) {
+      return MutationResult::failure(MutationStep::move_source,
+                                     MutationState::source_relocated);
+    }
+    if (!entry_matches_open(*staged_parent, staged_file.value) ||
+        ::renameat(staged_parent->directory.value, staged_parent->name.c_str(),
+                   live_parent->directory.value, live_parent->name.c_str()) != 0) {
+      (void)::renameat(rollback_parent->directory.value,
+                       rollback_parent->name.c_str(),
+                       live_parent->directory.value, live_parent->name.c_str());
+      return posix_failure(MutationStep::install_replacement,
+                           MutationState::source_relocated);
+    }
+    if (!entry_matches_open(*live_parent, staged_file.value)) {
+      return posix_failure(MutationStep::install_replacement,
+                           MutationState::replacement_installed);
+    }
+    if (core::fault_injected("replace.after-rename")) {
+      return MutationResult::failure(MutationStep::install_replacement,
+                                     MutationState::replacement_installed);
+    }
+    if (::fsync(staged_file.value) != 0) {
+      return posix_failure(MutationStep::flush_file,
+                           MutationState::replacement_installed);
+    }
+    return MutationResult::success(MutationState::file_durable);
   }
 
-  bool atomic_install_deferred_sync(
+  MutationResult atomic_install_deferred_sync(
       const std::filesystem::path& staged,
       const std::filesystem::path& live) override {
-    std::error_code error;
-    std::filesystem::create_directories(live.parent_path(), error);
-    if (error || std::filesystem::exists(live, error) || error ||
-        has_symlink_component(staged) ||
-        has_symlink_component(live.parent_path()) ||
-        !same_device(staged.parent_path(), live.parent_path()) ||
-        !fsync_file(staged) || ::rename(staged.c_str(), live.c_str()) != 0) {
-      return false;
+    const auto staged_parent = resolve_parent_secure(staged);
+    const auto live_parent = resolve_parent_secure(live, true);
+    auto staged_file = staged_parent ? open_regular_at(*staged_parent, O_RDONLY)
+                                     : FileDescriptor{};
+    if (!staged_parent || !live_parent || !staged_file ||
+        staged_parent->device != live_parent->device ||
+        !entry_absent_at(*live_parent) ||
+        !entry_matches_open(*staged_parent, staged_file.value) ||
+        ::fsync(staged_file.value) != 0) {
+      return posix_failure(MutationStep::validate,
+                           MutationState::untouched);
     }
-    return fsync_file(live);
+    if (::renameat(staged_parent->directory.value, staged_parent->name.c_str(),
+                   live_parent->directory.value, live_parent->name.c_str()) != 0) {
+      return posix_failure(MutationStep::install_replacement,
+                           MutationState::untouched);
+    }
+    if (!entry_matches_open(*live_parent, staged_file.value)) {
+      return posix_failure(MutationStep::install_replacement,
+                           MutationState::replacement_installed);
+    }
+    if (::fsync(staged_file.value) != 0) {
+      return posix_failure(MutationStep::flush_file,
+                           MutationState::replacement_installed);
+    }
+    return MutationResult::success(MutationState::file_durable);
   }
 
-  bool restore_file(const std::filesystem::path& rollback,
+  MutationResult restore_file(const std::filesystem::path& rollback,
                     const std::filesystem::path& live) override {
-    if (has_symlink_component(rollback) ||
-        has_symlink_component(live.parent_path()) ||
-        has_symlink_component(live) || !fsync_file(rollback) ||
-        !same_device(rollback.parent_path(), live.parent_path()) ||
-        ::rename(rollback.c_str(), live.c_str()) != 0) {
-      return false;
+    const auto live_parent = resolve_parent_secure(live, true);
+    if (!live_parent) {
+      return posix_failure(MutationStep::validate,
+                           MutationState::untouched);
     }
-    return fsync_file(live) && fsync_directory(live.parent_path());
+    struct stat live_status {};
+    const int live_status_result =
+        ::fstatat(live_parent->directory.value, live_parent->name.c_str(),
+                  &live_status, AT_SYMLINK_NOFOLLOW);
+    if (live_status_result == 0) {
+      if (!S_ISREG(live_status.st_mode)) {
+        return MutationResult::failure(MutationStep::validate,
+                                       MutationState::untouched);
+      }
+    } else if (errno == ENOENT) {
+      return atomic_install(rollback, live);
+    } else {
+      return posix_failure(MutationStep::validate, MutationState::untouched);
+    }
+    const auto discarded = rollback.parent_path().filename() == "rollback"
+                               ? rollback.parent_path().parent_path() /
+                                     "discarded" / rollback.filename()
+                               : rollback.parent_path() /
+                                     (rollback.filename().string() +
+                                      ".discarded");
+    return atomic_replace(live, rollback, discarded);
   }
 
-  bool copy_atomic(const std::filesystem::path& source,
+  MutationResult copy_atomic(const std::filesystem::path& source,
                    const std::filesystem::path& destination) override {
-    if (core::fault_injected("copy.before")) return false;
-    std::error_code error;
-    std::filesystem::create_directories(destination.parent_path(), error);
-    if (error || has_symlink_component(source) ||
-        has_symlink_component(destination.parent_path())) {
-      return false;
+    if (core::fault_injected("copy.before")) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
     }
-    auto temporary = destination;
-    temporary += ".copy-" + std::to_string(::getpid());
-    (void)::unlink(temporary.c_str());
-    if (!copy_file_synced(source, temporary) ||
-        core::fault_injected("copy.after-temp-sync") ||
-        ::rename(temporary.c_str(), destination.c_str()) != 0) {
-      (void)::unlink(temporary.c_str());
-      return false;
+    const auto source_parent = resolve_parent_secure(source);
+    const auto destination_parent = resolve_parent_secure(destination, true);
+    auto source_file = source_parent ? open_regular_at(*source_parent, O_RDONLY)
+                                     : FileDescriptor{};
+    if (!source_parent || !destination_parent || !source_file ||
+        !entry_matches_open(*source_parent, source_file.value)) {
+      return posix_failure(MutationStep::validate,
+                           MutationState::untouched);
     }
-    if (core::fault_injected("copy.after-rename")) return false;
-    const bool synced =
-        fsync_file(destination) && fsync_directory(destination.parent_path());
-    return synced && !core::fault_injected("copy.after-sync");
+    auto temporary = create_temporary_at(destination_parent->directory.value,
+                                         "copy");
+    if (!temporary) {
+      return posix_failure(MutationStep::create_temporary,
+                           MutationState::untouched);
+    }
+    if (!copy_descriptor(source_file.value, temporary->file.value)) {
+      discard_temporary_at(destination_parent->directory.value, *temporary);
+      return posix_failure(MutationStep::copy_or_clone,
+                           MutationState::temporary_created);
+    }
+    if (core::fault_injected("copy.after-temp-sync")) {
+      discard_temporary_at(destination_parent->directory.value, *temporary);
+      return MutationResult::failure(MutationStep::copy_or_clone,
+                                     MutationState::temporary_created);
+    }
+    if (::renameat(destination_parent->directory.value,
+                   temporary->name.c_str(),
+                   destination_parent->directory.value,
+                   destination_parent->name.c_str()) != 0) {
+      discard_temporary_at(destination_parent->directory.value, *temporary);
+      return posix_failure(MutationStep::install_replacement,
+                           MutationState::temporary_created);
+    }
+    if (!entry_matches_open(*destination_parent, temporary->file.value)) {
+      return posix_failure(MutationStep::install_replacement,
+                           MutationState::replacement_installed);
+    }
+    if (core::fault_injected("copy.after-rename")) {
+      return MutationResult::failure(MutationStep::install_replacement,
+                                     MutationState::replacement_installed);
+    }
+    if (::fsync(temporary->file.value) != 0 ||
+        !fsync_directory_descriptor(destination_parent->directory.value)) {
+      return posix_failure(MutationStep::flush_directory,
+                           MutationState::replacement_installed);
+    }
+    if (core::fault_injected("copy.after-sync")) {
+      return MutationResult::failure(MutationStep::flush_directory,
+                                     MutationState::fully_durable);
+    }
+    return MutationResult::success();
   }
 
-  bool clone_or_copy_atomic(const std::filesystem::path& source,
+  MutationResult clone_or_copy_atomic(const std::filesystem::path& source,
                             const std::filesystem::path& destination) override {
-    if (core::fault_injected("copy.before")) return false;
-    std::error_code error;
-    std::filesystem::create_directories(destination.parent_path(), error);
-    if (error || has_symlink_component(source) ||
-        has_symlink_component(destination.parent_path())) {
-      return false;
+    if (core::fault_injected("copy.before")) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
     }
-    auto temporary = destination;
-    temporary += ".clone-" + std::to_string(::getpid());
-    (void)::unlink(temporary.c_str());
-    if (!clone_file_synced(source, temporary)) {
-      (void)::unlink(temporary.c_str());
-      return copy_atomic(source, destination);
+    const auto source_parent = resolve_parent_secure(source);
+    const auto destination_parent = resolve_parent_secure(destination, true);
+    auto source_file = source_parent ? open_regular_at(*source_parent, O_RDONLY)
+                                     : FileDescriptor{};
+    if (!source_parent || !destination_parent || !source_file ||
+        !entry_matches_open(*source_parent, source_file.value)) {
+      return posix_failure(MutationStep::validate,
+                           MutationState::untouched);
     }
-    if (core::fault_injected("copy.after-temp-sync") ||
-        ::rename(temporary.c_str(), destination.c_str()) != 0) {
-      (void)::unlink(temporary.c_str());
-      return false;
+    auto temporary = create_temporary_at(destination_parent->directory.value,
+                                         "clone");
+    if (!temporary) {
+      return posix_failure(MutationStep::create_temporary,
+                           MutationState::untouched);
     }
-    if (core::fault_injected("copy.after-rename")) return false;
-    const bool synced =
-        fsync_file(destination) && fsync_directory(destination.parent_path());
-    return synced && !core::fault_injected("copy.after-sync");
+    if (::ioctl(temporary->file.value, FICLONE, source_file.value) != 0 &&
+        !copy_descriptor(source_file.value, temporary->file.value)) {
+      discard_temporary_at(destination_parent->directory.value, *temporary);
+      return posix_failure(MutationStep::copy_or_clone,
+                           MutationState::temporary_created);
+    }
+    if (::fsync(temporary->file.value) != 0 ||
+        core::fault_injected("copy.after-temp-sync")) {
+      discard_temporary_at(destination_parent->directory.value, *temporary);
+      return posix_failure(MutationStep::copy_or_clone,
+                           MutationState::temporary_created);
+    }
+    if (::renameat(destination_parent->directory.value,
+                   temporary->name.c_str(),
+                   destination_parent->directory.value,
+                   destination_parent->name.c_str()) != 0) {
+      discard_temporary_at(destination_parent->directory.value, *temporary);
+      return posix_failure(MutationStep::install_replacement,
+                           MutationState::temporary_created);
+    }
+    if (!entry_matches_open(*destination_parent, temporary->file.value)) {
+      return posix_failure(MutationStep::install_replacement,
+                           MutationState::replacement_installed);
+    }
+    if (core::fault_injected("copy.after-rename")) {
+      return MutationResult::failure(MutationStep::install_replacement,
+                                     MutationState::replacement_installed);
+    }
+    if (::fsync(temporary->file.value) != 0 ||
+        !fsync_directory_descriptor(destination_parent->directory.value)) {
+      return posix_failure(MutationStep::flush_directory,
+                           MutationState::replacement_installed);
+    }
+    if (core::fault_injected("copy.after-sync")) {
+      return MutationResult::failure(MutationStep::flush_directory,
+                                     MutationState::fully_durable);
+    }
+    return MutationResult::success();
   }
 
-  bool move_atomic(const std::filesystem::path& source,
+  MutationResult move_atomic(const std::filesystem::path& source,
                    const std::filesystem::path& destination) override {
-    std::error_code error;
-    std::filesystem::create_directories(destination.parent_path(), error);
-    if (error || std::filesystem::exists(destination, error) || error ||
-        has_symlink_component(source) ||
-        has_symlink_component(destination.parent_path()) ||
-        has_symlink_component(destination) ||
-        !fsync_file(source) || !same_device(source.parent_path(),
-                                            destination.parent_path()) ||
-        ::rename(source.c_str(), destination.c_str()) != 0) {
-      return false;
+    const auto source_parent = resolve_parent_secure(source);
+    const auto destination_parent = resolve_parent_secure(destination, true);
+    auto source_file = source_parent ? open_regular_at(*source_parent, O_RDONLY)
+                                     : FileDescriptor{};
+    if (!source_parent || !destination_parent || !source_file ||
+        source_parent->device != destination_parent->device ||
+        !entry_absent_at(*destination_parent) ||
+        !entry_matches_open(*source_parent, source_file.value) ||
+        ::fsync(source_file.value) != 0) {
+      return posix_failure(MutationStep::validate,
+                           MutationState::untouched);
     }
-    return fsync_file(destination) && fsync_directory(source.parent_path()) &&
-           fsync_directory(destination.parent_path());
+    if (::renameat(source_parent->directory.value, source_parent->name.c_str(),
+                   destination_parent->directory.value,
+                   destination_parent->name.c_str()) != 0) {
+      return posix_failure(MutationStep::move_source,
+                           MutationState::untouched);
+    }
+    if (!entry_matches_open(*destination_parent, source_file.value)) {
+      return posix_failure(MutationStep::move_source,
+                           MutationState::source_relocated);
+    }
+    if (::fsync(source_file.value) != 0 ||
+        !fsync_directory_descriptor(source_parent->directory.value) ||
+        !fsync_directory_descriptor(destination_parent->directory.value)) {
+      return posix_failure(MutationStep::flush_directory,
+                           MutationState::source_relocated);
+    }
+    return MutationResult::success();
   }
 
-  bool durable_remove(const std::filesystem::path& path) override {
-    if (core::fault_injected("remove.before")) return false;
-    if (has_symlink_component(path)) return false;
-    if (::unlink(path.c_str()) != 0) return errno == ENOENT;
-    if (core::fault_injected("remove.after-unlink")) return false;
-    return fsync_directory(path.parent_path()) &&
-           !core::fault_injected("remove.after-sync");
+  MutationResult durable_remove(const std::filesystem::path& path) override {
+    if (core::fault_injected("remove.before")) {
+      return MutationResult::failure(MutationStep::remove,
+                                     MutationState::untouched);
+    }
+    const auto parent = resolve_parent_secure(path);
+    if (!parent) return posix_failure(MutationStep::validate,
+                                      MutationState::untouched);
+    auto file = open_regular_at(*parent, O_RDONLY);
+    if (!file) {
+      return errno == ENOENT ? MutationResult::success()
+                             : posix_failure(MutationStep::validate,
+                                             MutationState::untouched);
+    }
+    if (!entry_matches_open(*parent, file.value) ||
+        ::unlinkat(parent->directory.value, parent->name.c_str(), 0) != 0) {
+      return posix_failure(MutationStep::remove,
+                           MutationState::untouched);
+    }
+    if (core::fault_injected("remove.after-unlink")) {
+      return MutationResult::failure(MutationStep::remove,
+                                     MutationState::source_relocated);
+    }
+    if (!fsync_directory_descriptor(parent->directory.value)) {
+      return posix_failure(MutationStep::flush_directory,
+                           MutationState::source_relocated);
+    }
+    if (core::fault_injected("remove.after-sync")) {
+      return MutationResult::failure(MutationStep::flush_directory,
+                                     MutationState::fully_durable);
+    }
+    return MutationResult::success();
   }
 
-  bool durable_remove_deferred_sync(
+  MutationResult durable_remove_deferred_sync(
       const std::filesystem::path& path) override {
-    if (core::fault_injected("remove.before") || has_symlink_component(path)) {
-      return false;
+    if (core::fault_injected("remove.before")) {
+      return MutationResult::failure(MutationStep::remove,
+                                     MutationState::untouched);
     }
-    if (::unlink(path.c_str()) != 0) return errno == ENOENT;
-    return !core::fault_injected("remove.after-unlink");
+    const auto parent = resolve_parent_secure(path);
+    if (!parent) return posix_failure(MutationStep::validate,
+                                      MutationState::untouched);
+    auto file = open_regular_at(*parent, O_RDONLY);
+    if (!file) {
+      return errno == ENOENT
+                 ? MutationResult::success(MutationState::source_relocated)
+                 : posix_failure(MutationStep::validate,
+                                 MutationState::untouched);
+    }
+    if (!entry_matches_open(*parent, file.value) ||
+        ::unlinkat(parent->directory.value, parent->name.c_str(), 0) != 0) {
+      return posix_failure(MutationStep::remove,
+                           MutationState::untouched);
+    }
+    if (core::fault_injected("remove.after-unlink")) {
+      return MutationResult::failure(MutationStep::remove,
+                                     MutationState::source_relocated);
+    }
+    return MutationResult::success(MutationState::source_relocated);
   }
 
-  bool durable_remove_tree(const std::filesystem::path& root) override {
+  MutationResult durable_remove_tree(const std::filesystem::path& root) override {
     if (core::fault_injected("remove-tree.before") || root.empty() ||
-        root == root.root_path() || has_symlink_component(root.parent_path())) {
-      return false;
+        root == root.root_path()) {
+      return MutationResult::failure(MutationStep::remove,
+                                     MutationState::untouched);
     }
-    FileDescriptor parent(::open(root.parent_path().c_str(),
-                                 O_RDONLY | O_DIRECTORY | O_CLOEXEC |
-                                     O_NOFOLLOW));
-    if (!parent) return false;
-    const auto name = root.filename().native();
-    if (name.empty() || !remove_private_tree_at(parent.value, name.c_str())) {
-      return false;
+    const auto parent = resolve_parent_secure(root);
+    if (!parent ||
+        !remove_private_tree_at(parent->directory.value, parent->name.c_str())) {
+      return posix_failure(MutationStep::remove,
+                           MutationState::untouched);
     }
-    return !core::fault_injected("remove-tree.after-sync");
+    if (core::fault_injected("remove-tree.after-sync")) {
+      return MutationResult::failure(MutationStep::flush_directory,
+                                     MutationState::fully_durable);
+    }
+    return MutationResult::success();
   }
 
-  bool write_atomic(const std::filesystem::path& path,
+  MutationResult write_atomic(const std::filesystem::path& path,
                     std::string_view bytes) override {
-    if (core::fault_injected("write.before")) return false;
-    std::error_code error;
-    std::filesystem::create_directories(path.parent_path(), error);
-    if (error || has_symlink_component(path.parent_path()) ||
-        has_symlink_component(path)) return false;
-    auto temporary = path;
-    temporary += ".tmp-" + std::to_string(::getpid());
-    (void)::unlink(temporary.c_str());
-    FileDescriptor file(::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL |
-                                                        O_CLOEXEC | O_NOFOLLOW,
-                               S_IRUSR | S_IWUSR));
-    if (!file || !write_all(file.value, bytes) || ::fsync(file.value) != 0 ||
-        core::fault_injected("write.after-temp-sync") ||
-        ::rename(temporary.c_str(), path.c_str()) != 0) {
-      (void)::unlink(temporary.c_str());
-      return false;
+    if (core::fault_injected("write.before")) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
     }
-    if (core::fault_injected("write.after-rename")) return false;
-    return fsync_directory(path.parent_path()) &&
-           !core::fault_injected("write.after-sync");
+    const auto parent = resolve_parent_secure(path, true);
+    if (!parent) return posix_failure(MutationStep::validate,
+                                      MutationState::untouched);
+    auto temporary = create_temporary_at(parent->directory.value, "write");
+    if (!temporary) {
+      return posix_failure(MutationStep::create_temporary,
+                           MutationState::untouched);
+    }
+    if (!write_all(temporary->file.value, bytes) ||
+        ::fsync(temporary->file.value) != 0 ||
+        core::fault_injected("write.after-temp-sync")) {
+      discard_temporary_at(parent->directory.value, *temporary);
+      return posix_failure(MutationStep::flush_file,
+                           MutationState::temporary_created);
+    }
+    if (::renameat(parent->directory.value, temporary->name.c_str(),
+                   parent->directory.value, parent->name.c_str()) != 0) {
+      discard_temporary_at(parent->directory.value, *temporary);
+      return posix_failure(MutationStep::install_replacement,
+                           MutationState::temporary_created);
+    }
+    if (!entry_matches_open(*parent, temporary->file.value)) {
+      return posix_failure(MutationStep::install_replacement,
+                           MutationState::replacement_installed);
+    }
+    if (core::fault_injected("write.after-rename")) {
+      return MutationResult::failure(MutationStep::install_replacement,
+                                     MutationState::replacement_installed);
+    }
+    if (!fsync_directory_descriptor(parent->directory.value)) {
+      return posix_failure(MutationStep::flush_directory,
+                           MutationState::replacement_installed);
+    }
+    if (core::fault_injected("write.after-sync")) {
+      return MutationResult::failure(MutationStep::flush_directory,
+                                     MutationState::fully_durable);
+    }
+    return MutationResult::success();
   }
 
-  bool sync_parent(const std::filesystem::path& path) override {
-    return fsync_directory(path.parent_path());
+  MutationResult sync_parent(const std::filesystem::path& path) override {
+    auto parent = open_directory_secure(path.parent_path());
+    if (!parent || !fsync_directory_descriptor(parent.value)) {
+      return posix_failure(MutationStep::flush_directory,
+                           MutationState::untouched);
+    }
+    return MutationResult::success();
   }
 
-  bool sync_directory(const std::filesystem::path& directory) override {
-    if (core::fault_injected("directory.before-sync")) return false;
-    return fsync_directory(directory) &&
-           !core::fault_injected("directory.after-sync");
+  MutationResult sync_directory(const std::filesystem::path& directory) override {
+    if (core::fault_injected("directory.before-sync")) {
+      return MutationResult::failure(MutationStep::flush_directory,
+                                     MutationState::untouched);
+    }
+    auto opened = open_directory_secure(directory);
+    if (!opened || !fsync_directory_descriptor(opened.value)) {
+      return posix_failure(MutationStep::flush_directory,
+                           MutationState::untouched);
+    }
+    if (core::fault_injected("directory.after-sync")) {
+      return MutationResult::failure(MutationStep::flush_directory,
+                                     MutationState::fully_durable);
+    }
+    return MutationResult::success();
   }
 };
 
@@ -1033,6 +1030,28 @@ class PosixTransactionBackend final : public TransactionBackend {
 
 }  // namespace
 
+std::optional<std::filesystem::path> posix_existing_directory_ancestor(
+    std::filesystem::path path) {
+  return existing_directory_ancestor(std::move(path));
+}
+
+bool posix_directory_controlled_by_user(
+    const std::filesystem::path& directory) {
+  return directory_controlled_by_user(directory);
+}
+
+bool posix_ensure_directory_hierarchy(
+    const std::filesystem::path& anchor,
+    const std::filesystem::path& target, bool private_children) {
+  return ensure_directory_hierarchy(anchor, target, private_children);
+}
+
+bool posix_secure_private_hierarchy(
+    const std::filesystem::path& anchor,
+    const std::filesystem::path& target) {
+  return secure_private_hierarchy(anchor, target);
+}
+
 bool managed_path_is_safe(const std::filesystem::path& path) noexcept {
   try {
     return !has_symlink_component(path);
@@ -1048,9 +1067,9 @@ bool managed_path_entry_is_redirected(
   std::error_code error;
   const auto absolute = std::filesystem::absolute(path, error).lexically_normal();
   if (error || !absolute.is_absolute()) return true;
-  const auto mount = find_mount(absolute);
-  if (!mount) return true;
-  return mount->mount_point.lexically_normal() == absolute;
+  const auto parent_mount = posix_mount_id(absolute.parent_path());
+  const auto entry_mount = posix_mount_id(absolute);
+  return !parent_mount || !entry_mount || *parent_mount != *entry_mount;
 }
 
 SafetyMode classify_storage(const VolumeIdentity& target,

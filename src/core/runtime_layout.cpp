@@ -17,11 +17,14 @@ RuntimeLayout detect_runtime_layout(
     const std::filesystem::path& game_root) noexcept {
   try {
     const auto launcher = core::resolve_managed_file(game_root, launcher_name);
-    const auto skse_loader =
-        core::resolve_managed_file(game_root, "skse64_loader.exe");
-    if (launcher && skse_loader &&
-        files_have_identical_content(launcher->effective,
-                                     skse_loader->effective)) {
+    // The launcher is managed by the runtime transaction and must therefore
+    // remain inside the installation. The SKSE loader is read-only input to
+    // this classification, however, and mod managers commonly expose it as a
+    // final symlink into their deployment store. Compare the opened object at
+    // its logical path without granting that external target write authority.
+    const auto skse_loader = game_root / "skse64_loader.exe";
+    if (launcher &&
+        files_have_identical_content(launcher->effective, skse_loader)) {
       return RuntimeLayout::skse_launcher_alias;
     }
   } catch (...) {

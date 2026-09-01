@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
 
 namespace runtime_swapper {
@@ -33,6 +34,7 @@ class PreparedStorageContext {
   RecoveryVaultPath recovery_vault;
   TargetCachePath target_cache;
   CoordinationLockPath coordination_lock;
+  TransactionWorkPath transaction_work;
   std::wstring target_volume_id;
   std::wstring vault_volume_id;
 
@@ -49,7 +51,7 @@ class PreparedStorageContext {
       const std::filesystem::path&, std::uint64_t, std::wstring*);
   friend class PreparedStorageScope;
   friend std::optional<bool> prepared_hash_matches(
-      const std::filesystem::path&, std::string_view);
+      const std::filesystem::path&, std::string_view, std::string*);
   friend BackendProbeResult probe_prepared_storage(
       const std::filesystem::path&, std::uint64_t, bool);
 };
@@ -74,7 +76,8 @@ class PreparedStorageScope {
 // Returns nullopt outside a prepared operation. A value is the authenticated
 // result for the current path identity and expected hash.
 [[nodiscard]] std::optional<bool> prepared_hash_matches(
-    const std::filesystem::path& file, std::string_view expected_sha256);
+    const std::filesystem::path& file, std::string_view expected_sha256,
+    std::string* actual_sha256 = nullptr);
 
 // Reuses a prepared probe while its required capacity and identities remain
 // valid, otherwise refreshes that same operation context.

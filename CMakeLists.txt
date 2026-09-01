@@ -2,7 +2,10 @@ cmake_minimum_required(VERSION 3.25)
 
 project(SkyrimRuntimeSwapper VERSION 1.2.0 LANGUAGES C CXX)
 
-set(SKYRIM_RUNTIME_RELEASE_VERSION "1.2.0-rc9")
+option(SKYRIM_RUNTIME_BUILD_FUZZER
+  "Build the Linux libFuzzer target for the handle-bound HDiffPatch adapter" OFF)
+
+set(SKYRIM_RUNTIME_RELEASE_VERSION "1.2.0-rc16")
 if(SKYRIM_RUNTIME_RELEASE_VERSION MATCHES "-")
   set(SKYRIM_RUNTIME_VERSION_FLAGS "VS_FF_PRERELEASE")
 else()
@@ -175,7 +178,6 @@ set(HDIFFPATCH_WINDOW_DIFF 1)
 
 add_library(hdiffpatch_native STATIC
   src/core/native_hpatch_adapter.c
-  "${HDIFFPATCH_ROOT}/hpatchz.c"
   "${HDIFFPATCH_ROOT}/file_for_patch.c"
   "${HDIFFPATCH_ROOT}/libHDiffPatch/HPatch/patch.c"
   "${HDIFFPATCH_ROOT}/libHDiffPatch/HDiff/private_diff/limit_mem_diff/adler_roll.c"
@@ -234,11 +236,13 @@ if(WIN32)
   set(RUNTIME_SWAPPER_PLATFORM_SOURCES
     src/core/sha256.cpp
     src/core/windows_transaction_backend.cpp
+    src/core/windows_storage_probe.cpp
   )
 else()
   set(RUNTIME_SWAPPER_PLATFORM_SOURCES
     src/core/posix_sha256.cpp
     src/core/posix_transaction_backend.cpp
+    src/core/posix_storage_probe.cpp
   )
 endif()
 
@@ -255,7 +259,10 @@ add_library(runtime_swapper_core STATIC
   src/core/restore.cpp
   src/core/runtime_backup.cpp
   src/core/runtime_layout.cpp
+  src/core/runtime_transaction_support.cpp
+  src/core/runtime_activation.cpp
   src/core/runtime_transform.cpp
+  src/core/transaction_workspace.cpp
   src/core/transaction_journal.cpp
   src/core/vault_store.cpp
   ${RUNTIME_SWAPPER_PLATFORM_SOURCES}
@@ -561,6 +568,18 @@ else()
     OUTPUT_NAME SkyrimRuntimeSwapper.Native)
   target_compile_options(runtime_swapper_native PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+
+  if(SKYRIM_RUNTIME_BUILD_FUZZER)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+      message(FATAL_ERROR "SKYRIM_RUNTIME_BUILD_FUZZER requires Clang")
+    endif()
+    add_executable(hdiff_adapter_fuzz src/fuzz/hdiff_adapter_fuzz.cpp)
+    target_include_directories(hdiff_adapter_fuzz PRIVATE src/include)
+    target_link_libraries(hdiff_adapter_fuzz PRIVATE hdiffpatch_native)
+    target_compile_options(hdiff_adapter_fuzz PRIVATE
+      -Wall -Wextra -Wpedantic -Wconversion -Wshadow -fsanitize=fuzzer)
+    target_link_options(hdiff_adapter_fuzz PRIVATE -fsanitize=fuzzer)
+  endif()
 
   if(BUILD_TESTING)
     add_executable(posix_storage_tests src/tests/posix_storage_tests.cpp)

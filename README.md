@@ -2,7 +2,7 @@
 
 Skyrim Runtime Swapper lets a Skyrim mod collection built for an older runtime start through the unmodified `skse64_loader.exe`. On trusted internal filesystems it restores the original Steam runtime automatically after every game session. On external, removable, exFAT, or otherwise uncertain local storage it offers a recoverable persistent downgrade instead.
 
-Current release: `1.2.0-rc9`.
+Current release: `1.2.0-rc16`.
 
 ## Profiles
 
@@ -42,13 +42,13 @@ A detached watcher locates the exact `SkyrimSE.exe` process and waits on its pro
 
 A session barrier remains active until restoration is complete. If SKSE is launched again immediately after Skyrim exits, the new launch waits for the previous watcher before it inspects or swaps any runtime files.
 
-Originals are content-addressed under `objects/<sha256>` in an automatically selected per-installation vault. Windows uses Local AppData. Linux and Proton use `$XDG_STATE_HOME`, or `$HOME/.local/state` when it is unset. The vault must be local, owned by the current user, free of symlink or reparse traversal, permission-restricted, large enough for the objects plus reserve, and on a storage backend with native file and directory synchronization.
+Originals are content-addressed under `objects/<sha256>` in an automatically selected per-installation vault. Trusted internal Steam libraries use a private volume-local `.runtime-swapper` store outside the Skyrim directory. Disposable staging normally lives under `.runtime-swapper/work/<installation-id>/<transaction-id>`, so it remains fast and same-volume without being captured by game-root VFS or overwrite managers. If a safe final file link resolves into a separate bind mount, only deterministic disposable files are staged beside that effective target; the journal and vault remain outside the deployed game tree. Other recovery vaults use Local AppData on Windows and `$XDG_STATE_HOME`, or `$HOME/.local/state`, on Linux and Proton. The vault must be local, owned by the current user, free of symlink or reparse traversal, permission-restricted, large enough for the objects plus reserve, and on a storage backend with native file and directory synchronization.
 
 Internal NTFS on Windows and internal ext4, XFS, or Btrfs on Linux use automatic per-session restoration. External or removable volumes and exFAT use persistent-only mode with a vault on another durable volume. Unknown but stable local storage requires an explicit warning confirmation. Network storage, unsafe paths, missing recovery storage, missing native helpers, and unrecognized source files are hard blocked. A hard block exposes no downgrade action.
 
-Under Wine and Proton the Windows process translates paths and coordinates a native ELF sidecar through a one-shot, nonce-authenticated, length-prefixed exchange in a randomly named private directory. The native helper restricts and validates the directory, rejects links and pre-existing responses, and publishes its response atomically. The ELF SHA-256 is embedded into the Windows binary and verified before launch. Only the native helper mutates managed files, so Linux filesystem synchronization and rename semantics are used directly.
+Under Wine and Proton the Windows process translates paths and coordinates a native ELF sidecar through a one-shot, nonce-bound, length-prefixed exchange in a randomly named private directory. The native helper restricts and validates the directory, rejects links and pre-existing responses, and publishes its response atomically. The ELF SHA-256 is embedded into the Windows binary and verified immediately before every launch attempt. Only the native helper mutates managed files, so Linux filesystem synchronization and rename semantics are used directly.
 
-The vault intent is synchronized before the game volume changes. Each live result is hashed again after replacement. Persistent markers are committed in the vault first and then in the game directory. If the active vault disappears or another device appears at a reused path, the transaction remains pending and launch is blocked instead of silently selecting a replacement vault.
+The vault intent is synchronized before the game volume changes. Each live result is hashed again after replacement. Persistent markers are committed in the vault first and then in the private target-volume workspace outside Skyrim. If the active vault disappears or another device appears at a reused path, the transaction remains pending and launch is blocked instead of silently selecting a replacement vault.
 
 The bootstrap does not use CommonLibSSE, Address Library, or the SKSE plugin API. It runs before regular SKSE plugins and before the Engine Fixes preloader.
 
@@ -74,7 +74,7 @@ build.bat Release D:\Assets\manifest.json
 
 The build fails if the asset format, algorithm, HDiffPatch version, runtime pair, required profile files, or patch hashes do not match. Bethesda game files are never included.
 
-The normal CTest suite covers journal migration, torn records, risk acceptance, vault corruption, unknown-file preservation, Unicode names, ContentCatalog conflicts, and transaction cut points. Additional guarded release-gate runners live under `tools/tests` for Windows VHDX classification and detach recovery, Linux loop filesystems, persistent exFAT and ntfs-3g activation plus restore, `dm-log-writes` replay, `dm-flakey` failures, WSL shutdowns, sidecar protocol rejection, and full runtime crash recovery with a locally supplied clean Skyrim fixture. The destructive storage runners create and validate isolated temporary images only, require explicit administrator or root execution, and never select a physical disk.
+The normal CTest suite covers journal migration, torn records, risk acceptance, vault corruption, unknown-file preservation, Unicode names, ContentCatalog conflicts, and transaction cut points. CI also verifies every recursive HDiffPatch pin, runs the adapter under ASan/UBSan and libFuzzer, and compares two clean native release builds. Additional guarded release-gate runners live under `tools/tests` for Windows VHDX classification and detach recovery, Linux loop filesystems, persistent exFAT and ntfs-3g activation plus restore, `dm-log-writes` replay, `dm-flakey` failures, WSL shutdowns, sidecar protocol rejection, and full runtime crash recovery with a locally supplied clean Skyrim fixture. The destructive storage runners create and validate isolated temporary images only, require explicit administrator or root execution, and never select a physical disk.
 
 ## Source layout
 

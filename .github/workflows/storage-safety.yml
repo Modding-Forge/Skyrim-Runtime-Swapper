@@ -5,13 +5,26 @@ on:
     branches: [master, feat/1-portable-storage-backends]
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
 
 permissions:
   contents: read
 
 jobs:
+  supply-chain:
+    name: Recursive dependency pins
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Verify exact HDiffPatch checkout
+        run: python3 tools/tests/verify-third-party-pins.py
+
   native-linux:
     name: Native Linux ${{ matrix.target }} ${{ matrix.profile }}
+    needs: supply-chain
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -34,6 +47,9 @@ jobs:
         run: cmake --build build/native --parallel
       - name: Unit and protocol tests
         run: ctest --test-dir build/native --output-on-failure
+      - name: Bind-mount transaction workspace
+        if: matrix.target == '1.6.1170' && matrix.profile == 'bobw'
+        run: sudo bash tools/tests/run-linux-bind-mount-workspace.sh build/native/posix_storage_tests
       - name: Real filesystem matrix
         if: matrix.target == '1.6.1170' && matrix.profile == 'bobw'
         run: >-
@@ -44,6 +60,96 @@ jobs:
           name: native-${{ matrix.target }}-${{ matrix.profile }}
           path: build/native/SkyrimRuntimeSwapper.Native
           if-no-files-found: error
+
+  sanitizers-and-fuzzing:
+    name: ASan, UBSan and HDiffPatch fuzzing
+    needs: supply-chain
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Configure instrumented build
+        env:
+          CC: clang
+          CXX: clang++
+        run: >-
+          cmake -S . -B build/sanitized -G Ninja
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          -DSKYRIM_RUNTIME_BUILD_FUZZER=ON
+          -DSKYRIM_RUNTIME_PATCH_MANIFEST=${{ github.workspace }}/assets/runtime/1.7.104-to-1.6.1170/manifest.json
+          -DSKYRIM_RUNTIME_BUILD_PROFILE=bobw
+      - name: Build instrumented targets
+        run: cmake --build build/sanitized --parallel
+      - name: Sanitized regression suite
+        env:
+          ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1:check_initialization_order=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build/sanitized --output-on-failure
+      - name: Prepare valid, truncated and corrupted corpus
+        run: |
+          mkdir -p build/fuzz-corpus
+          python3 - <<'PY'
+          from pathlib import Path
+          corpus = Path("build/fuzz-corpus")
+          patches = sorted(
+              Path("assets/runtime/1.7.104-to-1.6.1170").glob("**/*.hdiff"),
+              key=lambda path: path.stat().st_size,
+          )
+          valid = patches[0].read_bytes()
+          prefix = (0).to_bytes(8, "little")
+          (corpus / "valid-window-patch").write_bytes(prefix + valid)
+          (corpus / "truncated-window-patch").write_bytes(prefix + valid[:64])
+          damaged = bytearray(valid[:4096])
+          damaged[len(damaged) // 2] ^= 0x80
+          (corpus / "corrupted-window-patch").write_bytes(prefix + damaged)
+          (corpus / "random-boundaries").write_bytes(
+              (2**64 - 1).to_bytes(8, "little") + bytes(range(256))
+          )
+          PY
+      - name: Time-bounded adapter fuzzing
+        env:
+          ASAN_OPTIONS: detect_leaks=1:allocator_may_return_null=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            seconds=600
+          else
+            seconds=30
+          fi
+          build/sanitized/hdiff_adapter_fuzz \
+            -max_total_time="$seconds" -timeout=15 -rss_limit_mb=3072 \
+            build/fuzz-corpus
+
+  reproducible-linux:
+    name: Reproducible native release
+    needs: supply-chain
+    runs-on: ubuntu-24.04
+    env:
+      SOURCE_DATE_EPOCH: "1788202466"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Configure two clean builds
+        run: |
+          for build in build/repro-a build/repro-b; do
+            cmake -S . -B "$build" -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DSKYRIM_RUNTIME_PATCH_MANIFEST=${{ github.workspace }}/assets/runtime/1.7.104-to-1.6.1170/manifest.json \
+              -DSKYRIM_RUNTIME_BUILD_PROFILE=bobw
+          done
+      - name: Build and compare
+        run: |
+          cmake --build build/repro-a --target runtime_swapper_native --parallel
+          cmake --build build/repro-b --target runtime_swapper_native --parallel
+          sha256sum build/repro-a/SkyrimRuntimeSwapper.Native \
+                     build/repro-b/SkyrimRuntimeSwapper.Native
+          cmp build/repro-a/SkyrimRuntimeSwapper.Native \
+              build/repro-b/SkyrimRuntimeSwapper.Native
 
   windows:
     name: Windows ${{ matrix.target }} ${{ matrix.profile }}

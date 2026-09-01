@@ -1,6 +1,7 @@
 #include "internal/transaction_journal.hpp"
 #include "internal/fault_injection.hpp"
 
+#include <runtime_swapper/checked_arithmetic.hpp>
 #include <runtime_swapper/transaction_backend.hpp>
 
 #if defined(_WIN32)
@@ -68,7 +69,7 @@ static_assert(sizeof(DiskRecord) == 164);
 template <std::size_t Size>
 void copy_text(std::array<char, Size>& destination, std::string_view value) {
   const auto count = (std::min)(destination.size(), value.size());
-  std::memcpy(destination.data(), value.data(), count);
+  if (count != 0) std::memcpy(destination.data(), value.data(), count);
 }
 
 template <std::size_t Size>
@@ -118,6 +119,13 @@ TransactionJournal::TransactionJournal(std::filesystem::path path,
       profile_(std::move(profile)),
       to_target_(to_target),
       risk_accepted_(risk_accepted) {
+  // Keep one NUL byte for profiles. RC10 allowed the launcher-alias profile
+  // to be silently truncated, making every later recovery look like a link
+  // identity change.
+  if (profile_.empty() || profile_.size() >= DiskRecord{}.profile.size()) {
+    usable_ = false;
+    return;
+  }
   const auto existing = read_transaction_journal(path_);
   if (existing.status == JournalReadStatus::valid && !existing.records.empty()) {
     sequence_ = existing.records.back().sequence;
@@ -125,9 +133,11 @@ TransactionJournal::TransactionJournal(std::filesystem::path path,
   if (existing.status == JournalReadStatus::corrupt) {
     usable_ = false;
   } else if (existing.ignored_torn_tail) {
-    usable_ = truncate_journal(
-        path_, static_cast<std::uint64_t>(existing.records.size()) *
-                   sizeof(DiskRecord));
+    std::uint64_t valid_size{};
+    usable_ = checked_multiply(
+                  static_cast<std::uint64_t>(existing.records.size()),
+                  static_cast<std::uint64_t>(sizeof(DiskRecord)), valid_size) &&
+              truncate_journal(path_, valid_size);
   }
 }
 
@@ -149,11 +159,14 @@ bool TransactionJournal::append_batch(
   records.reserve(entries.size());
   auto next_sequence = sequence_;
   for (const auto& entry : entries) {
+    if (!checked_add(next_sequence, std::uint64_t{1}, next_sequence)) {
+      return false;
+    }
     DiskRecord record{};
     record.magic = journal_magic;
     record.version = journal_version;
     record.size = sizeof(record);
-    record.sequence = ++next_sequence;
+    record.sequence = next_sequence;
     record.file_index = entry.file_index;
     record.phase = static_cast<std::uint32_t>(entry.phase);
     record.to_target = to_target_ ? 1 : 0;
@@ -170,8 +183,9 @@ bool TransactionJournal::append_batch(
                             FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS,
                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
   if (file == INVALID_HANDLE_VALUE) return false;
-  const auto byte_count = records.size() * sizeof(DiskRecord);
-  if (byte_count > (std::numeric_limits<DWORD>::max)()) {
+  std::size_t byte_count{};
+  if (!checked_multiply(records.size(), sizeof(DiskRecord), byte_count) ||
+      byte_count > (std::numeric_limits<DWORD>::max)()) {
     CloseHandle(file);
     return false;
   }
@@ -203,7 +217,11 @@ bool TransactionJournal::append_batch(
                           S_IRUSR | S_IWUSR);
   if (file < 0) return false;
   const auto* cursor = reinterpret_cast<const std::byte*>(records.data());
-  std::size_t remaining = records.size() * sizeof(DiskRecord);
+  std::size_t remaining{};
+  if (!checked_multiply(records.size(), sizeof(DiskRecord), remaining)) {
+    (void)::close(file);
+    return false;
+  }
   bool success = true;
   while (remaining != 0) {
     const auto count = ::write(file, cursor, remaining);
@@ -236,7 +254,8 @@ bool TransactionJournal::append_batch(
   // later directory-boundary fault is reported to the caller.
   sequence_ = next_sequence;
   if (fault_injected("journal.after-file-sync")) return false;
-  const bool parent_synced = transaction_backend().sync_parent(path_);
+  const bool parent_synced =
+      static_cast<bool>(transaction_backend().sync_parent(path_));
   if (!parent_synced || fault_injected("journal.after-directory-sync")) {
     return false;
   }

@@ -144,7 +144,8 @@ class ManualOperationLock {
 
 [[nodiscard]] std::wstring status_text(const std::filesystem::path& game_root,
                                        FixedRuntimeState fixed_state,
-                                       bool fixed_target_verified) {
+                                       bool fixed_target_verified,
+                                       const BackendProbeResult& backend) {
   std::wstring status = L"Game directory:\n" + game_root.wstring() + L"\n\nProfile: " +
                         profile_name() + L"\nAvailable switch: 1.7.104 <-> " +
                         std::wstring(target_version_label) + L"\n";
@@ -165,9 +166,6 @@ class ManualOperationLock {
       status += L"invalid marker";
       break;
   }
-  const auto backend = is_wine_environment()
-                           ? run_wine_sidecar(WineSidecarOperation::probe, game_root).backend
-                           : probe_installation_storage(game_root).backend;
   status += L"\nStorage mode: " + safety_mode_label(backend.mode);
   if (!backend.vault_path.empty()) {
     status += L"\nRecovery vault: " + backend.vault_path.wstring();
@@ -183,16 +181,24 @@ class ManualOperationLock {
 
 [[nodiscard]] int show_control_panel(const std::filesystem::path& game_root) {
   for (;;) {
-    const auto fixed_state = inspect_fixed_runtime(game_root);
+    const bool wine = is_wine_environment();
+    const auto probed = wine
+                            ? run_wine_sidecar(WineSidecarOperation::probe,
+                                               game_root)
+                            : probe_installation_storage(game_root);
+    const auto fixed_state =
+        wine ? (probed.persistent
+                    ? FixedRuntimeState::active
+                    : (probed.code == ExitCode::journal_corrupt
+                           ? FixedRuntimeState::invalid
+                           : FixedRuntimeState::inactive))
+             : inspect_fixed_runtime(game_root);
     const bool fixed_target_verified =
         fixed_state == FixedRuntimeState::active &&
         target_runtime_is_active(game_root);
-    const auto content =
-        status_text(game_root, fixed_state, fixed_target_verified);
-    const auto backend = is_wine_environment()
-                             ? run_wine_sidecar(WineSidecarOperation::probe,
-                                                game_root).backend
-                             : probe_installation_storage(game_root).backend;
+    const auto content = status_text(game_root, fixed_state,
+                                     fixed_target_verified, probed.backend);
+    const auto& backend = probed.backend;
     const std::wstring switch_label =
         L"Downgrade persistently to Skyrim " + std::wstring(target_version_label);
     const std::wstring restore_label = L"Restore Skyrim 1.7.104";

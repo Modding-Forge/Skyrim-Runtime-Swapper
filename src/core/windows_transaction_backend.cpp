@@ -1,24 +1,30 @@
 #include <runtime_swapper/transaction_backend.hpp>
 
+#include <runtime_swapper/checked_arithmetic.hpp>
 #include <runtime_swapper/sha256.hpp>
 #include <runtime_swapper/release_version.hpp>
 
 #include "internal/fault_injection.hpp"
+#include "internal/windows_storage_probe.hpp"
 
 #include <windows.h>
 #include <aclapi.h>
+#include <bcrypt.h>
 #include <knownfolders.h>
 #include <shlobj.h>
 #include <winioctl.h>
+#include <winternl.h>
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstring>
 #include <cwctype>
 #include <filesystem>
 #include <functional>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -29,6 +35,39 @@ namespace runtime_swapper {
 namespace {
 
 constexpr std::uint64_t vault_reserve_bytes = 256ULL * 1024ULL * 1024ULL;
+
+[[nodiscard]] std::optional<std::wstring> random_token() {
+  std::array<unsigned char, 16> bytes{};
+  if (!BCRYPT_SUCCESS(BCryptGenRandom(
+          nullptr, bytes.data(), static_cast<ULONG>(bytes.size()),
+          BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
+    return std::nullopt;
+  }
+  constexpr wchar_t digits[] = L"0123456789abcdef";
+  std::wstring result;
+  result.reserve(bytes.size() * 2);
+  for (const auto byte : bytes) {
+    result.push_back(digits[byte >> 4U]);
+    result.push_back(digits[byte & 0x0fU]);
+  }
+  return result;
+}
+
+[[nodiscard]] std::optional<std::filesystem::path> temporary_path(
+    const std::filesystem::path& destination, std::wstring_view purpose) {
+  const auto token = random_token();
+  if (!token) return std::nullopt;
+  return destination.parent_path() /
+         (L".srs-" + std::wstring(purpose) + L"-" + *token);
+}
+
+[[nodiscard]] std::optional<std::uint64_t> required_vault_capacity(
+    std::uint64_t required_bytes) {
+  std::uint64_t total{};
+  return checked_add(required_bytes, vault_reserve_bytes, total)
+             ? std::optional(total)
+             : std::nullopt;
+}
 
 struct LocalFreeDeleter {
   void operator()(void* value) const noexcept {
@@ -201,460 +240,196 @@ static_assert(offsetof(MountPointReparseData, path_buffer) == 16);
   const DWORD error = result ? ERROR_SUCCESS : GetLastError();
   // Metadata-changing calls use write-through. Windows commonly rejects flushing a
   // directory handle with either of these two documented filesystem errors.
-  return result != FALSE || error == ERROR_INVALID_FUNCTION || error == ERROR_ACCESS_DENIED;
+  return result != FALSE || error == ERROR_INVALID_FUNCTION ||
+         error == ERROR_ACCESS_DENIED || error == ERROR_INVALID_HANDLE;
 }
 
-[[nodiscard]] std::optional<std::filesystem::path> local_app_data_path() {
-  PWSTR raw{};
-  if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, &raw))) {
-    return std::nullopt;
+struct FileIdentity {
+  DWORD volume{};
+  std::uint64_t file{};
+
+  [[nodiscard]] bool operator==(const FileIdentity&) const noexcept = default;
+};
+
+[[nodiscard]] std::optional<FileIdentity> identity_from_handle(HANDLE handle) {
+  BY_HANDLE_FILE_INFORMATION info{};
+  if (!GetFileInformationByHandle(handle, &info)) return std::nullopt;
+  return FileIdentity{
+      info.dwVolumeSerialNumber,
+      (static_cast<std::uint64_t>(info.nFileIndexHigh) << 32U) |
+          info.nFileIndexLow};
+}
+
+[[nodiscard]] UniqueHandle open_plain_file(const std::filesystem::path& path,
+                                           DWORD access) {
+  UniqueHandle handle(CreateFileW(
+      path.c_str(), access,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+      OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+  FILE_ATTRIBUTE_TAG_INFO attributes{};
+  if (!handle ||
+      !GetFileInformationByHandleEx(handle.get(), FileAttributeTagInfo,
+                                    &attributes, sizeof(attributes)) ||
+      (attributes.FileAttributes &
+       (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+    return {};
   }
-  const std::filesystem::path result(raw);
-  CoTaskMemFree(raw);
-  return result;
+  return handle;
 }
 
-[[nodiscard]] std::optional<std::filesystem::path> existing_directory_ancestor(
-    std::filesystem::path path) {
-  std::error_code error;
-  while (!path.empty()) {
-    if (std::filesystem::is_directory(path, error) && !error) return path;
-    error.clear();
-    if (path == path.root_path()) break;
-    path = path.parent_path();
+[[nodiscard]] UniqueHandle open_plain_directory(
+    const std::filesystem::path& path) {
+  UniqueHandle handle(CreateFileW(
+      path.c_str(), FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_DELETE_CHILD |
+                        FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+      OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+  FILE_ATTRIBUTE_TAG_INFO attributes{};
+  if (!handle ||
+      !GetFileInformationByHandleEx(handle.get(), FileAttributeTagInfo,
+                                    &attributes, sizeof(attributes)) ||
+      (attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+      (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+    return {};
   }
-  return std::nullopt;
+  return handle;
 }
 
-[[nodiscard]] std::optional<std::vector<std::byte>> current_user_sid() {
-  UniqueHandle token;
-  HANDLE raw_token{};
-  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw_token)) return std::nullopt;
-  token.reset(raw_token);
-  DWORD required{};
-  GetTokenInformation(token.get(), TokenUser, nullptr, 0, &required);
-  if (required == 0 || GetLastError() != ERROR_INSUFFICIENT_BUFFER) return std::nullopt;
-  std::vector<std::byte> storage(required);
-  if (!GetTokenInformation(token.get(), TokenUser, storage.data(), required, &required)) {
-    return std::nullopt;
-  }
-  const auto* user = reinterpret_cast<const TOKEN_USER*>(storage.data());
-  const DWORD sid_size = GetLengthSid(user->User.Sid);
-  std::vector<std::byte> sid(sid_size);
-  if (!CopySid(sid_size, sid.data(), user->User.Sid)) return std::nullopt;
-  return sid;
+[[nodiscard]] bool entry_matches_handle(
+    const std::filesystem::path& path, HANDLE held) {
+  auto current = open_plain_file(path, FILE_READ_ATTRIBUTES);
+  const auto held_identity = identity_from_handle(held);
+  const auto current_identity = current ? identity_from_handle(current.get())
+                                        : std::nullopt;
+  return held_identity && current_identity && *held_identity == *current_identity;
 }
 
-[[nodiscard]] bool owner_is_current_user(const std::filesystem::path& directory,
-                                         PSID current_sid) {
-  PSID owner{};
-  PSECURITY_DESCRIPTOR descriptor{};
-  const DWORD status = GetNamedSecurityInfoW(
-      const_cast<wchar_t*>(directory.c_str()), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION,
-      &owner, nullptr, nullptr, nullptr, &descriptor);
-  std::unique_ptr<void, LocalFreeDeleter> guard(descriptor);
-  return status == ERROR_SUCCESS && owner != nullptr && EqualSid(owner, current_sid) != FALSE;
+[[nodiscard]] bool directory_matches_handle(
+    const std::filesystem::path& path, HANDLE held) {
+  auto current = open_plain_directory(path);
+  const auto held_identity = identity_from_handle(held);
+  const auto current_identity = current ? identity_from_handle(current.get())
+                                        : std::nullopt;
+  return held_identity && current_identity && *held_identity == *current_identity;
 }
 
-[[nodiscard]] bool restrict_directory_acl(const std::filesystem::path& directory,
-                                          PSID current_sid) {
-  std::array<std::byte, SECURITY_MAX_SID_SIZE> system_storage{};
-  DWORD system_size = static_cast<DWORD>(system_storage.size());
-  if (!CreateWellKnownSid(WinLocalSystemSid, nullptr, system_storage.data(), &system_size)) {
+[[nodiscard]] bool flush_directory_handle(HANDLE handle) {
+  const BOOL result = FlushFileBuffers(handle);
+  const DWORD error = result ? ERROR_SUCCESS : GetLastError();
+  return result != FALSE || error == ERROR_INVALID_FUNCTION ||
+         error == ERROR_ACCESS_DENIED || error == ERROR_INVALID_HANDLE;
+}
+
+[[nodiscard]] bool rename_open_file(HANDLE source, HANDLE destination_parent,
+                                    const std::filesystem::path& name,
+                                    bool replace) {
+  const auto destination_name = name.wstring();
+  if (destination_parent == nullptr ||
+      destination_parent == INVALID_HANDLE_VALUE || destination_name.empty() ||
+      name != name.filename() || name == L"." || name == L".." ||
+      destination_name.size() >
+          (std::numeric_limits<DWORD>::max)() / sizeof(wchar_t)) {
     return false;
   }
+  const DWORD name_bytes =
+      static_cast<DWORD>(destination_name.size() * sizeof(wchar_t));
+  // FileNameLength excludes the terminator, but several Windows filesystem
+  // drivers still inspect FileName as a terminated string.
+  struct NativeRenameInformation {
+    union {
+      BOOLEAN replace_if_exists;
+      ULONG flags;
+    };
+    HANDLE root_directory;
+    ULONG file_name_length;
+    WCHAR file_name[1];
+  };
+  std::vector<std::byte> storage(offsetof(NativeRenameInformation, file_name) +
+                                 name_bytes + sizeof(wchar_t));
+  auto* info = reinterpret_cast<NativeRenameInformation*>(storage.data());
+  info->replace_if_exists = replace ? TRUE : FALSE;
+  // Resolve the destination relative to the verified directory object. A
+  // concurrent path or mount exchange therefore cannot redirect the rename.
+  info->root_directory = destination_parent;
+  info->file_name_length = name_bytes;
+  std::memcpy(info->file_name, destination_name.data(), name_bytes);
 
-  std::array<EXPLICIT_ACCESS_W, 2> access{};
-  const std::array<PSID, 2> trustees{current_sid, system_storage.data()};
-  for (std::size_t index = 0; index < access.size(); ++index) {
-    access[index].grfAccessPermissions = GENERIC_ALL;
-    access[index].grfAccessMode = SET_ACCESS;
-    access[index].grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
-    access[index].Trustee.TrusteeForm = TRUSTEE_IS_SID;
-    access[index].Trustee.TrusteeType = TRUSTEE_IS_USER;
-    access[index].Trustee.ptstrName = static_cast<LPWSTR>(trustees[index]);
-  }
-  PACL raw_acl{};
-  if (SetEntriesInAclW(static_cast<ULONG>(access.size()), access.data(), nullptr, &raw_acl) !=
-      ERROR_SUCCESS) {
+  using NtSetInformationFileFunction = NTSTATUS(NTAPI*)(
+      HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, FILE_INFORMATION_CLASS);
+  using RtlNtStatusToDosErrorFunction = ULONG(WINAPI*)(NTSTATUS);
+  static const auto nt_set_information_file =
+      reinterpret_cast<NtSetInformationFileFunction>(GetProcAddress(
+          GetModuleHandleW(L"ntdll.dll"), "NtSetInformationFile"));
+  static const auto nt_status_to_dos_error =
+      reinterpret_cast<RtlNtStatusToDosErrorFunction>(GetProcAddress(
+          GetModuleHandleW(L"ntdll.dll"), "RtlNtStatusToDosError"));
+  if (nt_set_information_file == nullptr || nt_status_to_dos_error == nullptr) {
+    SetLastError(ERROR_PROC_NOT_FOUND);
     return false;
   }
-  std::unique_ptr<void, LocalFreeDeleter> acl(raw_acl);
-  return SetNamedSecurityInfoW(
-             const_cast<wchar_t*>(directory.c_str()), SE_FILE_OBJECT,
-             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION |
-                 PROTECTED_DACL_SECURITY_INFORMATION,
-             current_sid, nullptr, raw_acl, nullptr) == ERROR_SUCCESS;
+  IO_STATUS_BLOCK io_status{};
+  constexpr auto file_rename_information =
+      static_cast<FILE_INFORMATION_CLASS>(10);
+  const NTSTATUS status = nt_set_information_file(
+      source, &io_status, info, static_cast<ULONG>(storage.size()),
+      file_rename_information);
+  if (status < 0) {
+    SetLastError(nt_status_to_dos_error(status));
+    return false;
+  }
+  return true;
 }
 
-[[nodiscard]] bool directory_dacl_is_restricted(
-    const std::filesystem::path& directory, PSID current_sid) {
-  PSID owner{};
-  PACL dacl{};
-  PSECURITY_DESCRIPTOR descriptor{};
-  const DWORD status = GetNamedSecurityInfoW(
-      const_cast<wchar_t*>(directory.c_str()), SE_FILE_OBJECT,
-      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, nullptr,
-      &dacl, nullptr, &descriptor);
-  std::unique_ptr<void, LocalFreeDeleter> guard(descriptor);
-  if (status != ERROR_SUCCESS || owner == nullptr || dacl == nullptr ||
-      EqualSid(owner, current_sid) == FALSE) {
+[[nodiscard]] bool copy_handle_contents(HANDLE source, HANDLE destination) {
+  LARGE_INTEGER beginning{};
+  if (!SetFilePointerEx(source, beginning, nullptr, FILE_BEGIN) ||
+      !SetFilePointerEx(destination, beginning, nullptr, FILE_BEGIN) ||
+      !SetEndOfFile(destination)) {
     return false;
   }
-  SECURITY_DESCRIPTOR_CONTROL control{};
-  DWORD revision{};
-  if (!GetSecurityDescriptorControl(descriptor, &control, &revision) ||
-      (control & SE_DACL_PROTECTED) == 0) {
-    return false;
-  }
-
-  std::array<std::byte, SECURITY_MAX_SID_SIZE> system_storage{};
-  DWORD system_size = static_cast<DWORD>(system_storage.size());
-  if (!CreateWellKnownSid(WinLocalSystemSid, nullptr, system_storage.data(),
-                          &system_size)) {
-    return false;
-  }
-  bool user_allowed = false;
-  bool system_allowed = false;
-  for (DWORD index = 0; index < dacl->AceCount; ++index) {
-    void* raw_ace{};
-    if (!GetAce(dacl, index, &raw_ace)) return false;
-    const auto* header = static_cast<const ACE_HEADER*>(raw_ace);
-    if (header->AceType == ACCESS_DENIED_ACE_TYPE) continue;
-    if (header->AceType != ACCESS_ALLOWED_ACE_TYPE) return false;
-    const auto* ace = static_cast<const ACCESS_ALLOWED_ACE*>(raw_ace);
-    auto* sid = const_cast<DWORD*>(&ace->SidStart);
-    if (EqualSid(sid, current_sid) != FALSE) {
-      user_allowed = true;
-    } else if (EqualSid(sid, system_storage.data()) != FALSE) {
-      system_allowed = true;
-    } else {
+  // Keep the large sequential-copy buffer off the default 1 MiB Windows
+  // thread stack.  Watcher and test processes may have no spare stack at all.
+  std::vector<std::byte> buffer(1024 * 1024);
+  for (;;) {
+    DWORD read{};
+    if (!ReadFile(source, buffer.data(), static_cast<DWORD>(buffer.size()),
+                  &read, nullptr)) {
       return false;
     }
-  }
-  return user_allowed && system_allowed;
-}
-
-[[nodiscard]] std::wstring volume_device_path(std::wstring volume_root,
-                                               std::wstring volume_guid) {
-  if (volume_root.size() == 3 && volume_root[1] == L':' &&
-      (volume_root[2] == L'\\' || volume_root[2] == L'/')) {
-    return L"\\\\.\\" + volume_root.substr(0, 2);
-  }
-  if (!volume_guid.empty() && volume_guid.back() == L'\\') volume_guid.pop_back();
-  return volume_guid;
-}
-
-[[nodiscard]] bool volume_is_system_volume(std::wstring_view volume_root) {
-  std::array<wchar_t, MAX_PATH> windows_directory{};
-  std::array<wchar_t, MAX_PATH> windows_volume{};
-  return GetWindowsDirectoryW(windows_directory.data(),
-                              static_cast<UINT>(windows_directory.size())) != 0 &&
-         GetVolumePathNameW(windows_directory.data(), windows_volume.data(),
-                            static_cast<DWORD>(windows_volume.size())) &&
-         equal_ordinal(volume_root, windows_volume.data());
-}
-
-[[nodiscard]] StorageMedium query_medium(std::wstring_view volume_root,
-                                         std::wstring_view volume_guid,
-                                         UINT drive_type) {
-  if (drive_type == DRIVE_REMOTE) return StorageMedium::network;
-  if (drive_type == DRIVE_REMOVABLE || drive_type == DRIVE_CDROM) {
-    return StorageMedium::removable;
-  }
-  if (drive_type != DRIVE_FIXED) return StorageMedium::unknown;
-
-  const auto device = volume_device_path(std::wstring(volume_root),
-                                         std::wstring(volume_guid));
-  UniqueHandle handle(CreateFileW(device.c_str(), 0,
-                                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                  nullptr, OPEN_EXISTING, 0, nullptr));
-  if (handle) {
-    STORAGE_HOTPLUG_INFO hotplug{};
-    hotplug.Size = sizeof(hotplug);
-    DWORD hotplug_returned{};
-    if (DeviceIoControl(handle.get(), IOCTL_STORAGE_GET_HOTPLUG_INFO, nullptr, 0,
-                        &hotplug, sizeof(hotplug), &hotplug_returned, nullptr) &&
-        hotplug_returned >= sizeof(hotplug)) {
-      if (hotplug.MediaRemovable != FALSE) return StorageMedium::removable;
-      if (hotplug.DeviceHotplug != FALSE) return StorageMedium::external;
-    }
-    STORAGE_PROPERTY_QUERY query{};
-    query.PropertyId = StorageDeviceProperty;
-    query.QueryType = PropertyStandardQuery;
-    std::array<std::byte, 1024> bytes{};
-    DWORD returned{};
-    if (DeviceIoControl(handle.get(), IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query),
-                        bytes.data(), static_cast<DWORD>(bytes.size()), &returned, nullptr) &&
-        returned >= sizeof(STORAGE_DEVICE_DESCRIPTOR)) {
-      const auto* descriptor =
-          reinterpret_cast<const STORAGE_DEVICE_DESCRIPTOR*>(bytes.data());
-      if (descriptor->RemovableMedia != FALSE) return StorageMedium::removable;
-      switch (descriptor->BusType) {
-        case BusTypeUsb:
-        case BusType1394:
-        case BusTypeSd:
-        case BusTypeMmc:
-          return StorageMedium::external;
-        case BusTypeScsi:
-        case BusTypeAtapi:
-        case BusTypeAta:
-        case BusTypeSata:
-        case BusTypeSas:
-        case BusTypeNvme:
-        case BusTypeRAID:
-          return StorageMedium::internal;
-        case BusTypeVirtual:
-        case BusTypeFileBackedVirtual:
-          return StorageMedium::unknown;
-        default:
-          break;
+    if (read == 0) break;
+    DWORD offset{};
+    while (offset < read) {
+      DWORD written{};
+      if (!WriteFile(destination, buffer.data() + offset, read - offset,
+                     &written, nullptr) ||
+          written == 0) {
+        return false;
       }
+      offset += written;
     }
   }
-  // The system volume is a safe fallback when storage-property access is restricted.
-  // Other fixed volumes remain unclassified and require an explicit warning.
-  return volume_is_system_volume(volume_root) ? StorageMedium::internal
-                                               : StorageMedium::unknown;
+  return FlushFileBuffers(destination) != FALSE;
 }
 
-[[nodiscard]] std::optional<VolumeIdentity> inspect_volume(
-    const std::filesystem::path& path) {
-  std::error_code error;
-  const auto absolute = std::filesystem::absolute(path, error);
-  if (error || !absolute.is_absolute()) return std::nullopt;
-
-  std::array<wchar_t, MAX_PATH> root{};
-  if (!GetVolumePathNameW(absolute.c_str(), root.data(),
-                          static_cast<DWORD>(root.size()))) {
-    return std::nullopt;
+void discard_open_file(HANDLE file) noexcept {
+  if (file == nullptr || file == INVALID_HANDLE_VALUE) return;
+  FILE_DISPOSITION_INFO_EX disposition{
+      FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS |
+      FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE};
+  if (!SetFileInformationByHandle(file, FileDispositionInfoEx, &disposition,
+                                  sizeof(disposition))) {
+    FILE_DISPOSITION_INFO legacy{TRUE};
+    (void)SetFileInformationByHandle(file, FileDispositionInfo, &legacy,
+                                     sizeof(legacy));
   }
-  std::array<wchar_t, MAX_PATH> guid{};
-  const bool stable = GetVolumeNameForVolumeMountPointW(
-                          root.data(), guid.data(), static_cast<DWORD>(guid.size())) != FALSE;
-  std::array<wchar_t, 64> filesystem{};
-  DWORD serial{};
-  DWORD flags{};
-  if (!GetVolumeInformationW(root.data(), nullptr, 0, &serial, nullptr, &flags,
-                             filesystem.data(), static_cast<DWORD>(filesystem.size()))) {
-    return std::nullopt;
-  }
-  const UINT drive_type = GetDriveTypeW(root.data());
-  const auto medium = query_medium(root.data(), stable ? guid.data() : L"", drive_type);
-  const bool local = drive_type != DRIVE_REMOTE && drive_type != DRIVE_NO_ROOT_DIR &&
-                     drive_type != DRIVE_UNKNOWN;
-  const bool ntfs = equal_ordinal(filesystem.data(), L"NTFS");
-  const bool native_durability = local && ntfs && medium == StorageMedium::internal;
-
-  std::wstring stable_id;
-  if (stable) {
-    stable_id = guid.data();
-  } else {
-    wchar_t serial_text[16]{};
-    swprintf_s(serial_text, L"%08lx", serial);
-    stable_id = L"serial:" + std::wstring(serial_text);
-  }
-  std::wstring description = filesystem.data();
-  description += L" on ";
-  description += root.data();
-  switch (medium) {
-    case StorageMedium::internal:
-      description += L" (internal)";
-      break;
-    case StorageMedium::external:
-      description += L" (external)";
-      break;
-    case StorageMedium::removable:
-      description += L" (removable)";
-      break;
-    case StorageMedium::network:
-      description += L" (network)";
-      break;
-    case StorageMedium::unknown:
-      description += L" (unclassified)";
-      break;
-  }
-  return VolumeIdentity{stable_id, filesystem.data(), std::move(description), medium,
-                        local, stable, native_durability};
 }
 
-[[nodiscard]] std::optional<std::string> utf8_lower(std::wstring value) {
-  std::ranges::transform(value, value.begin(), [](wchar_t character) {
-    return static_cast<wchar_t>(std::towlower(character));
-  });
-  const int required = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(),
-                                           static_cast<int>(value.size()), nullptr, 0,
-                                           nullptr, nullptr);
-  if (required <= 0) return std::nullopt;
-  std::string result(static_cast<std::size_t>(required), '\0');
-  if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(),
-                          static_cast<int>(value.size()), result.data(), required, nullptr,
-                          nullptr) != required) {
-    return std::nullopt;
-  }
-  return result;
-}
-
-[[nodiscard]] std::string utf8_path(const std::filesystem::path& path) {
-  const auto value = path.generic_u8string();
-  return std::string(reinterpret_cast<const char*>(value.data()), value.size());
-}
-
-[[nodiscard]] std::string locator_contents(
-    std::string_view id, const std::filesystem::path& vault,
-    const VolumeIdentity& vault_volume) {
-  return "SRS-VAULT-LOCATOR-1\ninstallation=" + std::string(id) +
-         "\nvault=" + utf8_path(vault) + "\nvolume=" +
-         utf8_path(vault_volume.stable_id) + "\n";
-}
-
-[[nodiscard]] bool locator_matches(const std::filesystem::path& locator,
-                                   std::string_view id,
-                                   const std::filesystem::path& vault,
-                                   const VolumeIdentity& vault_volume) {
-  std::ifstream stream(locator, std::ios::binary);
-  if (!stream) return false;
-  const std::string text(std::istreambuf_iterator<char>(stream), {});
-  return !stream.bad() && text == locator_contents(id, vault, vault_volume);
-}
-
-[[nodiscard]] std::optional<std::filesystem::path> locator_vault_path(
-    const std::filesystem::path& locator, std::string_view id) {
-  std::ifstream stream(locator, std::ios::binary);
-  std::string magic;
-  std::string installation;
-  std::string vault;
-  if (!std::getline(stream, magic) || !std::getline(stream, installation) ||
-      !std::getline(stream, vault) || magic != "SRS-VAULT-LOCATOR-1" ||
-      installation != "installation=" + std::string(id) ||
-      !vault.starts_with("vault=")) {
-    return std::nullopt;
-  }
-  const auto encoded = vault.substr(6);
-  const std::u8string utf8(reinterpret_cast<const char8_t*>(encoded.data()),
-                           encoded.size());
-  auto path = std::filesystem::path(utf8);
-  return path.is_absolute() ? std::optional(path.lexically_normal())
-                            : std::nullopt;
-}
-
-[[nodiscard]] std::optional<std::filesystem::path> steam_library_root(
-    const std::filesystem::path& game_root) {
-  const auto common = game_root.parent_path();
-  const auto steamapps = common.parent_path();
-  if (!equal_ordinal(common.filename().wstring(), L"common") ||
-      !equal_ordinal(steamapps.filename().wstring(), L"steamapps") ||
-      steamapps.parent_path().empty()) {
-    return std::nullopt;
-  }
-  return steamapps.parent_path();
-}
-
-[[nodiscard]] bool vault_manifest_identity_matches(
-    const std::filesystem::path& vault, std::string_view id,
-    const VolumeIdentity& target_volume, const VolumeIdentity& vault_volume) {
-  const auto manifest = vault / L"manifest.v2";
-  std::error_code error;
-  if (!std::filesystem::is_regular_file(manifest, error) || error ||
-      path_has_unsupported_reparse_component(manifest)) {
-    return false;
-  }
-  std::ifstream stream(manifest, std::ios::binary);
-  std::array<std::string, 6> lines;
-  for (auto& line : lines) {
-    if (!std::getline(stream, line)) return false;
-  }
-  return lines[0] == "SRS-VAULT-MANIFEST-2" &&
-         lines[1] == "installation=" + std::string(id) &&
-         lines[2].starts_with("source=") && lines[2].size() > 7 &&
-         lines[3].starts_with("target=") && lines[3].size() > 7 &&
-         lines[4] == "targetVolume=" + utf8_path(target_volume.stable_id) &&
-         lines[5] == "vaultVolume=" + utf8_path(vault_volume.stable_id);
-}
-
-[[nodiscard]] std::optional<std::string> installation_id(
-    const std::filesystem::path& game_root, const VolumeIdentity& volume) {
-  std::array<wchar_t, MAX_PATH> root{};
-  if (!GetVolumePathNameW(game_root.c_str(), root.data(),
-                          static_cast<DWORD>(root.size()))) {
-    return std::nullopt;
-  }
-  std::error_code error;
-  const auto relative = std::filesystem::relative(game_root, root.data(), error);
-  if (error || relative.empty() || relative.native().starts_with(L"..")) {
-    return std::nullopt;
-  }
-  auto identity = utf8_lower(volume.stable_id + L"\n" + relative.generic_wstring());
-  if (!identity) return std::nullopt;
-  const auto hash = sha256_string(*identity);
-  if (!hash) return std::nullopt;
-  return "skyrimse-" + hash->substr(0, 16);
-}
-
-[[nodiscard]] bool has_free_space(const std::filesystem::path& path,
-                                  std::uint64_t required) {
-  ULARGE_INTEGER available{};
-  return GetDiskFreeSpaceExW(path.c_str(), &available, nullptr, nullptr) &&
-         available.QuadPart >= required;
-}
-
-[[nodiscard]] std::wstring mode_reason(SafetyMode mode) {
-  switch (mode) {
-    case SafetyMode::automatic:
-      return L"The game volume provides the native durability required for per-session "
-             L"activation and automatic restoration.";
-    case SafetyMode::persistent_only:
-      return L"The game volume is external, removable, or exFAT. Verified recovery is "
-             L"available, but automatic restoration is not considered safe.";
-    case SafetyMode::persistent_with_warning:
-      return L"The local game filesystem or storage bus could not be fully classified. "
-             L"Verified recovery is available on an independent durable volume.";
-    case SafetyMode::hard_blocked:
-      return L"No write operation can be made recoverable with the available storage.";
-  }
-  return {};
-}
-
-[[nodiscard]] StorageOperation operations_for(SafetyMode mode) noexcept {
-  const auto persistent = StorageOperation::activate_persistent |
-                          StorageOperation::restore_persistent |
-                          StorageOperation::recover;
-  return mode == SafetyMode::automatic
-             ? persistent | StorageOperation::activate_session
-             : (mode == SafetyMode::hard_blocked ? StorageOperation::none : persistent);
-}
-
-[[nodiscard]] BackendProbeResult blocked(std::wstring technical,
-                                         std::wstring message,
-                                         VolumeIdentity target = {},
-                                         VolumeIdentity vault = {},
-                                         std::filesystem::path vault_path = {},
-                                         std::string installation = {}) {
-  return {ExitCode::unsupported_filesystem,
-          SafetyMode::hard_blocked,
-          std::move(target),
-          std::move(vault),
-          std::move(vault_path),
-          std::move(installation),
-          L"Hard blocked",
-          std::move(technical),
-          std::move(message),
-          StorageOperation::none};
-}
-
-[[nodiscard]] BackendProbeResult attach_storage_paths(
-    BackendProbeResult result, const std::filesystem::path& base,
-    std::string_view installation) {
-  result.recovery_vault.value = result.vault_path;
-  result.target_cache.value =
-      base / L"cache" /
-      std::filesystem::path(patch_plan_hash_utf8.begin(),
-                            patch_plan_hash_utf8.begin() + 16);
-  result.coordination_lock.value =
-      base / L"locks" /
-      (std::filesystem::path(installation.begin(), installation.end()).wstring() +
-       L".lock");
-  return result;
+[[nodiscard]] MutationResult windows_failure(MutationStep step,
+                                             MutationState state) {
+  return MutationResult::failure(
+      step, state, std::error_code(static_cast<int>(GetLastError()),
+                                   std::system_category()));
 }
 
 class WindowsTransactionBackend final : public TransactionBackend {
@@ -662,271 +437,120 @@ class WindowsTransactionBackend final : public TransactionBackend {
   BackendProbeResult probe(const std::filesystem::path& managed_root,
                            std::uint64_t required_vault_bytes,
                            bool prepare_vault) override {
-    if (is_wine_environment()) {
-      return blocked(
-          L"wine-native-sidecar-required",
-          L"The verified native Linux storage helper is unavailable. No managed file was "
-          L"changed.");
-    }
-
-    std::error_code error;
-    const auto requested = std::filesystem::absolute(managed_root, error);
-    if (error || !requested.is_absolute() ||
-        path_has_unsupported_reparse_component(requested)) {
-      return blocked(L"unsafe-target-path",
-                     L"The managed path is not an absolute local path or contains a "
-                     L"symlink, junction, or reparse point.");
-    }
-    const auto absolute = std::filesystem::weakly_canonical(requested, error);
-    if (error || !absolute.is_absolute() ||
-        path_has_unsupported_reparse_component(absolute)) {
-      return blocked(L"unsafe-target-path",
-                     L"The managed path could not be resolved without reparse traversal.");
-    }
-    auto target = inspect_volume(absolute);
-    if (!target) {
-      return blocked(L"target-volume-unavailable",
-                     L"The game volume could not be identified safely.");
-    }
-    if (!target->local || target->medium == StorageMedium::network) {
-      return blocked(L"network-target",
-                     L"Network shares are not recoverable after a disconnected or partial "
-                     L"transaction.", *target);
-    }
-    if (!target->stable) {
-      return blocked(L"unstable-target-identity",
-                     L"The game volume has no stable identity, so recovery could target the "
-                     L"wrong device.", *target);
-    }
-
-    const auto id = installation_id(absolute, *target);
-    const auto state_root = local_app_data_path();
-    if (!id || !state_root) {
-      return blocked(L"state-directory-unavailable",
-                     L"Windows Local AppData could not be resolved for the recovery vault.",
-                     *target);
-    }
-    const auto system_base = *state_root / L"Modding Forge" /
-                             L"Skyrim Runtime Swapper";
-    const auto local_base = target->medium == StorageMedium::internal &&
-                                    target->native_durability
-                                ? steam_library_root(absolute)
-                                : std::nullopt;
-    const auto storage_base = local_base
-                                  ? *local_base / L".runtime-swapper"
-                                  : system_base;
-    auto vault_path = local_base
-                          ? storage_base / L"recovery" /
-                                std::filesystem::path(id->begin(), id->end()) /
-                                L"active"
-                          : system_base / L"Vaults" /
-                                std::filesystem::path(id->begin(), id->end());
-    const auto locator = absolute / L".skyrim-runtime-swapper" / L"vault.locator";
-    const auto locator_status = std::filesystem::symlink_status(locator, error);
-    const bool locator_exists = !error && std::filesystem::exists(locator_status);
-    if (error && error != std::errc::no_such_file_or_directory) {
-      return blocked(L"vault-locator-unreadable",
-                     L"The active recovery-vault locator could not be inspected.", *target,
-                     {}, vault_path, *id);
-    }
-    std::optional<std::filesystem::path> recorded_vault;
-    if (locator_exists) {
-      recorded_vault = locator_vault_path(locator, *id);
-      const auto& recorded = recorded_vault;
-      if (recorded) {
-        if (path_has_unsupported_reparse_component(recorded->parent_path())) {
-          return blocked(L"active-vault-locator-invalid",
-                         L"The active recovery-vault locator is invalid.",
-                         *target, {}, vault_path, *id);
-        }
-        vault_path = *recorded;
-      }
-    }
-    error.clear();
-    const bool vault_exists = std::filesystem::is_directory(vault_path, error) && !error;
-    if (recorded_vault && !vault_exists) {
-      return blocked(L"active-vault-directory-missing",
-                     L"The recorded recovery-vault directory is missing.",
-                     *target, {}, vault_path, *id);
-    }
-    if (recorded_vault &&
-        !std::filesystem::is_regular_file(vault_path / L"manifest.v2", error)) {
-      return blocked(L"active-vault-manifest-missing",
-                     L"The recorded recovery-vault manifest is missing.",
-                     *target, {}, vault_path, *id);
-    }
-    error.clear();
-    if (path_has_unsupported_reparse_component(vault_path.parent_path())) {
-      return blocked(L"vault-parent-reparse",
-                     L"The automatic recovery-vault path contains a junction or reparse "
-                     L"point.", *target, {}, vault_path, *id);
-    }
-    const auto vault_anchor = vault_exists
-                                  ? std::optional(vault_path)
-                                  : existing_directory_ancestor(storage_base);
-    auto vault = vault_anchor ? inspect_volume(*vault_anchor) : std::nullopt;
-    const bool locator_matches_vault =
-        locator_exists && std::filesystem::is_regular_file(locator_status) &&
-        vault_exists && vault && locator_matches(locator, *id, vault_path, *vault);
-    const bool locator_recoverable =
-        locator_exists && std::filesystem::is_regular_file(locator_status) &&
-        vault_exists && vault && !locator_matches_vault &&
-        vault_manifest_identity_matches(vault_path, *id, *target, *vault);
-    if (locator_exists && !locator_matches_vault && !locator_recoverable) {
-      return blocked(L"active-vault-unavailable",
-                     L"The recorded recovery vault is missing, changed, or unavailable. "
-                     L"The pending installation will not be redirected to a new vault.",
-                     *target, {}, vault_path, *id);
-    }
-    if (!vault || !vault->local || !vault->stable || !vault->native_durability) {
-      return blocked(L"vault-volume-not-durable",
-                     L"The automatic recovery vault is not on a stable internal NTFS "
-                     L"volume.", *target, vault.value_or(VolumeIdentity{}), vault_path, *id);
-    }
-    if (!vault_anchor || !has_free_space(*vault_anchor,
-                        required_vault_bytes + vault_reserve_bytes)) {
-      return blocked(L"vault-insufficient-space",
-                     L"The recovery vault does not have enough free space including the "
-                     L"safety reserve.", *target, *vault, vault_path, *id);
-    }
-    const bool candidate_different = target->stable_id != vault->stable_id;
-    const auto candidate_mode = classify_storage(*target, *vault,
-                                                 candidate_different);
-    if (candidate_mode == SafetyMode::hard_blocked) {
-      return blocked(L"independent-vault-required",
-                     L"This game volume requires a recovery vault on a different durable "
-                     L"physical volume, but the automatic vault resolves to the same volume.",
-                     *target, *vault, vault_path, *id);
-    }
-
-    const auto sid = current_user_sid();
-    auto* current_sid =
-        sid ? static_cast<PSID>(const_cast<std::byte*>(sid->data())) : nullptr;
-    if (vault_exists &&
-        (!current_sid ||
-         !directory_dacl_is_restricted(vault_path, current_sid))) {
-      return blocked(L"vault-owner-or-dacl",
-                     L"The recovery vault is not controlled by the current Windows user.",
-                     *target, *vault, vault_path, *id);
-    }
-    if (!prepare_vault) {
-      return attach_storage_paths({ExitCode::success,
-              candidate_mode,
-              *target,
-              *vault,
-              vault_path,
-              *id,
-              safety_mode_label(candidate_mode) + L": " + target->description,
-              candidate_mode == SafetyMode::automatic
-                  ? L"native-session-durability"
-                  : (candidate_mode == SafetyMode::persistent_only
-                         ? L"persistent-recovery-required"
-                         : L"unclassified-local-storage"),
-              mode_reason(candidate_mode),
-              operations_for(candidate_mode)}, storage_base, *id);
-    }
-
-    std::filesystem::create_directories(vault_path, error);
-    if (error || path_has_unsupported_reparse_component(vault_path)) {
-      return blocked(L"vault-create-failed",
-                     L"The automatic recovery vault could not be created safely.", *target,
-                     {}, vault_path, *id);
-    }
-    if (!current_sid || !restrict_directory_acl(vault_path, current_sid) ||
-        !owner_is_current_user(vault_path, current_sid) ||
-        !directory_dacl_is_restricted(vault_path, current_sid)) {
-      return blocked(L"vault-owner-or-dacl",
-                     L"The recovery vault is not exclusively controlled by the current "
-                     L"Windows user.", *target, {}, vault_path, *id);
-    }
-    vault = inspect_volume(vault_path);
-    if (!vault || !vault->local || !vault->stable || !vault->native_durability) {
-      return blocked(L"vault-volume-not-durable",
-                     L"The automatic recovery vault is not on a stable internal NTFS "
-                     L"volume.", *target, vault.value_or(VolumeIdentity{}), vault_path, *id);
-    }
-    if (!has_free_space(vault_path, required_vault_bytes + vault_reserve_bytes)) {
-      return blocked(L"vault-insufficient-space",
-                     L"The recovery vault does not have enough free space including the "
-                     L"safety reserve.", *target, *vault, vault_path, *id);
-    }
-
-    const bool different = target->stable_id != vault->stable_id;
-    const auto mode = classify_storage(*target, *vault, different);
-    if (mode == SafetyMode::hard_blocked) {
-      return blocked(L"independent-vault-required",
-                     L"This game volume requires a recovery vault on a different durable "
-                     L"physical volume, but the automatic vault resolves to the same volume.",
-                     *target, *vault, vault_path, *id);
-    }
-
-    if (locator_recoverable &&
-        (!write_atomic(locator, locator_contents(*id, vault_path, *vault)) ||
-         !locator_matches(locator, *id, vault_path, *vault))) {
-      return blocked(L"vault-locator-repair-failed",
-                     L"The verified recovery vault was found, but its damaged locator "
-                     L"could not be repaired.", *target, *vault, vault_path, *id);
-    }
-
-    return attach_storage_paths({ExitCode::success,
-            mode,
-            *target,
-            *vault,
-            vault_path,
-            *id,
-            safety_mode_label(mode) + L": " + target->description,
-            mode == SafetyMode::automatic ? L"native-session-durability"
-                                          : (mode == SafetyMode::persistent_only
-                                                 ? L"persistent-recovery-required"
-                                                 : L"unclassified-local-storage"),
-            mode_reason(mode),
-            operations_for(mode)}, storage_base, *id);
+    return probe_windows_storage(*this, managed_root, required_vault_bytes,
+                                 prepare_vault);
   }
 
-  bool flush_file(const std::filesystem::path& file) override {
-    if (core::fault_injected("file.before-flush")) return false;
-    if (path_has_unsupported_reparse_component(file)) return false;
-    const bool flushed = flush_existing_file(file);
-    return flushed && !core::fault_injected("file.after-flush");
+  MutationResult prepare_coordination_lock(
+      const CoordinationLockPath& resolved_lock) override {
+    return prepare_windows_coordination_lock(resolved_lock);
   }
 
-  bool atomic_replace(const std::filesystem::path& live,
+  bool atomic_rename_compatible(
+      const std::filesystem::path& left,
+      const std::filesystem::path& right) override {
+    return same_volume(left, right);
+  }
+
+  MutationResult flush_file(const std::filesystem::path& file) override {
+    if (core::fault_injected("file.before-flush")) {
+      return MutationResult::failure(MutationStep::flush_file,
+                                     MutationState::untouched);
+    }
+    if (path_has_unsupported_reparse_component(file)) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
+    }
+    auto opened = open_plain_file(file, GENERIC_READ | GENERIC_WRITE);
+    if (!opened || !entry_matches_handle(file, opened.get()) ||
+        !FlushFileBuffers(opened.get())) {
+      return windows_failure(MutationStep::flush_file,
+                             MutationState::untouched);
+    }
+    if (core::fault_injected("file.after-flush")) {
+      return MutationResult::failure(MutationStep::flush_file,
+                                     MutationState::file_durable);
+    }
+    return MutationResult::success(MutationState::file_durable);
+  }
+
+  MutationResult atomic_replace(const std::filesystem::path& live,
                       const std::filesystem::path& staged,
                       const std::filesystem::path& rollback) override {
-    if (core::fault_injected("replace.before")) return false;
+    if (core::fault_injected("replace.before")) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
+    }
     std::error_code error;
     std::filesystem::create_directories(rollback.parent_path(), error);
     if (error || path_has_unsupported_reparse_component(live) ||
         path_has_unsupported_reparse_component(staged) ||
         path_has_unsupported_reparse_component(rollback.parent_path()) ||
-        !same_volume(live, staged) || !same_volume(live, rollback)) return false;
-    std::filesystem::remove(rollback, error);
-    error.clear();
-    if (!ReplaceFileW(live.c_str(), staged.c_str(), rollback.c_str(),
-                      REPLACEFILE_WRITE_THROUGH, nullptr, nullptr)) {
-      error.clear();
-      if (!std::filesystem::is_regular_file(live, error) || error ||
-          !std::filesystem::is_regular_file(staged, error) || error ||
-          std::filesystem::exists(rollback, error) || error ||
-          !MoveFileExW(live.c_str(), rollback.c_str(), MOVEFILE_WRITE_THROUGH) ||
-          !flush_existing_file(rollback) ||
-          !attempt_directory_flush(rollback.parent_path())) {
-        return false;
-      }
-      if (core::fault_injected("replace.after-source-move")) return false;
-      if (!MoveFileExW(staged.c_str(), live.c_str(), MOVEFILE_WRITE_THROUGH)) {
-        (void)MoveFileExW(rollback.c_str(), live.c_str(), MOVEFILE_WRITE_THROUGH);
-        return false;
-      }
+        !same_volume(live, staged) || !same_volume(live, rollback)) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
     }
-    if (core::fault_injected("replace.after-rename")) return false;
-    const bool synced = flush_existing_file(live) &&
-                        attempt_directory_flush(live.parent_path()) &&
-                        attempt_directory_flush(rollback.parent_path());
-    return synced && !core::fault_injected("replace.after-sync");
+    if (std::filesystem::exists(rollback, error) || error) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
+    }
+    auto live_parent = open_plain_directory(live.parent_path());
+    auto staged_parent = open_plain_directory(staged.parent_path());
+    auto rollback_parent = open_plain_directory(rollback.parent_path());
+    auto live_file = open_plain_file(live, DELETE | GENERIC_READ | GENERIC_WRITE);
+    auto staged_file = open_plain_file(staged, DELETE | GENERIC_READ | GENERIC_WRITE);
+    if (!live_parent || !staged_parent || !rollback_parent || !live_file ||
+        !staged_file || !directory_matches_handle(live.parent_path(), live_parent.get()) ||
+        !directory_matches_handle(staged.parent_path(), staged_parent.get()) ||
+        !directory_matches_handle(rollback.parent_path(), rollback_parent.get()) ||
+        !entry_matches_handle(live, live_file.get()) ||
+        !entry_matches_handle(staged, staged_file.get()) ||
+        !FlushFileBuffers(staged_file.get())) {
+      return windows_failure(MutationStep::validate,
+                             MutationState::untouched);
+    }
+    (void)core::fault_injected("replace.after-resolve");
+    if (!rename_open_file(live_file.get(), rollback_parent.get(),
+                          rollback.filename(), false)) {
+      return windows_failure(MutationStep::move_source,
+                             MutationState::untouched);
+    }
+    if (!flush_directory_handle(rollback_parent.get())) {
+      return windows_failure(MutationStep::flush_directory,
+                             MutationState::source_relocated);
+    }
+    if (core::fault_injected("replace.after-source-move")) {
+      return MutationResult::failure(MutationStep::move_source,
+                                     MutationState::source_relocated);
+    }
+    if (!rename_open_file(staged_file.get(), live_parent.get(), live.filename(),
+                          false)) {
+      (void)rename_open_file(live_file.get(), live_parent.get(), live.filename(),
+                             false);
+      return windows_failure(MutationStep::install_replacement,
+                             MutationState::source_relocated);
+    }
+    if (core::fault_injected("replace.after-rename")) {
+      return MutationResult::failure(MutationStep::install_replacement,
+                                     MutationState::replacement_installed);
+    }
+    // Both file contents were flushed before either rename.  After a
+    // handle-based rename some Windows filesystems reject FlushFileBuffers on
+    // that same handle with ERROR_INVALID_HANDLE.  Only directory metadata
+    // remains to be made durable here.
+    if (!flush_directory_handle(live_parent.get()) ||
+        !flush_directory_handle(rollback_parent.get())) {
+      return windows_failure(MutationStep::flush_directory,
+                             MutationState::replacement_installed);
+    }
+    if (core::fault_injected("replace.after-sync")) {
+      return MutationResult::failure(MutationStep::flush_directory,
+                                     MutationState::fully_durable);
+    }
+    return MutationResult::success();
   }
 
-  bool atomic_install(const std::filesystem::path& staged,
+  MutationResult atomic_install(const std::filesystem::path& staged,
                       const std::filesystem::path& live) override {
     std::error_code error;
     std::filesystem::create_directories(live.parent_path(), error);
@@ -934,151 +558,221 @@ class WindowsTransactionBackend final : public TransactionBackend {
         path_has_unsupported_reparse_component(staged) ||
         path_has_unsupported_reparse_component(live.parent_path()) ||
         !same_volume(staged, live)) {
-      return false;
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
     }
-    if (!MoveFileExW(staged.c_str(), live.c_str(), MOVEFILE_WRITE_THROUGH)) return false;
-    return flush_existing_file(live) && attempt_directory_flush(live.parent_path());
+    auto staged_file = open_plain_file(staged, DELETE | GENERIC_READ | GENERIC_WRITE);
+    auto live_parent = open_plain_directory(live.parent_path());
+    if (!staged_file || !live_parent ||
+        !entry_matches_handle(staged, staged_file.get()) ||
+        !directory_matches_handle(live.parent_path(), live_parent.get()) ||
+        !FlushFileBuffers(staged_file.get()) ||
+        !rename_open_file(staged_file.get(), live_parent.get(), live.filename(),
+                          false)) {
+      return windows_failure(MutationStep::install_replacement,
+                             MutationState::untouched);
+    }
+    if (!flush_directory_handle(live_parent.get())) {
+      return windows_failure(MutationStep::flush_directory,
+                             MutationState::replacement_installed);
+    }
+    return MutationResult::success();
   }
 
-  bool atomic_replace_deferred_sync(
+  MutationResult atomic_replace_deferred_sync(
       const std::filesystem::path& live,
       const std::filesystem::path& staged,
       const std::filesystem::path& rollback) override {
-    if (core::fault_injected("replace.before")) return false;
-    std::error_code error;
-    std::filesystem::create_directories(rollback.parent_path(), error);
-    if (error || path_has_unsupported_reparse_component(live) ||
-        path_has_unsupported_reparse_component(staged) ||
-        path_has_unsupported_reparse_component(rollback.parent_path()) ||
-        !same_volume(live, staged) || !same_volume(live, rollback)) {
-      return false;
-    }
-    std::filesystem::remove(rollback, error);
-    error.clear();
-    if (!ReplaceFileW(live.c_str(), staged.c_str(), rollback.c_str(),
-                      REPLACEFILE_WRITE_THROUGH, nullptr, nullptr)) {
-      if (!std::filesystem::is_regular_file(live, error) || error ||
-          !std::filesystem::is_regular_file(staged, error) || error ||
-          std::filesystem::exists(rollback, error) || error ||
-          !MoveFileExW(live.c_str(), rollback.c_str(), MOVEFILE_WRITE_THROUGH) ||
-          !flush_existing_file(rollback)) {
-        return false;
-      }
-      if (core::fault_injected("replace.after-source-move")) return false;
-      if (!MoveFileExW(staged.c_str(), live.c_str(), MOVEFILE_WRITE_THROUGH)) {
-        (void)MoveFileExW(rollback.c_str(), live.c_str(), MOVEFILE_WRITE_THROUGH);
-        return false;
-      }
-    }
-    if (core::fault_injected("replace.after-rename")) return false;
-    return flush_existing_file(live);
+    // Windows write-through renames already request metadata durability. Reuse
+    // the same handle-bound operation; the final batched directory sync remains
+    // an additional journal boundary rather than the only safety boundary.
+    return atomic_replace(live, staged, rollback);
   }
 
-  bool atomic_install_deferred_sync(
+  MutationResult atomic_install_deferred_sync(
       const std::filesystem::path& staged,
       const std::filesystem::path& live) override {
-    std::error_code error;
-    std::filesystem::create_directories(live.parent_path(), error);
-    if (error || std::filesystem::exists(live, error) || error ||
-        path_has_unsupported_reparse_component(staged) ||
-        path_has_unsupported_reparse_component(live.parent_path()) ||
-        !same_volume(staged, live) ||
-        !MoveFileExW(staged.c_str(), live.c_str(), MOVEFILE_WRITE_THROUGH)) {
-      return false;
-    }
-    return flush_existing_file(live);
+    return atomic_install(staged, live);
   }
 
-  bool restore_file(const std::filesystem::path& rollback,
+  MutationResult restore_file(const std::filesystem::path& rollback,
                     const std::filesystem::path& live) override {
-    if (!std::filesystem::is_regular_file(rollback) ||
-        path_has_unsupported_reparse_component(rollback) ||
-        path_has_unsupported_reparse_component(live.parent_path())) return false;
     std::error_code error;
-    std::filesystem::create_directories(live.parent_path(), error);
-    if (error || path_has_unsupported_reparse_component(live) ||
-        !same_volume(rollback, live)) return false;
-    if (std::filesystem::is_regular_file(live, error) && !error) {
-      if (!ReplaceFileW(live.c_str(), rollback.c_str(), nullptr, REPLACEFILE_WRITE_THROUGH,
-                        nullptr, nullptr)) {
-        if (!MoveFileExW(rollback.c_str(), live.c_str(),
-                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-          return false;
-        }
-      }
-    } else if (!MoveFileExW(rollback.c_str(), live.c_str(), MOVEFILE_WRITE_THROUGH)) {
-      return false;
+    if (!std::filesystem::is_regular_file(rollback, error) || error ||
+        path_has_unsupported_reparse_component(rollback) ||
+        path_has_unsupported_reparse_component(live.parent_path())) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched, error);
     }
-    return flush_existing_file(live) && attempt_directory_flush(live.parent_path());
+    const auto live_status = std::filesystem::symlink_status(live, error);
+    if (error == std::errc::no_such_file_or_directory ||
+        (!error && !std::filesystem::exists(live_status))) {
+      return atomic_install(rollback, live);
+    }
+    if (error || !std::filesystem::is_regular_file(live_status) ||
+        std::filesystem::is_symlink(live_status)) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched, error);
+    }
+
+    // Direct replacement of an existing large file is rejected with
+    // ACCESS_DENIED on some NTFS systems. Use the same recoverable two-rename
+    // layout as activation. The caller later removes this known target copy.
+    const auto discarded = rollback.parent_path().filename() == L"rollback"
+                               ? rollback.parent_path().parent_path() /
+                                     L"discarded" / rollback.filename()
+                               : rollback.parent_path() /
+                                     (rollback.filename().wstring() +
+                                      L".discarded");
+    return atomic_replace(live, rollback, discarded);
   }
 
-  bool copy_atomic(const std::filesystem::path& source,
+  MutationResult copy_atomic(const std::filesystem::path& source,
                    const std::filesystem::path& destination) override {
-    if (core::fault_injected("copy.before")) return false;
-    if (!std::filesystem::is_regular_file(source)) return false;
+    if (core::fault_injected("copy.before")) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
+    }
     std::error_code error;
     std::filesystem::create_directories(destination.parent_path(), error);
     if (error || path_has_unsupported_reparse_component(source) ||
         path_has_unsupported_reparse_component(destination.parent_path()) ||
-        path_has_unsupported_reparse_component(destination)) return false;
-
-    auto temporary = destination;
-    temporary += L".copy-" + std::to_wstring(GetCurrentProcessId());
-    std::filesystem::remove(temporary, error);
-    error.clear();
-    if (!CopyFileW(source.c_str(), temporary.c_str(), FALSE) ||
-        !flush_existing_file(temporary) ||
-        core::fault_injected("copy.after-temp-sync") ||
-        !MoveFileExW(temporary.c_str(), destination.c_str(),
-                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-      std::filesystem::remove(temporary, error);
-      return false;
+        path_has_unsupported_reparse_component(destination)) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
     }
-    if (core::fault_injected("copy.after-rename")) return false;
-    const bool synced = flush_existing_file(destination) &&
-                        attempt_directory_flush(destination.parent_path());
-    return synced && !core::fault_injected("copy.after-sync");
+    auto source_file = open_plain_file(source, GENERIC_READ);
+    auto destination_parent = open_plain_directory(destination.parent_path());
+    if (!source_file || !destination_parent ||
+        !entry_matches_handle(source, source_file.get()) ||
+        !directory_matches_handle(destination.parent_path(),
+                                  destination_parent.get())) {
+      return windows_failure(MutationStep::validate,
+                             MutationState::untouched);
+    }
+
+    std::optional<std::filesystem::path> temporary;
+    UniqueHandle temporary_file;
+    for (unsigned attempt = 0; attempt != 32 && !temporary_file; ++attempt) {
+      temporary = temporary_path(destination, L"copy");
+      if (!temporary) break;
+      temporary_file.reset(CreateFileW(
+          temporary->c_str(), GENERIC_READ | GENERIC_WRITE | DELETE,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+          CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr));
+      if (!temporary_file && GetLastError() != ERROR_FILE_EXISTS &&
+          GetLastError() != ERROR_ALREADY_EXISTS) {
+        break;
+      }
+    }
+    if (!temporary || !temporary_file ||
+        !directory_matches_handle(destination.parent_path(),
+                                  destination_parent.get()) ||
+        !copy_handle_contents(source_file.get(), temporary_file.get()) ||
+        !entry_matches_handle(*temporary, temporary_file.get())) {
+      discard_open_file(temporary_file.get());
+      return windows_failure(MutationStep::copy_or_clone,
+                             MutationState::temporary_created);
+    }
+    if (core::fault_injected("copy.after-temp-sync")) {
+      discard_open_file(temporary_file.get());
+      temporary_file.reset();
+      return MutationResult::failure(MutationStep::copy_or_clone,
+                                     MutationState::temporary_created);
+    }
+    if (!rename_open_file(temporary_file.get(), destination_parent.get(),
+                          destination.filename(), true)) {
+      discard_open_file(temporary_file.get());
+      temporary_file.reset();
+      return windows_failure(MutationStep::install_replacement,
+                             MutationState::temporary_created);
+    }
+    if (core::fault_injected("copy.after-rename")) {
+      return MutationResult::failure(MutationStep::install_replacement,
+                                     MutationState::replacement_installed);
+    }
+    if (!flush_directory_handle(destination_parent.get())) {
+      return windows_failure(MutationStep::flush_directory,
+                             MutationState::replacement_installed);
+    }
+    if (core::fault_injected("copy.after-sync")) {
+      return MutationResult::failure(MutationStep::flush_directory,
+                                     MutationState::fully_durable);
+    }
+    return MutationResult::success();
   }
 
-  bool move_atomic(const std::filesystem::path& source,
+  MutationResult move_atomic(const std::filesystem::path& source,
                    const std::filesystem::path& destination) override {
     std::error_code error;
-    if (!std::filesystem::is_regular_file(source, error) || error) return false;
+    if (!std::filesystem::is_regular_file(source, error) || error) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched, error);
+    }
     std::filesystem::create_directories(destination.parent_path(), error);
     if (error || path_has_unsupported_reparse_component(source) ||
         path_has_unsupported_reparse_component(destination.parent_path()) ||
         std::filesystem::exists(destination, error) || error ||
         !same_volume(source, destination) || !flush_existing_file(source)) {
-      return false;
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
     }
-    const auto source_parent = source.parent_path();
-    if (!MoveFileExW(source.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)) {
-      return false;
+    auto source_file =
+        open_plain_file(source, DELETE | GENERIC_READ | GENERIC_WRITE);
+    auto source_parent = open_plain_directory(source.parent_path());
+    auto destination_parent = open_plain_directory(destination.parent_path());
+    if (!source_file || !source_parent || !destination_parent ||
+        !entry_matches_handle(source, source_file.get()) ||
+        !directory_matches_handle(source.parent_path(), source_parent.get()) ||
+        !directory_matches_handle(destination.parent_path(),
+                                  destination_parent.get()) ||
+        !FlushFileBuffers(source_file.get()) ||
+        !rename_open_file(source_file.get(), destination_parent.get(),
+                          destination.filename(), false)) {
+      return windows_failure(MutationStep::move_source,
+                             MutationState::untouched);
     }
-    return flush_existing_file(destination) && attempt_directory_flush(source_parent) &&
-           attempt_directory_flush(destination.parent_path());
+    if (!flush_directory_handle(source_parent.get()) ||
+        !flush_directory_handle(destination_parent.get())) {
+      return windows_failure(MutationStep::flush_directory,
+                             MutationState::source_relocated);
+    }
+    return MutationResult::success();
   }
 
-  bool durable_remove(const std::filesystem::path& path) override {
-    if (core::fault_injected("remove.before")) return false;
-    if (path_has_unsupported_reparse_component(path)) return false;
+  MutationResult durable_remove(const std::filesystem::path& path) override {
+    if (core::fault_injected("remove.before") ||
+        path_has_unsupported_reparse_component(path)) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
+    }
     UniqueHandle file(CreateFileW(
         path.c_str(), DELETE | FILE_READ_ATTRIBUTES, FILE_SHARE_READ |
         FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
     if (file.get() == INVALID_HANDLE_VALUE) {
       const DWORD error = GetLastError();
-      return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+      return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND
+                 ? MutationResult::success()
+                 : MutationResult::failure(
+                       MutationStep::validate, MutationState::untouched,
+                       std::error_code(static_cast<int>(error),
+                                       std::system_category()));
     }
     FILE_ATTRIBUTE_TAG_INFO tag{};
     FILE_STANDARD_INFO standard{};
+    FILE_BASIC_INFO basic{};
     if (!GetFileInformationByHandleEx(file.get(), FileAttributeTagInfo, &tag,
                                       sizeof(tag)) ||
         !GetFileInformationByHandleEx(file.get(), FileStandardInfo, &standard,
                                       sizeof(standard)) ||
+        !GetFileInformationByHandleEx(file.get(), FileBasicInfo, &basic,
+                                      sizeof(basic)) ||
         (tag.FileAttributes &
-         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
-      return false;
+         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+        !entry_matches_handle(path, file.get())) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
     }
 
     FILE_DISPOSITION_INFO_EX disposition{
@@ -1091,37 +785,55 @@ class WindowsTransactionBackend final : public TransactionBackend {
       if (disposition_error != ERROR_INVALID_PARAMETER &&
           disposition_error != ERROR_NOT_SUPPORTED &&
           disposition_error != ERROR_INVALID_FUNCTION) {
-        return false;
+        return MutationResult::failure(
+            MutationStep::remove, MutationState::untouched,
+            std::error_code(static_cast<int>(disposition_error),
+                            std::system_category()));
       }
-      file.reset();
-      const DWORD original_attributes = tag.FileAttributes;
-      const bool read_only =
-          (original_attributes & FILE_ATTRIBUTE_READONLY) != 0;
+      const bool read_only = (basic.FileAttributes & FILE_ATTRIBUTE_READONLY) != 0;
       // Legacy filesystems cannot unlink a read-only hard link without
       // changing the attributes of every remaining link.
-      if (read_only && standard.NumberOfLinks != 1) return false;
-      if (read_only &&
-          !SetFileAttributesW(path.c_str(),
-                              original_attributes & ~FILE_ATTRIBUTE_READONLY)) {
-        return false;
+      if (read_only && standard.NumberOfLinks != 1) {
+        return MutationResult::failure(MutationStep::remove,
+                                       MutationState::untouched);
       }
-      removed = DeleteFileW(path.c_str());
-      if (!removed && read_only) {
-        (void)SetFileAttributesW(path.c_str(), original_attributes);
+      if (read_only) {
+        basic.FileAttributes &= ~FILE_ATTRIBUTE_READONLY;
+        if (!SetFileInformationByHandle(file.get(), FileBasicInfo, &basic,
+                                        sizeof(basic))) {
+          return windows_failure(MutationStep::remove,
+                                 MutationState::untouched);
+        }
       }
+      FILE_DISPOSITION_INFO legacy{TRUE};
+      removed = SetFileInformationByHandle(file.get(), FileDispositionInfo,
+                                           &legacy, sizeof(legacy));
     }
     file.reset();
-    if (!removed) return false;
-    if (core::fault_injected("remove.after-unlink")) return false;
-    return attempt_directory_flush(path.parent_path()) &&
-           !core::fault_injected("remove.after-sync");
+    if (!removed) return windows_failure(MutationStep::remove,
+                                         MutationState::untouched);
+    if (core::fault_injected("remove.after-unlink")) {
+      return MutationResult::failure(MutationStep::remove,
+                                     MutationState::source_relocated);
+    }
+    auto parent = open_plain_directory(path.parent_path());
+    if (!parent || !flush_directory_handle(parent.get())) {
+      return windows_failure(MutationStep::flush_directory,
+                             MutationState::source_relocated);
+    }
+    if (core::fault_injected("remove.after-sync")) {
+      return MutationResult::failure(MutationStep::flush_directory,
+                                     MutationState::fully_durable);
+    }
+    return MutationResult::success();
   }
 
-  bool durable_remove_deferred_sync(
+  MutationResult durable_remove_deferred_sync(
       const std::filesystem::path& path) override {
     if (core::fault_injected("remove.before") ||
         path_has_unsupported_reparse_component(path)) {
-      return false;
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
     }
     UniqueHandle file(CreateFileW(
         path.c_str(), DELETE | FILE_READ_ATTRIBUTES,
@@ -1130,14 +842,21 @@ class WindowsTransactionBackend final : public TransactionBackend {
         nullptr));
     if (file.get() == INVALID_HANDLE_VALUE) {
       const DWORD error = GetLastError();
-      return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+      return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND
+                 ? MutationResult::success(MutationState::source_relocated)
+                 : MutationResult::failure(
+                       MutationStep::validate, MutationState::untouched,
+                       std::error_code(static_cast<int>(error),
+                                       std::system_category()));
     }
     FILE_ATTRIBUTE_TAG_INFO tag{};
     if (!GetFileInformationByHandleEx(file.get(), FileAttributeTagInfo, &tag,
                                       sizeof(tag)) ||
         (tag.FileAttributes &
-         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
-      return false;
+         (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+        !entry_matches_handle(path, file.get())) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
     }
     FILE_DISPOSITION_INFO_EX disposition{
         FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS |
@@ -1147,25 +866,34 @@ class WindowsTransactionBackend final : public TransactionBackend {
       FILE_DISPOSITION_INFO legacy{TRUE};
       if (!SetFileInformationByHandle(file.get(), FileDispositionInfo, &legacy,
                                       sizeof(legacy))) {
-        return false;
+        return windows_failure(MutationStep::remove,
+                               MutationState::untouched);
       }
     }
     file.reset();
-    return !core::fault_injected("remove.after-unlink");
+    if (core::fault_injected("remove.after-unlink")) {
+      return MutationResult::failure(MutationStep::remove,
+                                     MutationState::source_relocated);
+    }
+    return MutationResult::success(MutationState::source_relocated);
   }
 
-  bool durable_remove_tree(const std::filesystem::path& root) override {
+  MutationResult durable_remove_tree(const std::filesystem::path& root) override {
     if (core::fault_injected("remove-tree.before") || root.empty() ||
         root == root.root_path()) {
-      return false;
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
     }
     std::error_code error;
     const auto status = std::filesystem::symlink_status(root, error);
-    if (error == std::errc::no_such_file_or_directory) return true;
+    if (error == std::errc::no_such_file_or_directory) {
+      return MutationResult::success();
+    }
     if (error || !std::filesystem::is_directory(status) ||
         std::filesystem::is_symlink(status) ||
         path_has_unsupported_reparse_component(root)) {
-      return false;
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched, error);
     }
 
     std::function<bool(const std::filesystem::path&)> remove_directory;
@@ -1229,49 +957,115 @@ class WindowsTransactionBackend final : public TransactionBackend {
       return attempt_directory_flush(directory.parent_path());
     };
 
-    return remove_directory(root) &&
-           !core::fault_injected("remove-tree.after-sync");
+    if (!remove_directory(root)) {
+      return windows_failure(MutationStep::remove,
+                             MutationState::source_relocated);
+    }
+    if (core::fault_injected("remove-tree.after-sync")) {
+      return MutationResult::failure(MutationStep::flush_directory,
+                                     MutationState::fully_durable);
+    }
+    return MutationResult::success();
   }
 
-  bool write_atomic(const std::filesystem::path& path, std::string_view bytes) override {
-    if (core::fault_injected("write.before")) return false;
+  MutationResult write_atomic(const std::filesystem::path& path, std::string_view bytes) override {
+    if (core::fault_injected("write.before")) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
+    }
     std::error_code error;
     std::filesystem::create_directories(path.parent_path(), error);
     if (error || path_has_unsupported_reparse_component(path.parent_path()) ||
-        path_has_unsupported_reparse_component(path)) return false;
-    auto temporary = path;
-    temporary += L".tmp-" + std::to_wstring(GetCurrentProcessId());
-    std::filesystem::remove(temporary, error);
-
-    UniqueHandle file(CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr,
-                                  CREATE_ALWAYS,
-                                  FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr));
-    if (!file) return false;
+        path_has_unsupported_reparse_component(path)) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
+    }
+    auto parent = open_plain_directory(path.parent_path());
+    if (!parent || !directory_matches_handle(path.parent_path(), parent.get())) {
+      return windows_failure(MutationStep::validate,
+                             MutationState::untouched);
+    }
+    std::optional<std::filesystem::path> temporary;
+    UniqueHandle file;
+    for (unsigned attempt = 0; attempt != 32 && !file; ++attempt) {
+      temporary = temporary_path(path, L"write");
+      if (!temporary) break;
+      file.reset(CreateFileW(temporary->c_str(), GENERIC_READ | GENERIC_WRITE |
+                                                    DELETE,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE |
+                                 FILE_SHARE_DELETE,
+                             nullptr, CREATE_NEW,
+                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
+                             nullptr));
+      if (!file && GetLastError() != ERROR_FILE_EXISTS &&
+          GetLastError() != ERROR_ALREADY_EXISTS) {
+        break;
+      }
+    }
+    if (!temporary || !file ||
+        !directory_matches_handle(path.parent_path(), parent.get())) {
+      return windows_failure(MutationStep::create_temporary,
+                             MutationState::untouched);
+    }
     DWORD written{};
     const bool wrote = bytes.size() <= MAXDWORD &&
                        WriteFile(file.get(), bytes.data(), static_cast<DWORD>(bytes.size()),
                                  &written, nullptr) &&
-                       written == bytes.size() && FlushFileBuffers(file.get());
-    file.reset();
-    if (!wrote || core::fault_injected("write.after-temp-sync") ||
-        !MoveFileExW(temporary.c_str(), path.c_str(),
-                               MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-      std::filesystem::remove(temporary, error);
-      return false;
+                       written == bytes.size() && FlushFileBuffers(file.get()) &&
+                       entry_matches_handle(*temporary, file.get());
+    if (!wrote || core::fault_injected("write.after-temp-sync")) {
+      discard_open_file(file.get());
+      file.reset();
+      return windows_failure(MutationStep::flush_file,
+                             MutationState::temporary_created);
     }
-    if (core::fault_injected("write.after-rename")) return false;
-    return attempt_directory_flush(path.parent_path()) &&
-           !core::fault_injected("write.after-sync");
+    if (!rename_open_file(file.get(), parent.get(), path.filename(), true)) {
+      discard_open_file(file.get());
+      file.reset();
+      return windows_failure(MutationStep::install_replacement,
+                             MutationState::temporary_created);
+    }
+    if (core::fault_injected("write.after-rename")) {
+      return MutationResult::failure(MutationStep::install_replacement,
+                                     MutationState::replacement_installed);
+    }
+    if (!flush_directory_handle(parent.get())) {
+      return windows_failure(MutationStep::flush_directory,
+                             MutationState::replacement_installed);
+    }
+    if (core::fault_injected("write.after-sync")) {
+      return MutationResult::failure(MutationStep::flush_directory,
+                                     MutationState::fully_durable);
+    }
+    return MutationResult::success();
   }
 
-  bool sync_parent(const std::filesystem::path& path) override {
-    return attempt_directory_flush(path.parent_path());
+  MutationResult sync_parent(const std::filesystem::path& path) override {
+    auto parent = open_plain_directory(path.parent_path());
+    if (!parent || !directory_matches_handle(path.parent_path(), parent.get()) ||
+        !flush_directory_handle(parent.get())) {
+      return windows_failure(MutationStep::flush_directory,
+                             MutationState::untouched);
+    }
+    return MutationResult::success();
   }
 
-  bool sync_directory(const std::filesystem::path& directory) override {
-    if (core::fault_injected("directory.before-sync")) return false;
-    return attempt_directory_flush(directory) &&
-           !core::fault_injected("directory.after-sync");
+  MutationResult sync_directory(const std::filesystem::path& directory) override {
+    if (core::fault_injected("directory.before-sync")) {
+      return MutationResult::failure(MutationStep::flush_directory,
+                                     MutationState::untouched);
+    }
+    auto opened = open_plain_directory(directory);
+    if (!opened || !directory_matches_handle(directory, opened.get()) ||
+        !flush_directory_handle(opened.get())) {
+      return windows_failure(MutationStep::flush_directory,
+                             MutationState::untouched);
+    }
+    if (core::fault_injected("directory.after-sync")) {
+      return MutationResult::failure(MutationStep::flush_directory,
+                                     MutationState::fully_durable);
+    }
+    return MutationResult::success();
   }
 };
 

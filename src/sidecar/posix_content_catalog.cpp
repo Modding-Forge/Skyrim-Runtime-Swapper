@@ -175,10 +175,11 @@ struct Record {
     }
   }
   if (!matches(catalog, *record)) {
-    const bool restored = matches(hold, *record)
-                              ? backend.copy_atomic(hold, catalog)
-                              : restore_recovery_file(game_root, record->hash,
-                                                      record->size, catalog);
+    const bool restored =
+        matches(hold, *record)
+            ? static_cast<bool>(backend.copy_atomic(hold, catalog))
+            : restore_recovery_file(game_root, record->hash, record->size,
+                                    catalog);
     if (!restored || !matches(catalog, *record)) {
       return {false, false, L"ContentCatalog.txt could not be recovered."};
     }

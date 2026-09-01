@@ -90,8 +90,7 @@ int run_tests() {
       !vault->probe.vault_path.is_absolute()) {
     return 1;
   }
-  const auto locator = temporary.path() / L".skyrim-runtime-swapper" /
-                       L"vault.locator";
+  const auto locator = vault->probe.transaction_work.value / L"vault.locator";
   const auto identity_manifest =
       std::string("SRS-VAULT-MANIFEST-2\ninstallation=") +
       vault->probe.installation_id +
@@ -145,7 +144,6 @@ int run_tests() {
       !vault_object_matches(*vault, *hash, 8)) {
     return 2;
   }
-
   const auto cached_target = temporary.path() / L"cached-target.bin";
   write_file(cached_target, "tampered");
   const auto cached_hash = sha256_string("expected");
@@ -172,9 +170,34 @@ int run_tests() {
     return 29;
   }
 
+  const auto target_cache = resolve_target_cache_layout(temporary.path());
+  if (!target_cache) return 38;
+  const auto disposable_cache_object =
+      target_cache->objects /
+      std::filesystem::path(cached_hash->begin(), cached_hash->end());
+  const auto cache_stage = temporary.path() / L"cache-stage.bin";
+  write_file(disposable_cache_object, "tampered");
+  if (materialize_target_cache_object(*target_cache, *cached_hash, 8,
+                                      cache_stage) ||
+      std::filesystem::exists(cache_stage) ||
+      std::filesystem::exists(disposable_cache_object)) {
+    return 39;
+  }
+  write_file(disposable_cache_object, "tampered");
+  write_file(cache_stage, "unknown-user-content");
+  if (materialize_target_cache_object(*target_cache, *cached_hash, 8,
+                                      cache_stage) ||
+      read_file(cache_stage) != "unknown-user-content" ||
+      !std::filesystem::exists(disposable_cache_object)) {
+    return 40;
+  }
+
   const auto destination = temporary.path() / L"destination.bin";
   write_file(destination, "unknown-user-content");
   if (!preserve_conflict(*vault, destination, "conflict-test") ||
+      restore_vault_object(*vault, *hash, 8, destination) ||
+      read_file(destination) != "unknown-user-content" ||
+      !transaction_backend().durable_remove(destination) ||
       !restore_vault_object(*vault, *hash, 8, destination) ||
       read_file(destination) != "original") {
     return 3;
@@ -209,8 +232,8 @@ int run_tests() {
       std::filesystem::is_empty(corrupt_root, error) || error) {
     return 6;
   }
-  const auto game_marker = temporary.path() / L".skyrim-runtime-swapper" /
-                           L"persistent.v2";
+  const auto game_marker =
+      vault->probe.transaction_work.value / L"persistent.v2";
   SetEnvironmentVariableA("SKYRIM_RUNTIME_SWAPPER_FAULT_POINT",
                           "persistent.after-vault-marker");
   const bool interrupted_marker =

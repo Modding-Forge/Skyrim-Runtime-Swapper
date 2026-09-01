@@ -113,7 +113,12 @@ int main() {
     return 3;
   }
   clear_fault();
-  if (!backend.restore_file(rollback, live) || read_file(live) != "source") return 4;
+  const auto restore_discarded = temporary.path() / L"rollback.discarded";
+  if (!backend.restore_file(rollback, live) || read_file(live) != "source" ||
+      read_file(restore_discarded) != "target" ||
+      !backend.durable_remove(restore_discarded)) {
+    return 4;
+  }
 
   write_file(staged, "target");
   fault("replace.after-sync");
@@ -122,7 +127,25 @@ int main() {
     return 15;
   }
   clear_fault();
-  if (!backend.restore_file(rollback, live) || read_file(live) != "source") return 16;
+  if (!backend.restore_file(rollback, live) || read_file(live) != "source" ||
+      read_file(restore_discarded) != "target" ||
+      !backend.durable_remove(restore_discarded)) {
+    return 16;
+  }
+
+  write_file(staged, "target");
+  if (!backend.atomic_replace(live, staged, rollback)) return 30;
+  fault("replace.after-source-move");
+  if (backend.restore_file(rollback, live) || std::filesystem::exists(live) ||
+      read_file(rollback) != "source" ||
+      read_file(restore_discarded) != "target") {
+    return 31;
+  }
+  clear_fault();
+  if (!backend.restore_file(rollback, live) || read_file(live) != "source" ||
+      !backend.durable_remove(restore_discarded)) {
+    return 32;
+  }
 
   const auto deferred_root = temporary.path() / L"deferred";
   const auto deferred_live = deferred_root / L"live";

@@ -1,5 +1,6 @@
 #include "internal/file_operations.hpp"
 
+#include <runtime_swapper/checked_arithmetic.hpp>
 #include <runtime_swapper/prepared_storage.hpp>
 #include <runtime_swapper/sha256.hpp>
 
@@ -11,7 +12,9 @@
 
 #include <filesystem>
 #include <fstream>
+#include <cstdint>
 #include <iostream>
+#include <limits>
 #include <string_view>
 #include <system_error>
 
@@ -62,6 +65,20 @@ bool write_file(const std::filesystem::path& path, std::string_view contents) {
 }  // namespace
 
 int main() {
+  std::uint64_t arithmetic_result{};
+  constexpr auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+  if (runtime_swapper::checked_add(maximum, std::uint64_t{1},
+                                  arithmetic_result) ||
+      runtime_swapper::checked_multiply(maximum, std::uint64_t{2},
+                                       arithmetic_result) ||
+      !runtime_swapper::checked_add(maximum - 1, std::uint64_t{1},
+                                   arithmetic_result) ||
+      arithmetic_result != maximum ||
+      !runtime_swapper::checked_multiply(std::uint64_t{0}, maximum,
+                                        arithmetic_result) ||
+      arithmetic_result != 0) {
+    return 10;
+  }
   const TemporaryDirectory temporary;
   const auto library = temporary.path() / "SteamLibrary";
   const auto game = library / "steamapps" / "common" / "Prepared Storage Test";

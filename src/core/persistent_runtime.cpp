@@ -38,7 +38,7 @@ DowngradeResult commit_persistent_runtime(const std::filesystem::path& game_root
   if (!core::commit_persistent_marker(*vault, game_root, risk_accepted,
                                       catalog_persistent)) {
     return {ExitCode::commit_failed, false,
-            L"The persistent state could not be committed in the vault and game folder."};
+            L"The persistent state could not be committed in the vault and transaction workspace."};
   }
   return {ExitCode::success, false,
           L"The persistent runtime and its recovery source were committed."};

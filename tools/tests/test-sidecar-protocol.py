@@ -13,7 +13,7 @@ import tempfile
 
 
 MAGIC = 0x50535253
-VERSION = 4
+VERSION = 5
 HEADER = struct.Struct("<IHHI32s")
 MAXIMUM_PAYLOAD = 1024 * 1024
 
@@ -61,7 +61,7 @@ def validate_response(response: bytes, operation: int, nonce: bytes,
         or size != len(response_payload)
         or size > MAXIMUM_PAYLOAD
     ):
-        raise AssertionError("response authentication or framing mismatch")
+        raise AssertionError("response nonce binding or framing mismatch")
     if len(response_payload) < 4:
         raise AssertionError("response does not contain an exit code")
     (exit_code,) = struct.unpack_from("<i", response_payload)

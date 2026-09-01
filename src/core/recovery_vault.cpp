@@ -2,6 +2,7 @@
 
 #include "internal/vault_store.hpp"
 #include "internal/file_operations.hpp"
+#include "internal/transaction_workspace.hpp"
 
 #include <runtime_swapper/transaction_backend.hpp>
 #include <runtime_swapper/downgrade.hpp>
@@ -187,7 +188,7 @@ bool remove_recovery_metadata(const std::filesystem::path& game_root,
       std::filesystem::is_symlink(status) || !private_regular_file(path)) {
     return false;
   }
-  return transaction_backend().durable_remove(path);
+  return static_cast<bool>(transaction_backend().durable_remove(path));
 }
 
 std::optional<RecoveryLifecycleState> inspect_recovery_lifecycle(
@@ -355,22 +356,37 @@ RecoveryLifecycleResult finalize_recovery_storage(
   }
 
   auto& backend = transaction_backend();
-  const auto metadata_root = game_root / L".skyrim-runtime-swapper";
-  const auto locator = metadata_root / L"vault.locator";
-  error.clear();
-  const auto locator_status = std::filesystem::symlink_status(locator, error);
-  if (error && error != std::errc::no_such_file_or_directory) {
-    return result(ExitCode::commit_failed,
-                  RecoveryLifecycleState::cleanup_pending,
-                  RecoveryLifecyclePhase::detach_locator,
-                  L"The active recovery locator could not be inspected.");
+  const auto metadata_root = core::legacy_installation_work_root(game_root);
+  for (const auto& locator : {core::workspace_locator(probe),
+                              metadata_root / L"vault.locator"}) {
+    error.clear();
+    const auto locator_status = std::filesystem::symlink_status(locator, error);
+    if (error && error != std::errc::no_such_file_or_directory) {
+      return result(ExitCode::commit_failed,
+                    RecoveryLifecycleState::cleanup_pending,
+                    RecoveryLifecyclePhase::detach_locator,
+                    L"An active recovery locator could not be inspected.");
+    }
+    if (!error && std::filesystem::exists(locator_status) &&
+        !backend.durable_remove(locator)) {
+      return result(ExitCode::commit_failed,
+                    RecoveryLifecycleState::cleanup_pending,
+                    RecoveryLifecyclePhase::detach_locator,
+                    L"An active recovery locator could not be removed.");
+    }
   }
-  if (!error && std::filesystem::exists(locator_status) &&
-      !backend.durable_remove(locator)) {
-    return result(ExitCode::commit_failed,
-                  RecoveryLifecycleState::cleanup_pending,
-                  RecoveryLifecyclePhase::detach_locator,
-                  L"The active recovery locator could not be removed.");
+  if (!probe.transaction_work.value.empty()) {
+    error.clear();
+    const auto work_status = std::filesystem::symlink_status(
+        probe.transaction_work.value, error);
+    if (error != std::errc::no_such_file_or_directory &&
+        (error || (std::filesystem::exists(work_status) &&
+                   !backend.durable_remove_tree(probe.transaction_work.value)))) {
+      return result(ExitCode::commit_failed,
+                    RecoveryLifecycleState::cleanup_pending,
+                    RecoveryLifecyclePhase::delete_installation_metadata,
+                    L"The external transaction workspace could not be removed safely.");
+    }
   }
   if (!backend.durable_remove_tree(probe.vault_path)) {
     return result(ExitCode::commit_failed,

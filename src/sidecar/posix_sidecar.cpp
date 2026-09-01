@@ -27,7 +27,7 @@
 namespace {
 
 constexpr std::uint32_t protocol_magic = 0x50535253U;  // SRSP
-constexpr std::uint16_t protocol_version = 4;
+constexpr std::uint16_t protocol_version = 5;
 constexpr std::uint32_t maximum_payload = 1024U * 1024U;
 
 enum class Operation : std::uint16_t {
@@ -71,9 +71,9 @@ class NativeInstallationLock {
       const runtime_swapper::CoordinationLockPath& resolved_lock) {
     const auto& lock_path = resolved_lock.value;
     if (lock_path.empty() || !lock_path.is_absolute()) return LockResult::unsafe;
-    std::error_code error;
-    std::filesystem::create_directories(lock_path.parent_path(), error);
-    if (error) return LockResult::io_error;
+    const auto prepared = runtime_swapper::transaction_backend()
+                              .prepare_coordination_lock(resolved_lock);
+    if (!prepared) return LockResult::unsafe;
     directory_ = ::open(lock_path.parent_path().c_str(),
                         O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (directory_ < 0) return LockResult::unsafe;
@@ -260,12 +260,26 @@ void append_string(std::vector<std::byte>& bytes, std::string_view value) {
   return result;
 }
 
-[[nodiscard]] bool valid_mutating_operation(Operation operation) noexcept {
-  return operation == Operation::recover ||
-         operation == Operation::activate_session ||
-         operation == Operation::activate_persistent ||
-         operation == Operation::restore_persistent ||
-         operation == Operation::prepare_launch;
+struct OperationPolicy {
+  bool requires_installation_lock{};
+};
+
+// This exhaustive switch is the single source of truth for both operation
+// validity and lock requirements. A newly added operation cannot silently run
+// unlocked by being omitted from a second classification list.
+[[nodiscard]] std::optional<OperationPolicy> operation_policy(
+    Operation operation) noexcept {
+  switch (operation) {
+    case Operation::probe:
+      return OperationPolicy{false};
+    case Operation::recover:
+    case Operation::activate_session:
+    case Operation::activate_persistent:
+    case Operation::restore_persistent:
+    case Operation::prepare_launch:
+      return OperationPolicy{true};
+  }
+  return std::nullopt;
 }
 
 [[nodiscard]] runtime_swapper::app::InstallationOperationResult lock_failure(
@@ -314,6 +328,7 @@ void append_string(std::vector<std::byte>& bytes, std::string_view value) {
   append_string(payload, path_utf8(result.backend.vault_path));
   append_string(payload, path_utf8(result.backend.target_cache.value));
   append_string(payload, path_utf8(result.backend.coordination_lock.value));
+  append_string(payload, path_utf8(result.backend.transaction_work.value));
   append_string(payload, text_utf8(result.backend.target_volume.stable_id));
   append_string(payload, text_utf8(result.backend.target_volume.filesystem));
   append_integer(payload,
@@ -443,8 +458,12 @@ int main(int argc, char** argv) {
   }
 
   const auto operation = static_cast<Operation>(request.operation);
+  const auto policy = operation_policy(operation);
   runtime_swapper::app::InstallationOperationResult result;
-  if (operation == Operation::probe) {
+  if (!policy) {
+    result = execute(operation, game_root, *risk != 0,
+                     *allow_persistent != 0);
+  } else if (!policy->requires_installation_lock) {
     result = runtime_swapper::app::probe_installation_storage(game_root);
     if (result.backend.success()) {
       const auto persistent = runtime_swapper::inspect_persistent_runtime(
@@ -458,9 +477,6 @@ int main(int argc, char** argv) {
             persistent == runtime_swapper::PersistentRuntimeState::active;
       }
     }
-  } else if (!valid_mutating_operation(operation)) {
-    result = execute(operation, game_root, *risk != 0,
-                     *allow_persistent != 0);
   } else {
     result = runtime_swapper::app::probe_installation_storage(game_root);
     if (result.success()) {

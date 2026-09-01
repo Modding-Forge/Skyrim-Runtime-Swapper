@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <utility>
 
 namespace runtime_swapper {
 
@@ -60,6 +62,14 @@ struct CoordinationLockPath {
   std::filesystem::path value;
 };
 
+// Target-volume workspace for disposable transaction state. Recovery data
+// remains in RecoveryVaultPath; this path exists only so staged replacements
+// can be installed atomically without exposing SRS internals to game-root VFS
+// and overwrite capture.
+struct TransactionWorkPath {
+  std::filesystem::path value;
+};
+
 struct BackendProbeResult {
   ExitCode code{ExitCode::internal_error};
   SafetyMode mode{SafetyMode::hard_blocked};
@@ -74,11 +84,71 @@ struct BackendProbeResult {
   RecoveryVaultPath recovery_vault;
   TargetCachePath target_cache;
   CoordinationLockPath coordination_lock;
+  TransactionWorkPath transaction_work;
 
   [[nodiscard]] bool success() const noexcept { return code == ExitCode::success; }
   [[nodiscard]] bool allows(StorageOperation operation) const noexcept {
     return (static_cast<std::uint32_t>(allowed_operations) &
             static_cast<std::uint32_t>(operation)) != 0;
+  }
+};
+
+enum class MutationState {
+  untouched,
+  temporary_created,
+  source_relocated,
+  replacement_installed,
+  file_durable,
+  fully_durable,
+};
+
+enum class MutationStep {
+  none,
+  validate,
+  create_temporary,
+  copy_or_clone,
+  move_source,
+  install_replacement,
+  flush_file,
+  flush_directory,
+  remove,
+};
+
+// A mutation may fail after changing the namespace. Callers still recover from
+// the durable journal and live hashes; this result makes the immediate state
+// and native failure unambiguous for diagnostics and recovery direction.
+struct MutationResult {
+  bool succeeded{};
+  MutationState state{MutationState::untouched};
+  MutationStep step{MutationStep::none};
+  std::error_code error;
+  std::wstring detail;
+
+  MutationResult() = default;
+  explicit MutationResult(bool success) noexcept
+      : succeeded(success),
+        state(success ? MutationState::fully_durable
+                      : MutationState::untouched) {}
+
+  [[nodiscard]] explicit operator bool() const noexcept { return succeeded; }
+
+  [[nodiscard]] static MutationResult success(
+      MutationState reached = MutationState::fully_durable) noexcept {
+    MutationResult result;
+    result.succeeded = true;
+    result.state = reached;
+    return result;
+  }
+
+  [[nodiscard]] static MutationResult failure(
+      MutationStep failed_step, MutationState reached,
+      std::error_code native_error = {}, std::wstring technical_detail = {}) {
+    MutationResult result;
+    result.step = failed_step;
+    result.state = reached;
+    result.error = native_error;
+    result.detail = std::move(technical_detail);
+    return result;
   }
 };
 
@@ -103,55 +173,72 @@ class TransactionBackend {
       const std::filesystem::path& managed_root,
       std::uint64_t required_vault_bytes = 0,
       bool prepare_vault = false) = 0;
-  [[nodiscard]] virtual bool flush_file(const std::filesystem::path& file) = 0;
-  [[nodiscard]] virtual bool atomic_replace(const std::filesystem::path& live,
+  // Prepares only the private directory that contains the installation lock.
+  // Implementations anchor above the SRS-owned storage root and must never
+  // tighten permissions on unrelated user directories.
+  [[nodiscard]] virtual MutationResult prepare_coordination_lock(
+      const CoordinationLockPath& lock_path) = 0;
+  // Returns whether a namespace rename between the two paths is supported.
+  // POSIX implementations compare mount IDs, not only st_dev: Linux rejects
+  // renames across bind-mount boundaries even when both names expose the same
+  // underlying filesystem.
+  [[nodiscard]] virtual bool atomic_rename_compatible(
+      const std::filesystem::path& left,
+      const std::filesystem::path& right) = 0;
+  [[nodiscard]] virtual MutationResult flush_file(const std::filesystem::path& file) = 0;
+  [[nodiscard]] virtual MutationResult atomic_replace(const std::filesystem::path& live,
                                             const std::filesystem::path& staged,
                                             const std::filesystem::path& rollback) = 0;
-  [[nodiscard]] virtual bool atomic_install(const std::filesystem::path& staged,
+  [[nodiscard]] virtual MutationResult atomic_install(const std::filesystem::path& staged,
                                             const std::filesystem::path& live) = 0;
   // Used only after a complete journal intent and verified recovery vault are
   // durable. Callers must synchronize every affected directory as one boundary.
-  [[nodiscard]] virtual bool atomic_replace_deferred_sync(
+  [[nodiscard]] virtual MutationResult atomic_replace_deferred_sync(
       const std::filesystem::path& live, const std::filesystem::path& staged,
       const std::filesystem::path& rollback) {
     return atomic_replace(live, staged, rollback);
   }
-  [[nodiscard]] virtual bool atomic_install_deferred_sync(
+  [[nodiscard]] virtual MutationResult atomic_install_deferred_sync(
       const std::filesystem::path& staged,
       const std::filesystem::path& live) {
     return atomic_install(staged, live);
   }
-  [[nodiscard]] virtual bool restore_file(const std::filesystem::path& rollback,
-                                          const std::filesystem::path& live) = 0;
-  [[nodiscard]] virtual bool copy_atomic(const std::filesystem::path& source,
+  // Restores rollback without overwriting an existing live object in place.
+  // If live exists, its known content is retained next to rollback under the
+  // deterministic discarded path for journal recovery and caller cleanup.
+  [[nodiscard]] virtual MutationResult restore_file(
+      const std::filesystem::path& rollback,
+      const std::filesystem::path& live) = 0;
+  [[nodiscard]] virtual MutationResult copy_atomic(const std::filesystem::path& source,
                                          const std::filesystem::path& destination) = 0;
 
   // Uses a filesystem-native copy-on-write clone when it is available and
   // falls back to the same durable atomic copy contract as copy_atomic.
-  [[nodiscard]] virtual bool clone_or_copy_atomic(
+  [[nodiscard]] virtual MutationResult clone_or_copy_atomic(
       const std::filesystem::path& source,
       const std::filesystem::path& destination) {
     return copy_atomic(source, destination);
   }
 
-  [[nodiscard]] virtual bool move_atomic(const std::filesystem::path& source,
+  [[nodiscard]] virtual MutationResult move_atomic(const std::filesystem::path& source,
                                          const std::filesystem::path& destination) = 0;
-  [[nodiscard]] virtual bool durable_remove(const std::filesystem::path& path) = 0;
-  [[nodiscard]] virtual bool durable_remove_deferred_sync(
+  [[nodiscard]] virtual MutationResult durable_remove(const std::filesystem::path& path) = 0;
+  [[nodiscard]] virtual MutationResult durable_remove_deferred_sync(
       const std::filesystem::path& path) {
     return durable_remove(path);
   }
   // Removes a private, user-owned tree without following links. Implementations
   // must synchronize every directory whose entries are changed.
-  [[nodiscard]] virtual bool durable_remove_tree(
+  [[nodiscard]] virtual MutationResult durable_remove_tree(
       const std::filesystem::path& root) {
     (void)root;
-    return false;
+    return MutationResult::failure(MutationStep::remove,
+                                   MutationState::untouched);
   }
-  [[nodiscard]] virtual bool write_atomic(const std::filesystem::path& path,
+  [[nodiscard]] virtual MutationResult write_atomic(const std::filesystem::path& path,
                                           std::string_view bytes) = 0;
-  [[nodiscard]] virtual bool sync_parent(const std::filesystem::path& path) = 0;
-  [[nodiscard]] virtual bool sync_directory(
+  [[nodiscard]] virtual MutationResult sync_parent(const std::filesystem::path& path) = 0;
+  [[nodiscard]] virtual MutationResult sync_directory(
       const std::filesystem::path& directory) {
     return sync_parent(directory / ".srs-sync-boundary");
   }

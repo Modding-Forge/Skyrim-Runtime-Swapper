@@ -88,6 +88,12 @@ constexpr std::string_view restore_intent = "SRS-PERSISTENT-RESTORE-1\n";
                    catalog.message,
                    runtime.changed_files || creation_club.changed || catalog.changed);
   }
+  const auto fixed = disable_fixed_runtime(game_root);
+  if (!fixed.success) {
+    return failure(ExitCode::commit_failed, std::move(backend), fixed.message,
+                   runtime.changed_files || creation_club.changed ||
+                       catalog.changed);
+  }
   const auto cleanup = finalize_recovery_storage(game_root, backend);
   if (!cleanup.success()) {
     return failure(cleanup.code, std::move(backend),
@@ -380,7 +386,7 @@ InstallationOperationResult recover_installation(
       game_root, &risk_accepted, &catalog_persistent);
   if (persistent == PersistentRuntimeState::invalid) {
     return failure(ExitCode::journal_corrupt, std::move(backend),
-                   L"The persistent vault and game markers do not agree. No launch is "
+                   L"The persistent vault and target-volume markers do not agree. No launch is "
                    L"allowed until recovery completes.");
   }
   if (persistent == PersistentRuntimeState::inactive) {

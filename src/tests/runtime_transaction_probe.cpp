@@ -9,7 +9,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <ranges>
+#include <cstdlib>
 #include <string>
 
 namespace {
@@ -34,6 +36,52 @@ namespace {
   }
   const auto hash = runtime_swapper::sha256_file(backup);
   return hash.has_value() && *hash == plan.source_sha256;
+}
+
+[[nodiscard]] bool rebind_managed_links(
+    const std::filesystem::path& game_root,
+    runtime_swapper::RuntimeLayout layout) {
+  const auto rebound_root = game_root / L".srs-rebound-layout";
+  std::size_t rebound_count{};
+  for (const auto& plan : runtime_swapper::patch_plan) {
+    if (!runtime_swapper::patch_plan_entry_enabled(layout, plan)) continue;
+    const auto logical = game_root / plan_path(plan.relative_file);
+    std::error_code error;
+    if (!std::filesystem::is_symlink(
+            std::filesystem::symlink_status(logical, error)) || error) {
+      continue;
+    }
+    const auto current = std::filesystem::canonical(logical, error);
+    const auto rebound = rebound_root / plan_path(plan.relative_file);
+    std::filesystem::create_directories(rebound.parent_path(), error);
+    if (error ||
+        !std::filesystem::copy_file(
+            current, rebound, std::filesystem::copy_options::overwrite_existing,
+            error) ||
+        error) {
+      return false;
+    }
+    std::filesystem::remove(logical, error);
+    if (error) return false;
+    std::filesystem::create_symlink(rebound, logical, error);
+    if (error) return false;
+    ++rebound_count;
+  }
+  return rebound_count != 0;
+}
+
+[[nodiscard]] bool rebind_test_requested() {
+#if defined(_WIN32)
+  char* value{};
+  std::size_t size{};
+  const bool enabled = _dupenv_s(&value, &size,
+                                 "SRS_TEST_REBIND_MANAGED_LINKS") == 0 &&
+                       value != nullptr;
+  std::free(value);
+  return enabled;
+#else
+  return std::getenv("SRS_TEST_REBIND_MANAGED_LINKS") != nullptr;
+#endif
 }
 
 }  // namespace
@@ -100,13 +148,21 @@ namespace {
     std::wcerr << L"The patch plan has no file suitable for the fallback test.\n";
     return 7;
   }
-  std::ofstream corrupted(game_root / plan_path(corruptible->relative_file),
-                          std::ios::binary | std::ios::trunc);
-  corrupted << "fallback-test-corruption";
-  corrupted.close();
-  if (!corrupted) {
-    std::wcerr << L"The fallback test could not corrupt its isolated game file.\n";
-    return 8;
+  const bool exercise_rebind = rebind_test_requested();
+  if (exercise_rebind) {
+    if (!rebind_managed_links(game_root, runtime_layout)) {
+      std::wcerr << L"The managed link layout could not be rebuilt for recovery.\n";
+      return 13;
+    }
+  } else {
+    std::ofstream corrupted(game_root / plan_path(corruptible->relative_file),
+                            std::ios::binary | std::ios::trunc);
+    corrupted << "fallback-test-corruption";
+    corrupted.close();
+    if (!corrupted) {
+      std::wcerr << L"The fallback test could not corrupt its isolated game file.\n";
+      return 8;
+    }
   }
 
   const auto restored = runtime_swapper::restore_runtime(game_root);
@@ -114,11 +170,22 @@ namespace {
     std::wcerr << restored.message << L"\n";
     return 9;
   }
-  const auto restored_hash =
-      runtime_swapper::sha256_file(game_root / plan_path(corruptible->relative_file));
-  if (!restored_hash.has_value() || *restored_hash != corruptible->source_sha256) {
-    std::wcerr << L"The fallback backup did not restore the source file.\n";
-    return 10;
+  for (const auto& plan : runtime_swapper::patch_plan) {
+    if (!runtime_swapper::patch_plan_entry_enabled(runtime_layout, plan)) continue;
+    const auto logical = game_root / plan_path(plan.relative_file);
+    std::error_code path_error;
+    const auto effective = std::filesystem::canonical(logical, path_error);
+    const auto restored_hash = path_error
+                                   ? std::optional<std::string>{}
+                                   : runtime_swapper::sha256_file(effective);
+    if (plan.source_present &&
+        (!restored_hash.has_value() || *restored_hash != plan.source_sha256)) {
+      std::wcerr << (exercise_rebind
+                         ? L"The rebound managed link was not restored to source.\n"
+                         : L"The fallback backup did not restore the source file.\n")
+                 << L"Managed file: " << logical << L"\n";
+      return 10;
+    }
   }
   std::wcout << downgraded.message << L"\n" << restored.message << L"\n";
   return 0;

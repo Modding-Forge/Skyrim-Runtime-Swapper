@@ -3,13 +3,16 @@
 #include <array>
 #include <bit>
 #include <cstddef>
+#include <cerrno>
 #include <cstdint>
-#include <fstream>
+#include <fcntl.h>
 #include <iomanip>
 #include <limits>
 #include <sstream>
 #include <span>
 #include <string>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace runtime_swapper {
 namespace {
@@ -120,17 +123,33 @@ class Sha256 {
 }  // namespace
 
 std::optional<std::string> sha256_file(const std::filesystem::path& file) {
-  std::ifstream stream(file, std::ios::binary);
-  if (!stream) return std::nullopt;
+  const int descriptor = ::open(file.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (descriptor < 0) return std::nullopt;
+  const auto result = sha256_native_file(descriptor);
+  ::close(descriptor);
+  return result;
+}
+
+std::optional<std::string> sha256_native_file(std::intptr_t native_handle) {
+  const int descriptor = static_cast<int>(native_handle);
+  struct stat status {};
+  if (descriptor < 0 || ::fstat(descriptor, &status) != 0 ||
+      !S_ISREG(status.st_mode)) {
+    return std::nullopt;
+  }
   Sha256 hash;
   std::array<std::byte, 1024 * 1024> buffer{};
-  while (stream) {
-    stream.read(reinterpret_cast<char*>(buffer.data()),
-                static_cast<std::streamsize>(buffer.size()));
-    const auto count = stream.gcount();
-    if (count > 0) hash.update(std::span(buffer.data(), static_cast<std::size_t>(count)));
+  off_t offset{};
+  for (;;) {
+    const auto count = ::pread(descriptor, buffer.data(), buffer.size(), offset);
+    if (count == 0) break;
+    if (count < 0) {
+      if (errno == EINTR) continue;
+      return std::nullopt;
+    }
+    hash.update(std::span(buffer.data(), static_cast<std::size_t>(count)));
+    offset += count;
   }
-  if (!stream.eof()) return std::nullopt;
   return hash.finish();
 }
 

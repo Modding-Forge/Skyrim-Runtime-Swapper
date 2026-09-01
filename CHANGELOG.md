@@ -2,6 +2,100 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.2.0-rc16 - 2026-09-01
+
+- Separates runtime activation, recovery, transaction support, and workspace
+  policy into focused core modules without changing recovery invariants.
+- Separates Windows and POSIX storage probing from their atomic file
+  primitives, with typed internal interfaces shared by all callers.
+- Retains RC15 bind-mount recovery support and the complete RC10 hardening,
+  fault-injection, sanitizer, and filesystem test coverage.
+- Removes duplicated transaction decisions and keeps comments limited to
+  non-obvious safety constraints and compatibility behavior.
+
+## 1.2.0-rc15 - 2026-09-01
+
+- Detects POSIX rename namespaces by mount ID, including bind mounts that share
+  a filesystem device but still reject cross-mount renames with `EXDEV`.
+- Stages only disposable patch and rollback files beside redirected effective
+  targets when Amethyst exposes `Data_Core` through a separate mount. The
+  durable journal and recovery vault remain outside the deployed game tree.
+- Reuses the existing reverse patches and verified vault fallback for restore;
+  deterministic mount-local files are rediscovered after crashes and unknown
+  content at those names is never deleted.
+- Moves mount-local transaction path and cleanup policy into a focused core
+  module and adds a real Linux bind-mount regression gate.
+
+## 1.2.0-rc14 - 2026-09-01
+
+- Allows read-only source and patch inputs deployed as final symbolic links or
+  reparse points while retaining handle-bound identity and hash validation.
+- Revalidates that every linked input still resolves to the same regular-file
+  object after HDiffPatch; linked output paths remain forbidden and the staged
+  runtime must still match the exact expected target SHA-256 before commit.
+- Adds a native regression test for symlinked patch inputs and identifies
+  source-input and patch-input open failures separately in diagnostics.
+
+## 1.2.0-rc13 - 2026-09-01
+
+- Adds failure-only SHA-256 diagnostics for the expected source, expected
+  target, actual patch input, patch asset, staged output, and live output by
+  reusing the hashes already calculated by the safety checks.
+- Reports stored and resolved targets for symbolic links and reparse points.
+  Hard-link failures report their filesystem object identity and link count;
+  hard links have no distinguished source name.
+- Identifies the exact managed and staged paths involved so Linux, Proton, and
+  mod-manager deployment failures can be diagnosed without asking users to
+  calculate checksums manually.
+
+## 1.2.0-rc12 - 2026-09-01
+
+- Moved disposable staging, recovery locators, and target-volume markers from
+  the Skyrim directory to a private, same-volume Steam-library workspace.
+- Uses a unique directory for every transaction and binds interrupted recovery
+  to that directory through the durable journal, including clean-target
+  restores that have no earlier activation journal.
+- Keeps RC5 through RC11 recovery readable while preventing Amethyst VFS and
+  physical deployments from capturing new SRS transaction files into
+  `Root_Folder` and redeploying a stale Dawnguard staging output.
+- Removed the Skyrim-local fixed-runtime marker and added regression coverage
+  for stale `staged/0`, `Data_Core` links, rebuilt managed links, persistent
+  markers, cleanup, and protocol-v5 native sidecar path transport.
+
+## 1.2.0-rc11 - 2026-09-01
+
+- Fixed fresh Linux and Proton launches where the coordination lock created a
+  volume-local storage root with the desktop umask and vault preparation then
+  rejected that same root instead of safely restricting SRS-owned directories.
+- Replaced oversized runtime-layout journal names with compact fingerprints and
+  added safe recovery for recognized RC10 transactions after Amethyst rebuilds
+  final managed links, including vanilla files exposed from `Data_Core`.
+- Treats equal-sized but corrupted target-cache objects as disposable: their
+  SRS-created staging candidates are removed and rebuilt from verified patches
+  during the same launch without touching unknown pre-existing files.
+- Restores large live files and verified vault fallbacks through a journaled
+  two-rename exchange, avoiding direct NTFS replacement failures and retaining
+  a recoverable discard across every power-loss boundary.
+- Updated native test transport to protocol v4 and added real-file regression
+  coverage for default Linux permissions, cache corruption, renamed SKSE
+  launchers, Amethyst link rebinding, restore, and cleanup.
+
+## 1.2.0-rc10 - 2026-08-31
+
+- Bound Windows and POSIX mutation primitives to opened files and directories,
+  with structured partial-mutation results and adversarial path-exchange tests.
+- Added stable Linux filesystem identities, fail-closed mount-only identities,
+  XDG ownership preservation, checked size arithmetic, and random temporary
+  names with exclusive creation.
+- Reverified the pinned ELF helper immediately before every Wine launch path
+  and described the one-shot IPC channel accurately as nonce-bound.
+- Passed already-opened source, patch, and output streams into HDiffPatch and
+  added recursive dependency-pin verification, ASan/UBSan, adapter fuzzing,
+  and reproducible native-build gates.
+- Supports Amethyst symlink deployments where its byte-identical launcher copy
+  is local to Skyrim but the read-only SKSE loader resolves into the deployment
+  store.
+
 ## 1.2.0-rc9 - 2026-08-31
 
 - Recognizes Amethyst's byte-identical `SkyrimSELauncher.exe` copy as an SKSE
@@ -52,7 +146,7 @@ All notable changes to Skyrim Runtime Swapper are documented in this file.
 
 - Added portable storage classification and automatically selected recovery vaults for Windows, Linux, Wine, and Proton.
 - Added recoverable persistent downgrades for external, exFAT, ntfs-3g, and otherwise non-automatic local filesystems.
-- Hardened transaction journals, conflict preservation, vault identity validation, locator repair, native sidecar authentication, and crash recovery.
+- Hardened transaction journals, conflict preservation, vault identity validation, locator repair, nonce-bound native sidecar IPC, and crash recovery.
 - Accepted canonical Bazzite and Fedora Atomic home aliases without allowing symlinks inside the recovery-vault hierarchy.
 - Added log copying to hard-block dialogs and recorded the complete storage probe reason before showing them.
 - Added Windows, Linux, WSL, Wine, filesystem, persistent-mode, fault-injection, and block-corruption test matrices.

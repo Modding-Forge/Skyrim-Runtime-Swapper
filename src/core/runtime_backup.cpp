@@ -107,12 +107,27 @@ SourceBackupResult ensure_source_backups(const std::filesystem::path& game_root)
     }
     const auto& live = managed->effective;
     const auto legacy = legacy_backup_path(game_root, plan);
-    const bool live_verified = hash_matches(live, plan.source_sha256);
-    const auto& source = live_verified ? live : legacy;
-    if (!live_verified && !hash_matches(legacy, plan.source_sha256)) {
+    const auto live_verification = verify_hash(live, plan.source_sha256);
+    const auto legacy_verification = live_verification.matches
+                                         ? HashVerification{}
+                                         : verify_hash(legacy,
+                                                       plan.source_sha256);
+    const auto& source = live_verification.matches ? live : legacy;
+    if (!live_verification.matches && !legacy_verification.matches) {
       return {ExitCode::backup_failed, changed,
               L"A verified source file is unavailable for the recovery vault: " +
-                  quote_path(managed->logical)};
+                  quote_path(managed->logical) +
+                  runtime_hash_verification_detail(
+                      plan.source_present, plan.source_sha256,
+                      plan.target_present, plan.target_sha256,
+                      live_verification.actual) +
+                  managed_link_verification_detail(*managed) +
+                  L"\nLegacy backup: " + quote_path(legacy) +
+                  L"\nLegacy backup actual SHA-256: " +
+                  (legacy_verification.actual
+                       ? std::wstring(legacy_verification.actual->begin(),
+                                      legacy_verification.actual->end())
+                       : L"<unavailable>")};
     }
     if (!commit_verified_vault_object(*vault, source, plan.source_sha256,
                                       plan.source_size)) {
@@ -120,9 +135,12 @@ SourceBackupResult ensure_source_backups(const std::filesystem::path& game_root)
               L"A source-runtime object could not be committed and verified in: " +
                   quote_path(vault->probe.vault_path) + L"\n\nManaged file: " +
                   quote_path(managed->logical) +
-                  (managed->redirected
-                       ? L"\nResolved target: " + quote_path(managed->effective)
-                       : L"")};
+                  runtime_hash_verification_detail(
+                      plan.source_present, plan.source_sha256,
+                      plan.target_present, plan.target_sha256,
+                      live_verification.matches ? live_verification.actual
+                                                : legacy_verification.actual) +
+                  managed_link_verification_detail(*managed)};
     }
     changed = true;
     verified_objects[index] = true;
@@ -148,11 +166,17 @@ bool has_verified_source_backup(const std::filesystem::path& game_root,
           hash_matches(legacy_backup_path(game_root, plan), plan.source_sha256));
 }
 
-bool restore_source_backup(const std::filesystem::path& game_root,
-                           const PatchPlanEntry& plan,
-                           const std::filesystem::path& live) {
+bool materialize_source_backup(const std::filesystem::path& game_root,
+                               const PatchPlanEntry& plan,
+                               const std::filesystem::path& destination) {
   const auto vault = resolve_vault_layout(game_root);
   if (!plan.source_present || !vault) return false;
+  std::error_code error;
+  const auto status = std::filesystem::symlink_status(destination, error);
+  if ((error && error != std::errc::no_such_file_or_directory) ||
+      (!error && std::filesystem::exists(status))) {
+    return false;
+  }
   if (!vault_object_matches(*vault, plan.source_sha256, plan.source_size)) {
     const auto legacy = legacy_backup_path(game_root, plan);
     if (!hash_matches(legacy, plan.source_sha256) ||
@@ -161,7 +185,8 @@ bool restore_source_backup(const std::filesystem::path& game_root,
       return false;
     }
   }
-  return restore_vault_object(*vault, plan.source_sha256, plan.source_size, live);
+  return restore_vault_object(*vault, plan.source_sha256, plan.source_size,
+                              destination);
 }
 
 }  // namespace runtime_swapper::core

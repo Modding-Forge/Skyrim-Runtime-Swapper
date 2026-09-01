@@ -1,4 +1,5 @@
 #include "internal/vault_store.hpp"
+#include "internal/transaction_workspace.hpp"
 
 #include "internal/fault_injection.hpp"
 #include "internal/file_operations.hpp"
@@ -169,12 +170,7 @@ constexpr std::string_view persistent_magic = "SRS-PERSISTENT-2\n";
   return text;
 }
 
-[[nodiscard]] std::filesystem::path game_locator(
-    const std::filesystem::path& game_root) {
-  return game_root / L".skyrim-runtime-swapper" / L"vault.locator";
-}
-
-[[nodiscard]] std::filesystem::path game_persistent_marker(
+[[nodiscard]] std::filesystem::path legacy_game_persistent_marker(
     const std::filesystem::path& game_root) {
   return game_root / L".skyrim-runtime-swapper" / L"persistent.v2";
 }
@@ -291,13 +287,26 @@ bool materialize_target_cache_object(
     const TargetCacheLayout& cache, std::string_view sha256,
     std::uint64_t expected_size, const std::filesystem::path& destination) {
   const auto store = cache_as_object_store(cache);
+  std::error_code destination_error;
+  const auto destination_status =
+      std::filesystem::symlink_status(destination, destination_error);
+  if ((destination_error &&
+       destination_error != std::errc::no_such_file_or_directory) ||
+      (!destination_error && std::filesystem::exists(destination_status))) {
+    // A cache miss must never replace or delete an unrecognized staging file.
+    return false;
+  }
   if (materialize_verified_vault_object(store, sha256, expected_size,
                                         destination)) {
     return true;
   }
   // Cache data is never a recovery source. A stale or incomplete object is
   // discarded after the staged copy fails verification so future launches do
-  // not repeatedly pay the same failed read cost.
+  // not repeatedly pay the same failed read cost. The copy primitive may have
+  // installed the invalid candidate before its hash was checked; remove that
+  // SRS-created staging object as well so the verified patch fallback can use
+  // the same exclusive output path.
+  (void)transaction_backend().durable_remove(destination);
   if (valid_hash(sha256)) {
     (void)transaction_backend().durable_remove(object_path(store, sha256));
   }
@@ -385,6 +394,14 @@ bool restore_vault_object(const VaultLayout& vault, std::string_view sha256,
                           std::uint64_t expected_size,
                           const std::filesystem::path& destination) {
   if (!vault_object_matches(vault, sha256, expected_size)) return false;
+  std::error_code error;
+  const auto status = std::filesystem::symlink_status(destination, error);
+  if ((error && error != std::errc::no_such_file_or_directory) ||
+      (!error && std::filesystem::exists(status))) {
+    // Recovery callers must first preserve and journal any occupied live path.
+    // This primitive only installs into an authenticated empty destination.
+    return false;
+  }
   return materialize_verified_vault_object(vault, sha256, expected_size,
                                            destination);
 }
@@ -426,8 +443,9 @@ bool commit_verified_runtime_manifest(const VaultLayout& vault,
     return false;
   }
   const auto locator = locator_contents(vault);
-  return transaction_backend().write_atomic(game_locator(game_root), locator) &&
-         read_all(game_locator(game_root)) == locator;
+  const auto target = workspace_locator(vault.probe);
+  return transaction_backend().write_atomic(target, locator) &&
+         read_all(target) == locator;
 }
 
 bool runtime_manifest_matches(const VaultLayout& vault) {
@@ -487,14 +505,16 @@ bool commit_persistent_marker(const VaultLayout& vault,
                               bool risk_accepted, bool catalog_persistent) {
   if (!runtime_layout_matches(game_root, vault.runtime_layout)) return false;
   const auto text = persistent_contents(vault, risk_accepted, catalog_persistent);
-  // The vault marker is committed first. If power fails between these writes, recovery sees
-  // the vault marker and recreates the game marker instead of restoring automatically.
+  // The vault marker is committed first. If power fails between these writes,
+  // recovery recreates the target-volume mirror. The mirror is deliberately
+  // outside Skyrim so a VFS/overwrite manager cannot capture it as mod payload.
+  const auto target_marker = workspace_persistent_marker(vault.probe);
   if (fault_injected("persistent.before-vault-marker") ||
       !transaction_backend().write_atomic(vault.persistent_marker, text) ||
       read_all(vault.persistent_marker) != text ||
       fault_injected("persistent.after-vault-marker") ||
-      !transaction_backend().write_atomic(game_persistent_marker(game_root), text) ||
-      read_all(game_persistent_marker(game_root)) != text ||
+      !transaction_backend().write_atomic(target_marker, text) ||
+      read_all(target_marker) != text ||
       fault_injected("persistent.after-game-marker")) {
     return false;
   }
@@ -502,37 +522,62 @@ bool commit_persistent_marker(const VaultLayout& vault,
 }
 
 bool remove_persistent_marker(const VaultLayout& vault,
-                              const std::filesystem::path& game_root) {
+                               const std::filesystem::path& game_root) {
   auto& backend = transaction_backend();
-  const auto game_marker = game_persistent_marker(game_root);
-  const auto game_exists = regular_file_exists(game_marker);
+  const auto target_marker = workspace_persistent_marker(vault.probe);
+  const auto target_exists = regular_file_exists(target_marker);
   const auto vault_exists = regular_file_exists(vault.persistent_marker);
-  if (!game_exists || !vault_exists) return false;
-  if (*game_exists && !backend.durable_remove(game_marker)) {
+  if (!target_exists || !vault_exists) return false;
+  if (*target_exists && !backend.durable_remove(target_marker)) {
     return false;
   }
-  return !*vault_exists || backend.durable_remove(vault.persistent_marker);
+  if (*vault_exists && !backend.durable_remove(vault.persistent_marker)) {
+    return false;
+  }
+
+  // Retire only an exact private RC11 mirror. Captured symlinks and unrelated
+  // files remain untouched for explicit legacy cleanup.
+  const auto legacy_marker = legacy_game_persistent_marker(game_root);
+  const auto legacy_exists = regular_file_exists(legacy_marker);
+  if (legacy_exists && *legacy_exists) {
+    const auto stored = read_all(legacy_marker);
+    if (parse_persistent_contents(vault, stored) &&
+        !backend.durable_remove(legacy_marker)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 PersistentMarkerState reconcile_persistent_marker(
     const VaultLayout& vault, const std::filesystem::path& game_root,
     bool* risk_accepted, bool* catalog_persistent,
     bool repair_missing_game_marker) {
-  const auto game_marker = game_persistent_marker(game_root);
+  const auto target_marker = workspace_persistent_marker(vault.probe);
   const auto vault_exists = regular_file_exists(vault.persistent_marker);
-  const auto game_exists = regular_file_exists(game_marker);
-  if (!vault_exists || !game_exists) return PersistentMarkerState::invalid;
-  if (!*vault_exists && !*game_exists) return PersistentMarkerState::inactive;
+  const auto target_exists = regular_file_exists(target_marker);
+  if (!vault_exists || !target_exists) return PersistentMarkerState::invalid;
+  if (!*vault_exists && !*target_exists) return PersistentMarkerState::inactive;
   if (!*vault_exists) return PersistentMarkerState::invalid;
 
   const auto vault_text = read_all(vault.persistent_marker);
   const auto risk = parse_persistent_contents(vault, vault_text);
   if (!risk) return PersistentMarkerState::invalid;
-  if (*game_exists) {
-    if (read_all(game_marker) != vault_text) return PersistentMarkerState::invalid;
+  if (*target_exists) {
+    if (read_all(target_marker) != vault_text) {
+      return PersistentMarkerState::invalid;
+    }
   } else if (repair_missing_game_marker) {
-    if (!transaction_backend().write_atomic(game_marker, vault_text) ||
-        read_all(game_marker) != vault_text) {
+    // An exact RC11 mirror may authorize migration, but the repaired copy is
+    // always external. If no legacy mirror remains, the durable vault marker
+    // is still the recovery authority.
+    const auto legacy_marker = legacy_game_persistent_marker(game_root);
+    const auto legacy_exists = regular_file_exists(legacy_marker);
+    if (legacy_exists && *legacy_exists && read_all(legacy_marker) != vault_text) {
+      return PersistentMarkerState::invalid;
+    }
+    if (!transaction_backend().write_atomic(target_marker, vault_text) ||
+        read_all(target_marker) != vault_text) {
       return PersistentMarkerState::invalid;
     }
   }

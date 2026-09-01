@@ -76,9 +76,10 @@ UniqueHandle acquire_transaction_lock(
       !managed_path_is_safe(lock_path.parent_path())) {
     return {};
   }
-  std::error_code error;
-  std::filesystem::create_directories(lock_path.parent_path(), error);
-  if (error || !managed_path_is_safe(lock_path.parent_path())) return {};
+  if (!transaction_backend().prepare_coordination_lock(resolved_lock) ||
+      !managed_path_is_safe(lock_path.parent_path())) {
+    return {};
+  }
   UniqueHandle lock(CreateFileW(
       lock_path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS,
       FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_WRITE_THROUGH |

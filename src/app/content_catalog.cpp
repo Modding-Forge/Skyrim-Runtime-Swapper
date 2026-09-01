@@ -94,7 +94,9 @@ struct VaultCatalogRecord {
   auto& backend = transaction_backend();
   const auto journal = catalog_journal(catalog);
   bool success = true;
-  if (std::filesystem::is_regular_file(journal)) success = backend.durable_remove(journal);
+  if (std::filesystem::is_regular_file(journal)) {
+    success = static_cast<bool>(backend.durable_remove(journal));
+  }
   std::error_code error;
   std::filesystem::remove(catalog_work_root(catalog), error);
   return success && (!error || error == std::errc::directory_not_empty);
@@ -255,7 +257,7 @@ ContentCatalogResult recover_content_catalog(const std::filesystem::path& game_r
 
   const auto status = inspect_regular_file(*catalog, error);
   if (status == RegularFileStatus::missing) {
-    const bool restored = backend.restore_file(hold, *catalog);
+    const bool restored = static_cast<bool>(backend.restore_file(hold, *catalog));
     const auto restored_hash = restored ? sha256_file(*catalog) : std::nullopt;
     if (!restored || !restored_hash || *restored_hash != *expected_hash) {
       return {false, false, L"ContentCatalog.txt could not be recovered."};
@@ -329,20 +331,11 @@ ContentCatalogResult remove_incompatible_content_catalog(
   std::filesystem::create_directories(work, error);
   if (error) return {false, false, L"The ContentCatalog transaction directory could not be created."};
 
-  auto temporary = hold;
-  temporary += L".tmp-" + std::to_wstring(GetCurrentProcessId());
-  std::filesystem::remove(temporary, error);
-  error.clear();
-  if (!std::filesystem::copy_file(*catalog, temporary, std::filesystem::copy_options::none,
-                                  error) || error || !backend.flush_file(temporary)) {
-    std::filesystem::remove(temporary, error);
+  if (!backend.copy_atomic(*catalog, hold)) {
     return {false, false, L"ContentCatalog.txt could not be staged safely."};
   }
-  const auto temporary_hash = sha256_file(temporary);
-  if (!temporary_hash || *temporary_hash != *hash ||
-      !MoveFileExW(temporary.c_str(), hold.c_str(), MOVEFILE_WRITE_THROUGH) ||
-      !backend.sync_parent(hold)) {
-    std::filesystem::remove(temporary, error);
+  const auto temporary_hash = sha256_file(hold);
+  if (!temporary_hash || *temporary_hash != *hash) {
     std::filesystem::remove(hold, error);
     return {false, false, L"ContentCatalog.txt could not be staged safely."};
   }
