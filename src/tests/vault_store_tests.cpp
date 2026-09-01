@@ -349,6 +349,19 @@ int run_tests() {
           "verified\n") {
     return 17;
   }
+  if (!write_recovery_metadata(
+          temporary.path(), "lifecycle",
+          "SRS-RECOVERY-LIFECYCLE-1\nstate=restoring\n") ||
+      inspect_recovery_lifecycle(temporary.path()) !=
+          RecoveryLifecycleState::restoring ||
+      !transition_recovery_lifecycle(temporary.path(),
+                                     RecoveryLifecycleState::target_active) ||
+      !transition_recovery_lifecycle(temporary.path(),
+                                     RecoveryLifecycleState::preparing) ||
+      inspect_recovery_lifecycle(temporary.path()) !=
+          RecoveryLifecycleState::preparing) {
+    return 88;
+  }
   const auto metadata = vault->probe.vault_path / L"attachments" /
                         L"test-metadata";
   const auto metadata_alias = vault->probe.vault_path / L"attachments" /

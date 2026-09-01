@@ -14,12 +14,17 @@ bool recovery_transition_allowed(RecoveryLifecycleState from,
       return to == State::target_active || to == State::persistent ||
              to == State::restoring || to == State::cleanup_pending;
     case State::target_active:
-      return to == State::restoring || to == State::persistent ||
-             to == State::cleanup_pending;
+      // A fully verified installation that was already downgraded outside SRS
+      // can begin a session without a source-runtime mutation.
+      return to == State::preparing || to == State::restoring ||
+             to == State::persistent || to == State::cleanup_pending;
     case State::persistent:
       return to == State::restoring || to == State::cleanup_pending;
     case State::restoring:
-      return to == State::source_verified || to == State::cleanup_pending;
+      // Recovery may prove that no SRS runtime transaction exists and that the
+      // complete target runtime is still active. Adopt that verified state.
+      return to == State::target_active || to == State::source_verified ||
+             to == State::cleanup_pending;
     case State::source_verified:
       return to == State::clean_source || to == State::cleanup_pending;
     case State::cleanup_pending:

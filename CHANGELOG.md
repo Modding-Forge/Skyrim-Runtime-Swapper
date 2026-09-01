@@ -2,6 +2,17 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.2.1 - 2026-09-02
+
+- Restored verified target-runtime pass-through for installations that were
+  already downgraded, including persistent states left by version 1.1.0.
+- Kept Creation Club and ContentCatalog handling active during pass-through
+  without incorrectly requiring the live runtime to be Skyrim 1.7.104.
+- Kept diagnostics in one log file while retaining only the latest 30 primary
+  starts and their associated watcher output.
+- Added unambiguous run, session, and parent IDs to every diagnostic line and
+  removed pre-v2 logs automatically when the new log format starts.
+
 ## 1.2.0 - 2026-09-01
 
 - Added portable storage support for Windows, Linux, Wine, and Proton. Trusted

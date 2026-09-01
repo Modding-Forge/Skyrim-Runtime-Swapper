@@ -12,8 +12,8 @@
 #include <runtime_swapper/downgrade.hpp>
 #include <runtime_swapper/transaction_backend.hpp>
 
-#include <windows.h>
 #include <tlhelp32.h>
+#include <windows.h>
 
 #include <filesystem>
 #include <iterator>
@@ -33,12 +33,11 @@ namespace {
   const auto left_text = left.lexically_normal().wstring();
   const auto right_text = right.lexically_normal().wstring();
   return CompareStringOrdinal(left_text.data(), static_cast<int>(left_text.size()),
-                              right_text.data(), static_cast<int>(right_text.size()), TRUE) ==
-         CSTR_EQUAL;
+                              right_text.data(), static_cast<int>(right_text.size()),
+                              TRUE) == CSTR_EQUAL;
 }
 
-[[nodiscard]] UniqueHandle find_process_by_image(
-    const std::filesystem::path& expected_image) {
+[[nodiscard]] UniqueHandle find_process_by_image(const std::filesystem::path& expected_image) {
   UniqueHandle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
   if (!snapshot) return {};
 
@@ -47,8 +46,8 @@ namespace {
   if (!Process32FirstW(snapshot.get(), &entry)) return {};
   do {
     if (entry.th32ProcessID == GetCurrentProcessId()) continue;
-    UniqueHandle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE,
-                                     entry.th32ProcessID));
+    UniqueHandle process(
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, entry.th32ProcessID));
     if (!process) continue;
     std::vector<wchar_t> image(32768);
     DWORD size = static_cast<DWORD>(image.size());
@@ -60,18 +59,15 @@ namespace {
   return {};
 }
 
-}  // namespace
+} // namespace
 
 std::wstring operation_mutex_name() {
   return L"Local\\SkyrimRuntimeSwapper-" + source_version() + L"-to-" + target_version();
 }
 
-std::wstring session_complete_event_name() {
-  return operation_mutex_name() + L"-SessionComplete";
-}
+std::wstring session_complete_event_name() { return operation_mutex_name() + L"-SessionComplete"; }
 
-UniqueHandle acquire_transaction_lock(
-    const CoordinationLockPath& resolved_lock) {
+UniqueHandle acquire_transaction_lock(const CoordinationLockPath& resolved_lock) {
   const auto& lock_path = resolved_lock.value;
   if (lock_path.empty() || !lock_path.is_absolute() ||
       !managed_path_is_safe(lock_path.parent_path())) {
@@ -83,18 +79,15 @@ UniqueHandle acquire_transaction_lock(
   }
   UniqueHandle lock(CreateFileW(
       lock_path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS,
-      FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_WRITE_THROUGH |
-          FILE_FLAG_OPEN_REPARSE_POINT,
-      nullptr));
+      FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_WRITE_THROUGH | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
   if (!lock) return {};
   FILE_ATTRIBUTE_TAG_INFO attributes{};
   FILE_STANDARD_INFO standard{};
-  if (!GetFileInformationByHandleEx(lock.get(), FileAttributeTagInfo,
-                                    &attributes, sizeof(attributes)) ||
-      !GetFileInformationByHandleEx(lock.get(), FileStandardInfo, &standard,
-                                    sizeof(standard)) ||
-      (attributes.FileAttributes &
-       (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0 ||
+  if (!GetFileInformationByHandleEx(lock.get(), FileAttributeTagInfo, &attributes,
+                                    sizeof(attributes)) ||
+      !GetFileInformationByHandleEx(lock.get(), FileStandardInfo, &standard, sizeof(standard)) ||
+      (attributes.FileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) !=
+          0 ||
       standard.NumberOfLinks != 1) {
     return {};
   }
@@ -102,11 +95,12 @@ UniqueHandle acquire_transaction_lock(
 }
 
 bool launch_session_watcher(const std::filesystem::path& helper,
-                            const std::filesystem::path& game_root,
-                            DWORD loader_process_id,
+                            const std::filesystem::path& game_root, DWORD loader_process_id,
                             bool restore_runtime_after_session,
                             bool restore_content_catalog_after_session,
-                            bool restore_creation_club_after_session) {
+                            bool restore_creation_club_after_session,
+                            std::wstring_view diagnostic_session_id,
+                            std::wstring_view diagnostic_parent_run_id) {
   const auto ready_event_name = watcher_ready_event_name(loader_process_id);
   UniqueHandle ready_event(CreateEventW(nullptr, TRUE, FALSE, ready_event_name.c_str()));
   if (!ready_event) return false;
@@ -114,10 +108,12 @@ bool launch_session_watcher(const std::filesystem::path& helper,
 
   std::wstring command = quote_windows_command_argument(helper.wstring()) +
                          L" --watch --game-root " +
-                         quote_windows_command_argument(game_root.wstring()) +
-                         L" --loader-pid " +
+                         quote_windows_command_argument(game_root.wstring()) + L" --loader-pid " +
                          std::to_wstring(loader_process_id) + L" --ready-event \"" +
-                         ready_event_name + L"\"";
+                         ready_event_name + L"\" --diagnostic-session " +
+                         quote_windows_command_argument(std::wstring(diagnostic_session_id)) +
+                         L" --diagnostic-parent-run " +
+                         quote_windows_command_argument(std::wstring(diagnostic_parent_run_id));
   if (restore_runtime_after_session) command += L" --restore-runtime";
   if (restore_content_catalog_after_session) command += L" --restore-content-catalog";
   if (restore_creation_club_after_session) command += L" --restore-creation-club";
@@ -137,7 +133,7 @@ bool launch_session_watcher(const std::filesystem::path& helper,
 
   const HANDLE wait_handles[] = {ready_event.get(), process.get()};
   const DWORD ready_result = WaitForMultipleObjects(static_cast<DWORD>(std::size(wait_handles)),
-                                                     wait_handles, FALSE, 30'000);
+                                                    wait_handles, FALSE, 30'000);
   if (ready_result == WAIT_OBJECT_0) return true;
 
   TerminateProcess(process.get(), static_cast<UINT>(ExitCode::watcher_start_failed));
@@ -149,8 +145,7 @@ bool launch_session_watcher(const std::filesystem::path& helper,
 }
 
 SessionResult watch_session_and_restore(const std::filesystem::path& game_root,
-                                        DWORD loader_process_id,
-                                        bool restore_runtime_after_session,
+                                        DWORD loader_process_id, bool restore_runtime_after_session,
                                         bool restore_content_catalog_after_session,
                                         bool restore_creation_club_after_session,
                                         const std::wstring& ready_event_name) {
@@ -219,23 +214,20 @@ SessionResult watch_session_and_restore(const std::filesystem::path& game_root,
     if (!probed.success()) {
       return {probed.code, probed.message};
     }
-    transaction_lock = acquire_transaction_lock(
-        probed.backend.coordination_lock);
+    transaction_lock = acquire_transaction_lock(probed.backend.coordination_lock);
     if (!transaction_lock) {
       return {ExitCode::another_instance_failed,
-              L"The watcher could not acquire the durable runtime transaction lock."};
+              L"The watcher could not acquire the durable runtime transaction "
+              L"lock."};
     }
   }
 
   if (is_wine_environment() &&
       (restore_runtime_after_session || restore_content_catalog_after_session ||
        restore_creation_club_after_session)) {
-    const auto restored =
-        run_wine_sidecar(WineSidecarOperation::recover, game_root);
+    const auto restored = run_wine_sidecar(WineSidecarOperation::recover, game_root);
     log_diagnostic(L"Native sidecar session recovery: " + restored.message);
-    return restored.success()
-               ? SessionResult{}
-               : SessionResult{restored.code, restored.message};
+    return restored.success() ? SessionResult{} : SessionResult{restored.code, restored.message};
   }
 
   if (restore_runtime_after_session || restore_content_catalog_after_session ||
@@ -247,4 +239,4 @@ SessionResult watch_session_and_restore(const std::filesystem::path& game_root,
   return {};
 }
 
-}  // namespace runtime_swapper::app
+} // namespace runtime_swapper::app

@@ -1,17 +1,20 @@
 #include "diagnostics.hpp"
 
+#include "diagnostic_log_store.hpp"
+#include "diagnostic_run.hpp"
 #include "path_display.hpp"
 #include "storage_operations.hpp"
 
-#include <windows.h>
 #include <commctrl.h>
-#include <shlobj.h>
 #include <shellapi.h>
+#include <shlobj.h>
+#include <windows.h>
 
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <optional>
 #include <string_view>
 #include <system_error>
@@ -22,6 +25,17 @@ namespace {
 
 constexpr int copy_skse_log_button_id = 1001;
 constexpr int verify_game_files_button_id = 1002;
+
+std::mutex diagnostic_identity_mutex;
+DiagnosticRunIdentity diagnostic_identity;
+
+[[nodiscard]] DiagnosticRunIdentity current_diagnostic_identity() {
+  std::scoped_lock lock(diagnostic_identity_mutex);
+  if (diagnostic_identity.run_id.empty()) {
+    diagnostic_identity = make_diagnostic_run_identity();
+  }
+  return diagnostic_identity;
+}
 
 [[nodiscard]] std::wstring wide_ascii(std::string_view value) {
   return std::wstring(value.begin(), value.end());
@@ -40,13 +54,11 @@ constexpr int verify_game_files_button_id = 1002;
 
 [[nodiscard]] std::optional<std::filesystem::path> skse_log_directory() {
   PWSTR documents_raw{};
-  if (FAILED(SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr,
-                                  &documents_raw))) {
+  if (FAILED(SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr, &documents_raw))) {
     return std::nullopt;
   }
   const std::filesystem::path directory =
-      std::filesystem::path(documents_raw) / L"My Games" /
-      L"Skyrim Special Edition" / L"SKSE";
+      std::filesystem::path(documents_raw) / L"My Games" / L"Skyrim Special Edition" / L"SKSE";
   CoTaskMemFree(documents_raw);
   return directory;
 }
@@ -57,8 +69,7 @@ constexpr int verify_game_files_button_id = 1002;
   return *directory / L"SkyrimRuntimeSwapper.log";
 }
 
-[[nodiscard]] bool starts_with_ignore_case(std::wstring_view value,
-                                           std::wstring_view prefix) {
+[[nodiscard]] bool starts_with_ignore_case(std::wstring_view value, std::wstring_view prefix) {
   return value.size() >= prefix.size() &&
          CompareStringOrdinal(value.data(), static_cast<int>(prefix.size()), prefix.data(),
                               static_cast<int>(prefix.size()), TRUE) == CSTR_EQUAL;
@@ -97,8 +108,7 @@ constexpr int verify_game_files_button_id = 1002;
 [[nodiscard]] std::optional<std::wstring> read_log_text(const std::filesystem::path& path) {
   std::ifstream stream(path, std::ios::binary);
   if (!stream) return std::nullopt;
-  const std::string bytes{std::istreambuf_iterator<char>(stream),
-                          std::istreambuf_iterator<char>()};
+  const std::string bytes{std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
   if (!stream.eof() && stream.fail()) return std::nullopt;
   if (bytes.empty()) return std::wstring{};
 
@@ -201,8 +211,7 @@ void show_error_dialog(const std::wstring& message) {
                   L"Skyrim Runtime Swapper", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
     }
     if (selected_button == verify_game_files_button_id) {
-      ShellExecuteW(nullptr, L"open", L"steam://validate/489830", nullptr, nullptr,
-                    SW_SHOWNORMAL);
+      ShellExecuteW(nullptr, L"open", L"steam://validate/489830", nullptr, nullptr, SW_SHOWNORMAL);
     }
     return;
   }
@@ -210,98 +219,110 @@ void show_error_dialog(const std::wstring& message) {
               MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
 }
 
-}  // namespace
+} // namespace
 
-bool copy_diagnostic_logs() noexcept {
-  return copy_latest_skse_log();
+bool copy_diagnostic_logs() noexcept { return copy_latest_skse_log(); }
+
+void initialize_diagnostic_run(const std::optional<std::wstring>& inherited_session_id,
+                               const std::optional<std::wstring>& parent_run_id) noexcept {
+  try {
+    std::scoped_lock lock(diagnostic_identity_mutex);
+    diagnostic_identity = make_diagnostic_run_identity(inherited_session_id, parent_run_id);
+  } catch (...) {
+  }
+}
+
+std::wstring diagnostic_run_id() noexcept {
+  try {
+    return current_diagnostic_identity().run_id;
+  } catch (...) {
+    return {};
+  }
+}
+
+std::wstring diagnostic_session_id() noexcept {
+  try {
+    return current_diagnostic_identity().session_id;
+  } catch (...) {
+    return {};
+  }
 }
 
 void log_diagnostic(const std::wstring& message) noexcept {
+  log_diagnostic_session(message, false);
+}
+
+void log_diagnostic_session(const std::wstring& message, bool primary_session) noexcept {
   try {
     const auto path = swapper_log_path();
     if (!path) return;
-    std::error_code error;
-    std::filesystem::create_directories(path->parent_path(), error);
-    if (error) return;
+
+    if (primary_session) {
+      if (const auto legacy_path = legacy_swapper_log_path()) {
+        (void)remove_legacy_diagnostic_log(*legacy_path);
+      }
+    }
 
     SYSTEMTIME time{};
     GetLocalTime(&time);
     wchar_t prefix[64]{};
-    swprintf_s(prefix, L"[%04u-%02u-%02u %02u:%02u:%02u] ", time.wYear, time.wMonth,
-               time.wDay, time.wHour, time.wMinute, time.wSecond);
-    const std::wstring line = std::wstring(prefix) + message + L"\r\n";
-    const int required = WideCharToMultiByte(CP_UTF8, 0, line.c_str(),
-                                             static_cast<int>(line.size()), nullptr, 0, nullptr,
-                                             nullptr);
+    swprintf_s(prefix, L"[%04u-%02u-%02u %02u:%02u:%02u] ", time.wYear, time.wMonth, time.wDay,
+               time.wHour, time.wMinute, time.wSecond);
+    const std::wstring line = std::wstring(prefix) +
+                              diagnostic_identity_prefix(current_diagnostic_identity()) + message +
+                              L"\r\n";
+    const int required = WideCharToMultiByte(
+        CP_UTF8, 0, line.c_str(), static_cast<int>(line.size()), nullptr, 0, nullptr, nullptr);
     if (required <= 0) return;
     std::string bytes(static_cast<std::size_t>(required), '\0');
-    if (WideCharToMultiByte(CP_UTF8, 0, line.c_str(), static_cast<int>(line.size()),
-                            bytes.data(), required, nullptr, nullptr) != required) {
+    if (WideCharToMultiByte(CP_UTF8, 0, line.c_str(), static_cast<int>(line.size()), bytes.data(),
+                            required, nullptr, nullptr) != required) {
       return;
     }
-    HANDLE file = CreateFileW(path->c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
-                              OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
-                              nullptr);
-    if (file == INVALID_HANDLE_VALUE) return;
-    DWORD written{};
-    WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr);
-    FlushFileBuffers(file);
-    CloseHandle(file);
+    (void)append_diagnostic_log(*path, bytes, primary_session);
   } catch (...) {
   }
 }
 
 void log_storage_probe(const BackendProbeResult& probe) noexcept {
   log_diagnostic(
-      L"Storage probe: mode=" + safety_mode_label(probe.mode) +
-      L"; backend=" + probe.description + L"; target=" +
-      probe.target_volume.description + L"; recovery-volume=" +
+      L"Storage probe: mode=" + safety_mode_label(probe.mode) + L"; backend=" + probe.description +
+      L"; target=" + probe.target_volume.description + L"; recovery-volume=" +
       probe.vault_volume.description + L"; recovery-vault=" +
-      display_storage_path(probe, StoragePathRole::recovery_vault) +
-      L"; target-cache=" +
-      display_storage_path(probe, StoragePathRole::target_cache) +
-      L"; coordination-lock=" +
-      display_storage_path(probe, StoragePathRole::coordination_lock) +
-      L"; transaction-work=" +
-      display_storage_path(probe, StoragePathRole::transaction_work) +
-      L"; technical-reason=" + probe.technical_reason);
+      display_storage_path(probe, StoragePathRole::recovery_vault) + L"; target-cache=" +
+      display_storage_path(probe, StoragePathRole::target_cache) + L"; coordination-lock=" +
+      display_storage_path(probe, StoragePathRole::coordination_lock) + L"; transaction-work=" +
+      display_storage_path(probe, StoragePathRole::transaction_work) + L"; technical-reason=" +
+      probe.technical_reason);
 }
 
-void log_operation_result(
-    const std::wstring& operation,
-    const InstallationOperationResult& result) noexcept {
+void log_operation_result(const std::wstring& operation,
+                          const InstallationOperationResult& result) noexcept {
   std::wstring line =
       L"Operation result: operation=" + operation + L"; code=" +
       std::to_wstring(static_cast<int>(result.code)) + L" (" +
       wide_ascii(exit_code_name(result.code)) + L"); lifecycle-state=" +
-      wide_ascii(recovery_state_name(result.lifecycle_state)) +
-      L"; lifecycle-phase=" +
-      wide_ascii(recovery_phase_name(result.lifecycle_phase)) +
-      L"; changed=" + (result.changed ? L"true" : L"false") +
-      L"; persistent=" + (result.persistent ? L"true" : L"false") +
-      L"; runtime-changed=" +
-      (result.runtime_changed ? L"true" : L"false") +
-      L"; creation-club-changed=" +
-      (result.creation_club_changed ? L"true" : L"false") +
-      L"; content-catalog-changed=" +
-      (result.content_catalog_changed ? L"true" : L"false") +
-      L"; content-catalog-persistent=" +
+      wide_ascii(recovery_state_name(result.lifecycle_state)) + L"; lifecycle-phase=" +
+      wide_ascii(recovery_phase_name(result.lifecycle_phase)) + L"; changed=" +
+      (result.changed ? L"true" : L"false") + L"; persistent=" +
+      (result.persistent ? L"true" : L"false") + L"; runtime-changed=" +
+      (result.runtime_changed ? L"true" : L"false") + L"; creation-club-changed=" +
+      (result.creation_club_changed ? L"true" : L"false") + L"; content-catalog-changed=" +
+      (result.content_catalog_changed ? L"true" : L"false") + L"; content-catalog-persistent=" +
       (result.content_catalog_persistent ? L"true" : L"false");
   if (!result.backend.technical_reason.empty()) {
     line += L"; backend-reason=" + result.backend.technical_reason;
   }
   log_diagnostic(line);
   if (!result.success() && !result.technical_detail.empty()) {
-    log_diagnostic(L"Operation failure detail: operation=" + operation +
-                   L"; " + result.technical_detail);
+    log_diagnostic(L"Operation failure detail: operation=" + operation + L"; " +
+                   result.technical_detail);
   }
 }
 
 int finish(ExitCode code, const std::wstring& message, UINT icon, bool quiet) {
-  log_diagnostic(L"Exit: code=" +
-                 std::to_wstring(static_cast<int>(code)) + L" (" +
-                 wide_ascii(exit_code_name(code)) + L"); message=" +
-                 message);
+  log_diagnostic(L"Exit: code=" + std::to_wstring(static_cast<int>(code)) + L" (" +
+                 wide_ascii(exit_code_name(code)) + L"); message=" + message);
   if (!quiet) {
     if ((icon & MB_ICONMASK) == MB_ICONERROR) {
       show_error_dialog(message);
@@ -313,4 +334,4 @@ int finish(ExitCode code, const std::wstring& message, UINT icon, bool quiet) {
   return static_cast<int>(code);
 }
 
-}  // namespace runtime_swapper::app
+} // namespace runtime_swapper::app

@@ -1,5 +1,7 @@
 #include "command_line.hpp"
 
+#include "diagnostic_run.hpp"
+
 #include <cstdlib>
 #include <string_view>
 
@@ -33,7 +35,7 @@ namespace {
   return static_cast<DWORD>(process_id);
 }
 
-}  // namespace
+} // namespace
 
 CommandLineOptions parse_command_line(int argc, wchar_t** argv) {
   CommandLineOptions options;
@@ -43,6 +45,14 @@ CommandLineOptions parse_command_line(int argc, wchar_t** argv) {
   }
   options.loader_process_id = process_id_argument(argc, argv);
   options.ready_event_name = string_argument(argc, argv, L"--ready-event");
+  if (const auto value = string_argument(argc, argv, L"--diagnostic-session");
+      value && valid_diagnostic_id(*value)) {
+    options.diagnostic_session_id = value;
+  }
+  if (const auto value = string_argument(argc, argv, L"--diagnostic-parent-run");
+      value && valid_diagnostic_id(*value)) {
+    options.diagnostic_parent_run_id = value;
+  }
   options.quiet = has_argument(argc, argv, L"--quiet");
   options.from_skse_loader = has_argument(argc, argv, L"--from-skse-loader");
   options.watch = has_argument(argc, argv, L"--watch");
@@ -54,4 +64,4 @@ CommandLineOptions parse_command_line(int argc, wchar_t** argv) {
   return options;
 }
 
-}  // namespace runtime_swapper::app
+} // namespace runtime_swapper::app

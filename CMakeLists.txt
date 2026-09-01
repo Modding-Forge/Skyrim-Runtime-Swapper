@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(SkyrimRuntimeSwapper VERSION 1.2.0 LANGUAGES C CXX)
+project(SkyrimRuntimeSwapper VERSION 1.2.1 LANGUAGES C CXX)
 
 option(SKYRIM_RUNTIME_BUILD_FUZZER
   "Build the Linux libFuzzer target for the handle-bound HDiffPatch adapter" OFF)
 
-set(SKYRIM_RUNTIME_RELEASE_VERSION "1.2.0")
+set(SKYRIM_RUNTIME_RELEASE_VERSION "1.2.1")
 if(SKYRIM_RUNTIME_RELEASE_VERSION MATCHES "-")
   set(SKYRIM_RUNTIME_VERSION_FLAGS "VS_FF_PRERELEASE")
 else()
@@ -393,6 +393,8 @@ add_executable(runtime_swapper_helper WIN32
   src/app/content_catalog_location_windows.cpp
   src/app/creation_club.cpp
   src/app/creation_club_inventory.cpp
+  src/app/diagnostic_log_store.cpp
+  src/app/diagnostic_run.cpp
   src/app/diagnostics.cpp
   src/app/fixed_runtime.cpp
   src/app/manual_gui.cpp
@@ -411,7 +413,7 @@ target_include_directories(runtime_swapper_helper BEFORE PRIVATE
   src/core
 )
 target_compile_definitions(runtime_swapper_helper PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(runtime_swapper_helper PRIVATE runtime_swapper_core version shell32 comctl32)
+target_link_libraries(runtime_swapper_helper PRIVATE runtime_swapper_core version shell32 comctl32 ole32)
 set_target_properties(runtime_swapper_helper PROPERTIES OUTPUT_NAME SkyrimRuntimeSwapper)
 srs_harden_binary(runtime_swapper_helper)
 add_windows_version_resource(runtime_swapper_helper "SkyrimRuntimeSwapper.exe"
@@ -468,15 +470,52 @@ if(BUILD_TESTING)
   add_executable(command_line_tests
     src/tests/command_line_tests.cpp
     src/app/command_line.cpp
+    src/app/diagnostic_run.cpp
   )
   target_include_directories(command_line_tests PRIVATE src/app)
   target_compile_definitions(command_line_tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_link_libraries(command_line_tests PRIVATE ole32)
   if(MSVC)
     target_compile_options(command_line_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
   endif()
   add_test(NAME command_line_tests COMMAND command_line_tests)
   add_windows_version_resource(command_line_tests "command_line_tests.exe"
     "Skyrim Runtime Swapper Command Line Tests" "command_line_tests" "VFT_APP")
+
+  add_executable(diagnostic_log_store_tests
+    src/tests/diagnostic_log_store_tests.cpp
+    src/app/diagnostic_log_store.cpp
+  )
+  target_include_directories(diagnostic_log_store_tests PRIVATE src/app)
+  target_compile_definitions(diagnostic_log_store_tests PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  if(MSVC)
+    target_compile_options(diagnostic_log_store_tests PRIVATE
+      /W4 /permissive- /EHsc /utf-8)
+  endif()
+  add_test(NAME diagnostic_log_store_tests COMMAND diagnostic_log_store_tests)
+  add_windows_version_resource(diagnostic_log_store_tests
+    "diagnostic_log_store_tests.exe"
+    "Skyrim Runtime Swapper Diagnostic Log Tests"
+    "diagnostic_log_store_tests" "VFT_APP")
+
+  add_executable(diagnostic_run_tests
+    src/tests/diagnostic_run_tests.cpp
+    src/app/diagnostic_run.cpp
+  )
+  target_include_directories(diagnostic_run_tests PRIVATE src/app)
+  target_compile_definitions(diagnostic_run_tests PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_link_libraries(diagnostic_run_tests PRIVATE ole32)
+  if(MSVC)
+    target_compile_options(diagnostic_run_tests PRIVATE
+      /W4 /permissive- /EHsc /utf-8)
+  endif()
+  add_test(NAME diagnostic_run_tests COMMAND diagnostic_run_tests)
+  add_windows_version_resource(diagnostic_run_tests
+    "diagnostic_run_tests.exe"
+    "Skyrim Runtime Swapper Diagnostic Run Tests"
+    "diagnostic_run_tests" "VFT_APP")
 
   add_executable(core_storage_tests src/tests/core_storage_tests.cpp)
   target_include_directories(core_storage_tests PRIVATE src/core)

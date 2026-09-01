@@ -92,11 +92,49 @@ recovered_source(const std::filesystem::path &game_root,
                    runtime.changed_files || creation_club.changed ||
                        catalog.changed);
   }
+
+  const bool source_active = source_runtime_is_active(game_root);
+  if (!source_active && target_runtime_is_active(game_root)) {
+    const auto current_lifecycle = inspect_recovery_lifecycle(game_root);
+    if (!current_lifecycle ||
+        (*current_lifecycle != RecoveryLifecycleState::target_active &&
+         !transition_recovery_lifecycle(
+             game_root, RecoveryLifecycleState::target_active))) {
+      return failure(ExitCode::commit_failed, std::move(backend),
+                     L"The verified existing target state could not be "
+                     L"committed.",
+                     runtime.changed_files || creation_club.changed ||
+                         catalog.changed,
+                     RecoveryLifecyclePhase::verify_source);
+    }
+    InstallationOperationResult result;
+    result.code = ExitCode::success;
+    result.backend = std::move(backend);
+    result.runtime_changed = runtime.changed_files;
+    result.creation_club_changed = creation_club.changed;
+    result.content_catalog_changed = catalog.changed;
+    result.lifecycle_state = RecoveryLifecycleState::target_active;
+    result.lifecycle_phase = RecoveryLifecyclePhase::complete;
+    result.changed = result.runtime_changed || result.creation_club_changed ||
+                     result.content_catalog_changed;
+    result.message = L"Skyrim " + std::wstring(target_version_label) +
+                     L" is already active. No runtime restore is required.";
+    return result;
+  }
+
   const auto fixed = disable_fixed_runtime(game_root);
   if (!fixed.success) {
     return failure(ExitCode::commit_failed, std::move(backend), fixed.message,
                    runtime.changed_files || creation_club.changed ||
                        catalog.changed);
+  }
+  if (!source_active) {
+    return failure(ExitCode::recovery_failed, std::move(backend),
+                   L"Runtime recovery completed without a fully verified "
+                   L"source or target state.",
+                   runtime.changed_files || creation_club.changed ||
+                       catalog.changed,
+                   RecoveryLifecyclePhase::verify_source);
   }
   const auto restore_duration = elapsed_milliseconds(restore_started);
   const auto cleanup_started = SteadyClock::now();

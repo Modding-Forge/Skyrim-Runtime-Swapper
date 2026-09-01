@@ -13,6 +13,8 @@ struct CommandLineOptions {
   std::optional<std::filesystem::path> game_root;
   std::optional<DWORD> loader_process_id;
   std::optional<std::wstring> ready_event_name;
+  std::optional<std::wstring> diagnostic_session_id;
+  std::optional<std::wstring> diagnostic_parent_run_id;
   bool quiet{};
   bool from_skse_loader{};
   bool watch{};
@@ -23,4 +25,4 @@ struct CommandLineOptions {
 
 [[nodiscard]] CommandLineOptions parse_command_line(int argc, wchar_t** argv);
 
-}  // namespace runtime_swapper::app
+} // namespace runtime_swapper::app
