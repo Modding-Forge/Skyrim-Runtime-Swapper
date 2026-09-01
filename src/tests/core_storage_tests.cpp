@@ -17,6 +17,7 @@
 #include <iostream>
 #include <string>
 #include <system_error>
+#include <vector>
 
 namespace {
 
@@ -47,7 +48,7 @@ void exchange_parent_at_resolve(std::string_view point) noexcept {
 class TemporaryDirectory {
  public:
   TemporaryDirectory()
-      : path_(std::filesystem::temp_directory_path() /
+      : path_(test_base() /
               (L"skyrim-runtime-swapper-core-tests-" +
                std::to_wstring(GetCurrentProcessId()))) {
     std::error_code error;
@@ -63,6 +64,18 @@ class TemporaryDirectory {
   [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
 
  private:
+  [[nodiscard]] static std::filesystem::path test_base() {
+    const DWORD required = GetEnvironmentVariableW(L"LOCALAPPDATA", nullptr, 0);
+    if (required > 1) {
+      std::vector<wchar_t> value(required);
+      if (GetEnvironmentVariableW(L"LOCALAPPDATA", value.data(), required) ==
+          required - 1) {
+        return std::filesystem::path(value.data());
+      }
+    }
+    return std::filesystem::temp_directory_path();
+  }
+
   std::filesystem::path path_;
 };
 
@@ -331,10 +344,12 @@ int main() {
                           L"common" / L"Skyrim Special Edition";
   std::filesystem::create_directories(steam_game);
   const auto steam_probe = backend.probe(steam_game);
-  const auto local_storage = temporary.path() / L"SteamLibrary" /
-                             L".runtime-swapper";
+  const auto local_storage = steam_probe.vault_path.parent_path().parent_path()
+                                 .parent_path();
   if (!steam_probe.success() ||
       steam_probe.mode != runtime_swapper::SafetyMode::automatic ||
+      local_storage.filename() != L".runtime-swapper" ||
+      local_storage.parent_path().filename() != L"SteamLibrary" ||
       steam_probe.vault_path.lexically_relative(local_storage).empty() ||
       steam_probe.target_cache.value.parent_path().parent_path() !=
           local_storage ||
@@ -342,6 +357,14 @@ int main() {
           local_storage ||
       steam_probe.coordination_lock.value.parent_path().parent_path() !=
           local_storage) {
+    std::wcerr << L"steam-probe code=" << static_cast<int>(steam_probe.code)
+               << L" mode=" << static_cast<int>(steam_probe.mode)
+               << L" reason=" << steam_probe.technical_reason
+               << L" vault=" << steam_probe.vault_path
+               << L" cache=" << steam_probe.target_cache.value
+               << L" work=" << steam_probe.transaction_work.value
+               << L" lock=" << steam_probe.coordination_lock.value
+               << L" expected=" << local_storage << L'\n';
     return 43;
   }
   const auto real_directory = temporary.path() / L"real-directory";
