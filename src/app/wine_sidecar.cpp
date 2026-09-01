@@ -332,25 +332,26 @@ struct PermissionRepairResult {
     return {PermissionRepairStatus::launch_failed, ERROR_INVALID_NAME};
   }
 
-  auto chmod_path = wine_windows_path("/bin/chmod");
-  if (!chmod_path) {
+  std::array<wchar_t, MAX_PATH> system_directory{};
+  const UINT system_directory_length =
+      GetSystemDirectoryW(system_directory.data(),
+                          static_cast<UINT>(system_directory.size()));
+  if (system_directory_length == 0 ||
+      system_directory_length >= system_directory.size()) {
     return {PermissionRepairStatus::launch_failed, ERROR_FILE_NOT_FOUND};
   }
-  std::error_code canonical_error;
-  const auto canonical_chmod =
-      std::filesystem::weakly_canonical(*chmod_path, canonical_error);
-  if (!canonical_error && canonical_chmod.is_absolute()) {
-    chmod_path = canonical_chmod;
-  }
 
-  auto command = quote_windows_command_argument(chmod_path->wstring()) +
-                 L" 0700 " + quote_windows_command_argument(unix_sidecar);
+  const auto start_path = std::filesystem::path(system_directory.data()) /
+                          L"start.exe";
+  auto command = quote_windows_command_argument(start_path.wstring()) +
+                 L" /unix /wait /bin/chmod 0700 " +
+                 quote_windows_command_argument(unix_sidecar);
   std::vector<wchar_t> mutable_command(command.begin(), command.end());
   mutable_command.push_back(L'\0');
   STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
   PROCESS_INFORMATION process_info{};
-  if (!CreateProcessW(chmod_path->c_str(), mutable_command.data(), nullptr,
+  if (!CreateProcessW(start_path.c_str(), mutable_command.data(), nullptr,
                       nullptr, FALSE,
                       CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, nullptr,
                       working_directory.c_str(), &startup, &process_info)) {
