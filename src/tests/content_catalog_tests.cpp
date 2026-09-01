@@ -137,6 +137,12 @@ int run_tests() {
   const auto legacy_recovery = recover_content_catalog(game_root);
   if (!legacy_recovery.success || !legacy_recovery.changed ||
       read_file(catalog) != "catalog-v1" || std::filesystem::exists(legacy)) {
+    std::wcerr << L"Legacy recovery failed: success="
+               << legacy_recovery.success << L", changed="
+               << legacy_recovery.changed << L", message="
+               << legacy_recovery.message << L", catalog="
+               << catalog.wstring() << L", legacy-exists="
+               << std::filesystem::exists(legacy) << L'\n';
     return 1;
   }
   const auto legacy_conflict_hash =
