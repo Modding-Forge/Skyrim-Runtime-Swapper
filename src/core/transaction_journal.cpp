@@ -1,5 +1,6 @@
 #include "internal/transaction_journal.hpp"
 #include "internal/fault_injection.hpp"
+#include "internal/storage_entry_policy.hpp"
 
 #include <runtime_swapper/checked_arithmetic.hpp>
 #include <runtime_swapper/transaction_backend.hpp>
@@ -263,53 +264,14 @@ bool TransactionJournal::append_batch(
 }
 
 JournalReadResult read_transaction_journal(const std::filesystem::path& path) {
-#if defined(_WIN32)
-  const DWORD attributes = GetFileAttributesW(path.c_str());
-  if (attributes == INVALID_FILE_ATTRIBUTES) {
-    const DWORD error = GetLastError();
-    return {(error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
-                ? JournalReadStatus::missing
-                : JournalReadStatus::corrupt,
-            false, {}};
+  std::error_code status_error;
+  (void)std::filesystem::symlink_status(path, status_error);
+  if (status_error == std::errc::no_such_file_or_directory) {
+    return {JournalReadStatus::missing, false, {}};
   }
-  if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+  if (status_error || !private_regular_file(path)) {
     return {JournalReadStatus::corrupt, false, {}};
   }
-  if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-    return {JournalReadStatus::corrupt, false, {}};
-  }
-  HANDLE journal = CreateFileW(
-      path.c_str(), GENERIC_READ,
-      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-      nullptr);
-  if (journal == INVALID_HANDLE_VALUE) {
-    return {JournalReadStatus::corrupt, false, {}};
-  }
-  FILE_ATTRIBUTE_TAG_INFO tag{};
-  FILE_STANDARD_INFO standard{};
-  const bool safe =
-      GetFileInformationByHandleEx(journal, FileAttributeTagInfo, &tag,
-                                   sizeof(tag)) &&
-      GetFileInformationByHandleEx(journal, FileStandardInfo, &standard,
-                                   sizeof(standard)) &&
-      (tag.FileAttributes &
-       (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) == 0 &&
-      standard.NumberOfLinks == 1;
-  CloseHandle(journal);
-  if (!safe) return {JournalReadStatus::corrupt, false, {}};
-#else
-  struct stat status {};
-  if (::lstat(path.c_str(), &status) != 0) {
-    return {errno == ENOENT ? JournalReadStatus::missing
-                            : JournalReadStatus::corrupt,
-            false, {}};
-  }
-  if (!S_ISREG(status.st_mode) || status.st_nlink != 1 ||
-      status.st_uid != ::geteuid()) {
-    return {JournalReadStatus::corrupt, false, {}};
-  }
-#endif
 
   std::ifstream stream(path, std::ios::binary);
   if (!stream) return {JournalReadStatus::corrupt, false, {}};

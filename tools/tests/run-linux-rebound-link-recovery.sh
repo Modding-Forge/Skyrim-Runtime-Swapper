@@ -40,6 +40,11 @@ deployment_store="$deployment"
 patch_deployment="$test_root/Amethyst/Root_Folder/RuntimeSwap/patches"
 state="$test_root/state"
 data_core_mounted=0
+deploy_link_kind="${SRS_TEST_DEPLOY_LINK_KIND:-symlink}"
+if [[ "$deploy_link_kind" != symlink && "$deploy_link_kind" != hardlink ]]; then
+  echo "SRS_TEST_DEPLOY_LINK_KIND must be symlink or hardlink" >&2
+  exit 2
+fi
 if [[ ${SRS_TEST_BIND_DATA_CORE:-0} == 1 ]]; then
   deployment_store="$game/.amethyst-backing/Data_Core"
   mkdir -p "$deployment" "$deployment_store"
@@ -103,7 +108,11 @@ for relative in "${managed[@]}"; do
   fi
   mkdir -p -- "$(dirname -- "$storage_target")"
   mv -- "$logical" "$storage_target"
-  ln -s -- "$target" "$logical"
+  if [[ "$deploy_link_kind" == hardlink ]]; then
+    ln -- "$storage_target" "$logical"
+  else
+    ln -s -- "$target" "$logical"
+  fi
 done
 
 if [[ ${SRS_TEST_BIND_DATA_CORE:-0} == 1 ]]; then
@@ -112,9 +121,12 @@ if [[ ${SRS_TEST_BIND_DATA_CORE:-0} == 1 ]]; then
   # reverse-patch/vault path on that same mount.
   XDG_STATE_HOME="$state" HOME="$test_root/home" \
     timeout 900 "$probe" "$game" "$game/RuntimeSwap/patches" >/dev/null
-else
+elif [[ "$deploy_link_kind" == symlink ]]; then
   XDG_STATE_HOME="$state" HOME="$test_root/home" \
     SRS_TEST_REBIND_MANAGED_LINKS=1 \
+    timeout 900 "$probe" "$game" "$game/RuntimeSwap/patches" >/dev/null
+else
+  XDG_STATE_HOME="$state" HOME="$test_root/home" \
     timeout 900 "$probe" "$game" "$game/RuntimeSwap/patches" >/dev/null
 fi
 
@@ -124,5 +136,17 @@ if find "$game" -name '.*.srs-*' -print -quit | grep -q .; then
   echo "mount-local transaction files remained after recovery" >&2
   exit 1
 fi
+if [[ "$deploy_link_kind" == hardlink ]]; then
+  for relative in "${managed[@]}"; do
+    logical="$game/$relative"
+    [[ -f "$logical" ]] || continue
+    if [[ "$relative" == Data/* ]]; then
+      storage_target="$deployment_store/${relative#Data/}"
+    else
+      storage_target="$game/.amethyst-root/$relative"
+    fi
+    cmp -- "$logical" "$storage_target"
+  done
+fi
 
-echo "Managed-link transaction recovery passed"
+echo "Managed $deploy_link_kind transaction recovery passed"

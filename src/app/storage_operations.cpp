@@ -31,16 +31,6 @@ constexpr std::string_view restore_intent = "SRS-PERSISTENT-RESTORE-1\n";
   return 3;
 }
 
-[[nodiscard]] StorageOperation operations_for(SafetyMode mode) noexcept {
-  const auto persistent = StorageOperation::activate_persistent |
-                          StorageOperation::restore_persistent |
-                          StorageOperation::recover;
-  return mode == SafetyMode::automatic
-             ? persistent | StorageOperation::activate_session
-             : (mode == SafetyMode::hard_blocked ? StorageOperation::none
-                                                  : persistent);
-}
-
 [[nodiscard]] InstallationOperationResult failure(
     ExitCode code, BackendProbeResult backend, std::wstring message,
     bool changed = false,
@@ -295,7 +285,7 @@ InstallationOperationResult probe_installation_storage(
 
   if (mode_rank(catalog.mode) > mode_rank(result.backend.mode)) {
     result.backend.mode = catalog.mode;
-    result.backend.allowed_operations = operations_for(catalog.mode);
+    result.backend.allowed_operations = allowed_storage_operations(catalog.mode);
     result.backend.description = safety_mode_label(catalog.mode) +
                                  L": ContentCatalog storage requires this mode";
     result.backend.technical_reason =

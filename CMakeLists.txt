@@ -262,6 +262,8 @@ add_library(runtime_swapper_core STATIC
   src/core/runtime_transaction_support.cpp
   src/core/runtime_activation.cpp
   src/core/runtime_transform.cpp
+  src/core/storage_probe_common.cpp
+  src/core/storage_entry_policy.cpp
   src/core/transaction_workspace.cpp
   src/core/transaction_journal.cpp
   src/core/vault_store.cpp

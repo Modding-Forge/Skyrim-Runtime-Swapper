@@ -1,7 +1,7 @@
 #include "internal/posix_storage_probe.hpp"
+#include "internal/storage_probe_common.hpp"
 
 #include <runtime_swapper/checked_arithmetic.hpp>
-#include <runtime_swapper/release_version.hpp>
 #include <runtime_swapper/sha256.hpp>
 
 #include <fcntl.h>
@@ -340,49 +340,6 @@ struct MountEntry {
                        : std::nullopt;
 }
 
-[[nodiscard]] std::string utf8_path(const std::filesystem::path& path) {
-  const auto value = path.generic_u8string();
-  return std::string(reinterpret_cast<const char*>(value.data()), value.size());
-}
-
-[[nodiscard]] std::string locator_contents(
-    std::string_view id, const std::filesystem::path& vault,
-    const VolumeIdentity& vault_volume) {
-  return "SRS-VAULT-LOCATOR-1\ninstallation=" + std::string(id) +
-         "\nvault=" + utf8_path(vault) + "\nvolume=" +
-         utf8_path(vault_volume.stable_id) + "\n";
-}
-
-[[nodiscard]] bool locator_matches(const std::filesystem::path& locator,
-                                   std::string_view id,
-                                   const std::filesystem::path& vault,
-                                   const VolumeIdentity& vault_volume) {
-  std::ifstream stream(locator, std::ios::binary);
-  if (!stream) return false;
-  const std::string text(std::istreambuf_iterator<char>(stream), {});
-  return !stream.bad() && text == locator_contents(id, vault, vault_volume);
-}
-
-[[nodiscard]] std::optional<std::filesystem::path> locator_vault_path(
-    const std::filesystem::path& locator, std::string_view id) {
-  std::ifstream stream(locator, std::ios::binary);
-  std::string magic;
-  std::string installation;
-  std::string vault;
-  if (!std::getline(stream, magic) || !std::getline(stream, installation) ||
-      !std::getline(stream, vault) || magic != "SRS-VAULT-LOCATOR-1" ||
-      installation != "installation=" + std::string(id) ||
-      !vault.starts_with("vault=")) {
-    return std::nullopt;
-  }
-  const auto encoded = vault.substr(6);
-  const std::u8string utf8(reinterpret_cast<const char8_t*>(encoded.data()),
-                           encoded.size());
-  auto path = std::filesystem::path(utf8);
-  return path.is_absolute() ? std::optional(path.lexically_normal())
-                            : std::nullopt;
-}
-
 [[nodiscard]] std::optional<std::filesystem::path> steam_library_root(
     const std::filesystem::path& game_root) {
   const auto common = game_root.parent_path();
@@ -392,28 +349,6 @@ struct MountEntry {
     return std::nullopt;
   }
   return steamapps.parent_path();
-}
-
-[[nodiscard]] bool vault_manifest_identity_matches(
-    const std::filesystem::path& vault, std::string_view id,
-    const VolumeIdentity& target_volume, const VolumeIdentity& vault_volume) {
-  const auto manifest = vault / "manifest.v2";
-  std::error_code error;
-  if (!std::filesystem::is_regular_file(manifest, error) || error ||
-      !managed_path_is_safe(manifest)) {
-    return false;
-  }
-  std::ifstream stream(manifest, std::ios::binary);
-  std::array<std::string, 6> lines;
-  for (auto& line : lines) {
-    if (!std::getline(stream, line)) return false;
-  }
-  return lines[0] == "SRS-VAULT-MANIFEST-2" &&
-         lines[1] == "installation=" + std::string(id) &&
-         lines[2].starts_with("source=") && lines[2].size() > 7 &&
-         lines[3].starts_with("target=") && lines[3].size() > 7 &&
-         lines[4] == "targetVolume=" + utf8_path(target_volume.stable_id) &&
-         lines[5] == "vaultVolume=" + utf8_path(vault_volume.stable_id);
 }
 
 [[nodiscard]] std::optional<std::string> installation_id(
@@ -437,43 +372,6 @@ struct MountEntry {
   const auto hash = sha256_string(identity);
   return hash ? std::optional("skyrimse-" + hash->substr(0, 16)) : std::nullopt;
 }
-
-[[nodiscard]] StorageOperation operations_for(SafetyMode mode) noexcept {
-  const auto persistent = StorageOperation::activate_persistent |
-                          StorageOperation::restore_persistent |
-                          StorageOperation::recover;
-  return mode == SafetyMode::automatic
-             ? persistent | StorageOperation::activate_session
-             : (mode == SafetyMode::hard_blocked ? StorageOperation::none : persistent);
-}
-
-[[nodiscard]] BackendProbeResult blocked(std::wstring technical,
-                                         std::wstring message,
-                                         VolumeIdentity target = {},
-                                         VolumeIdentity vault = {},
-                                         std::filesystem::path vault_path = {},
-                                         std::string id = {}) {
-  return {ExitCode::unsupported_filesystem, SafetyMode::hard_blocked,
-          std::move(target), std::move(vault), std::move(vault_path), std::move(id),
-          L"Hard blocked", std::move(technical), std::move(message),
-          StorageOperation::none};
-}
-
-[[nodiscard]] BackendProbeResult attach_storage_paths(
-    BackendProbeResult result, const std::filesystem::path& recovery_base,
-    const std::filesystem::path& target_base,
-    std::string_view id) {
-  result.recovery_vault.value = result.vault_path;
-  result.target_cache.value =
-      target_base / "cache" /
-      std::filesystem::path(patch_plan_hash_utf8.substr(0, 16));
-  result.coordination_lock.value =
-      recovery_base / "locks" / (std::string(id) + ".lock");
-  result.transaction_work.value =
-      target_base / "work" / std::filesystem::path(id);
-  return result;
-}
-
 
 }  // namespace
 
@@ -650,7 +548,7 @@ BackendProbeResult probe_posix_storage(
               candidate_mode == SafetyMode::automatic
                   ? L"Native filesystem durability supports automatic restoration."
                   : L"Verified persistent recovery is required for this target.",
-              operations_for(candidate_mode)}, storage_base,
+              allowed_storage_operations(candidate_mode)}, storage_base,
               target_storage_base, *id);
     }
 
@@ -708,7 +606,8 @@ BackendProbeResult probe_posix_storage(
             mode == SafetyMode::automatic
                 ? L"Native filesystem durability supports automatic restoration."
                 : L"Verified persistent recovery is required for this target.",
-            operations_for(mode)}, storage_base, target_storage_base, *id);
+            allowed_storage_operations(mode)}, storage_base,
+            target_storage_base, *id);
   }
 
 }  // namespace runtime_swapper

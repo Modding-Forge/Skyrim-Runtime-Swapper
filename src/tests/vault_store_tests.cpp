@@ -144,6 +144,29 @@ int run_tests() {
       !vault_object_matches(*vault, *hash, 8)) {
     return 2;
   }
+  const auto linked_source = temporary.path() / L"linked-source.bin";
+  const auto linked_source_alias = temporary.path() / L"linked-source-alias.bin";
+  write_file(linked_source, "linked-source");
+  if (!CreateHardLinkW(linked_source_alias.c_str(), linked_source.c_str(),
+                       nullptr)) {
+    return 41;
+  }
+  const auto linked_source_hash = sha256_file(linked_source);
+  if (!linked_source_hash ||
+      !commit_verified_vault_object(*vault, linked_source,
+                                    *linked_source_hash, 13) ||
+      !vault_object_matches(*vault, *linked_source_hash, 13)) {
+    return 42;
+  }
+  write_file(linked_source, "changed-input");
+  const auto linked_object =
+      vault->objects /
+      std::filesystem::path(linked_source_hash->begin(),
+                            linked_source_hash->end());
+  if (read_file(linked_source_alias) != "changed-input" ||
+      read_file(linked_object) != "linked-source") {
+    return 43;
+  }
   const auto cached_target = temporary.path() / L"cached-target.bin";
   write_file(cached_target, "tampered");
   const auto cached_hash = sha256_string("expected");

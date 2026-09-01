@@ -2,19 +2,13 @@
 
 #include "internal/vault_store.hpp"
 #include "internal/file_operations.hpp"
+#include "internal/storage_entry_policy.hpp"
 #include "internal/transaction_workspace.hpp"
 
 #include <runtime_swapper/transaction_backend.hpp>
 #include <runtime_swapper/downgrade.hpp>
 #include <runtime_swapper/patch_plan.hpp>
 #include <runtime_swapper/runtime_version.hpp>
-
-#if defined(_WIN32)
-#include <windows.h>
-#else
-#include <sys/stat.h>
-#include <unistd.h>
-#endif
 
 #include <algorithm>
 #include <cctype>
@@ -37,56 +31,6 @@ namespace {
          std::filesystem::path(name.begin(), name.end());
 }
 
-[[nodiscard]] bool private_regular_file(const std::filesystem::path& path) {
-#if defined(_WIN32)
-  HANDLE file = CreateFileW(
-      path.c_str(), GENERIC_READ,
-      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-      nullptr);
-  if (file == INVALID_HANDLE_VALUE) return false;
-  FILE_ATTRIBUTE_TAG_INFO tag{};
-  FILE_STANDARD_INFO standard{};
-  const bool safe =
-      GetFileInformationByHandleEx(file, FileAttributeTagInfo, &tag,
-                                   sizeof(tag)) &&
-      GetFileInformationByHandleEx(file, FileStandardInfo, &standard,
-                                   sizeof(standard)) &&
-      (tag.FileAttributes &
-       (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) == 0 &&
-      standard.NumberOfLinks == 1;
-  CloseHandle(file);
-  return safe;
-#else
-  struct stat status {};
-  return ::lstat(path.c_str(), &status) == 0 && S_ISREG(status.st_mode) &&
-         status.st_nlink == 1 && status.st_uid == ::geteuid();
-#endif
-}
-
-[[nodiscard]] bool private_directory(const std::filesystem::path& path) {
-#if defined(_WIN32)
-  HANDLE directory = CreateFileW(
-      path.c_str(), FILE_READ_ATTRIBUTES,
-      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-      nullptr);
-  if (directory == INVALID_HANDLE_VALUE) return false;
-  FILE_ATTRIBUTE_TAG_INFO tag{};
-  const bool safe =
-      GetFileInformationByHandleEx(directory, FileAttributeTagInfo, &tag,
-                                   sizeof(tag)) &&
-      (tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
-      (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
-  CloseHandle(directory);
-  return safe;
-#else
-  struct stat status {};
-  return ::lstat(path.c_str(), &status) == 0 && S_ISDIR(status.st_mode) &&
-         status.st_uid == ::geteuid();
-#endif
-}
-
 [[nodiscard]] bool remove_verified_legacy_runtime_backups(
     const std::filesystem::path& game_root) {
   auto& backend = transaction_backend();
@@ -97,10 +41,9 @@ namespace {
     if (!plan.source_present) continue;
     const auto backup = backup_root / core::utf8_path(plan.relative_file);
     std::error_code error;
-    const auto status = std::filesystem::symlink_status(backup, error);
+    (void)std::filesystem::symlink_status(backup, error);
     if (error == std::errc::no_such_file_or_directory) continue;
-    if (error || !std::filesystem::is_regular_file(status) ||
-        std::filesystem::is_symlink(status) || !private_regular_file(backup) ||
+    if (error || !core::private_regular_file(backup) ||
         !core::hash_matches(backup, plan.source_sha256) ||
         !backend.durable_remove(backup)) {
       return false;
@@ -162,10 +105,9 @@ std::optional<std::string> read_recovery_metadata(
   if (!vault) return std::string{};
   const auto path = metadata_path(*vault, name);
   std::error_code error;
-  const auto status = std::filesystem::symlink_status(path, error);
+  (void)std::filesystem::symlink_status(path, error);
   if (error == std::errc::no_such_file_or_directory) return std::nullopt;
-  if (error || !std::filesystem::is_regular_file(status) ||
-      std::filesystem::is_symlink(status) || !private_regular_file(path)) {
+  if (error || !core::private_regular_file(path)) {
     return std::string{};
   }
   std::ifstream stream(path, std::ios::binary);
@@ -182,10 +124,9 @@ bool remove_recovery_metadata(const std::filesystem::path& game_root,
   if (!vault) return false;
   const auto path = metadata_path(*vault, name);
   std::error_code error;
-  const auto status = std::filesystem::symlink_status(path, error);
+  (void)std::filesystem::symlink_status(path, error);
   if (error == std::errc::no_such_file_or_directory) return true;
-  if (error || !std::filesystem::is_regular_file(status) ||
-      std::filesystem::is_symlink(status) || !private_regular_file(path)) {
+  if (error || !core::private_regular_file(path)) {
     return false;
   }
   return static_cast<bool>(transaction_backend().durable_remove(path));
@@ -254,7 +195,8 @@ RecoveryLocatorMigrationResult retire_orphaned_recovery_locator(
   }
   if (error || !std::filesystem::is_directory(root_status) ||
       std::filesystem::is_symlink(root_status) ||
-      !managed_path_is_safe(metadata_root) || !private_directory(metadata_root)) {
+      !managed_path_is_safe(metadata_root) ||
+      !core::private_directory(metadata_root)) {
     return result(ExitCode::recovery_failed, false,
                   RecoveryLifecyclePhase::detach_locator,
                   L"The legacy transaction directory is not private and safe.");
@@ -269,9 +211,8 @@ RecoveryLocatorMigrationResult retire_orphaned_recovery_locator(
                     RecoveryLifecyclePhase::inspect,
                     L"Other transaction state remains beside the legacy locator.");
     }
-    const auto status = std::filesystem::symlink_status(locator, error);
-    if (error || !std::filesystem::is_regular_file(status) ||
-        std::filesystem::is_symlink(status) || !private_regular_file(locator)) {
+    (void)std::filesystem::symlink_status(locator, error);
+    if (error || !core::private_regular_file(locator)) {
       return result(ExitCode::recovery_failed, false,
                     RecoveryLifecyclePhase::detach_locator,
                     L"The legacy recovery locator is not a private regular file.");

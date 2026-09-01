@@ -3,6 +3,8 @@
 
 #include "internal/fault_injection.hpp"
 #include "internal/file_operations.hpp"
+#include "internal/storage_entry_policy.hpp"
+#include "internal/storage_probe_common.hpp"
 
 #include <runtime_swapper/patch_plan.hpp>
 #include <runtime_swapper/prepared_storage.hpp>
@@ -10,13 +12,6 @@
 #include <runtime_swapper/release_version.hpp>
 #include <runtime_swapper/runtime_layout.hpp>
 #include <runtime_swapper/sha256.hpp>
-
-#if defined(_WIN32)
-#include <windows.h>
-#else
-#include <sys/stat.h>
-#include <unistd.h>
-#endif
 
 #include <algorithm>
 #include <chrono>
@@ -32,7 +27,6 @@ namespace runtime_swapper::core {
 namespace {
 
 constexpr std::string_view manifest_magic = "SRS-VAULT-MANIFEST-2\n";
-constexpr std::string_view locator_magic = "SRS-VAULT-LOCATOR-1\n";
 constexpr std::string_view persistent_magic = "SRS-PERSISTENT-2\n";
 
 [[nodiscard]] bool valid_hash(std::string_view hash) {
@@ -47,43 +41,11 @@ constexpr std::string_view persistent_magic = "SRS-PERSISTENT-2\n";
   return vault.objects / std::filesystem::path(hash.begin(), hash.end());
 }
 
-[[nodiscard]] bool private_regular_file(const std::filesystem::path& path) {
-#if defined(_WIN32)
-  HANDLE file = CreateFileW(
-      path.c_str(), GENERIC_READ,
-      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-      nullptr);
-  if (file == INVALID_HANDLE_VALUE) return false;
-  FILE_ATTRIBUTE_TAG_INFO tag{};
-  FILE_STANDARD_INFO standard{};
-  const bool safe =
-      GetFileInformationByHandleEx(file, FileAttributeTagInfo, &tag,
-                                   sizeof(tag)) &&
-      GetFileInformationByHandleEx(file, FileStandardInfo, &standard,
-                                   sizeof(standard)) &&
-      (tag.FileAttributes &
-       (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) == 0 &&
-      standard.NumberOfLinks == 1;
-  CloseHandle(file);
-  return safe;
-#else
-  struct stat status {};
-  return ::lstat(path.c_str(), &status) == 0 && S_ISREG(status.st_mode) &&
-         status.st_nlink == 1 && status.st_uid == ::geteuid();
-#endif
-}
-
 [[nodiscard]] std::string read_all(const std::filesystem::path& path) {
   if (!private_regular_file(path)) return {};
   std::ifstream stream(path, std::ios::binary);
   if (!stream) return {};
   return std::string(std::istreambuf_iterator<char>(stream), {});
-}
-
-[[nodiscard]] std::string utf8_path(const std::filesystem::path& path) {
-  const auto text = path.generic_u8string();
-  return std::string(reinterpret_cast<const char*>(text.data()), text.size());
 }
 
 [[nodiscard]] std::string utf8_text(std::wstring_view text) {
@@ -176,11 +138,9 @@ constexpr std::string_view persistent_magic = "SRS-PERSISTENT-2\n";
 }
 
 [[nodiscard]] std::string locator_contents(const VaultLayout& vault) {
-  std::string text(locator_magic);
-  text += "installation=" + vault.probe.installation_id + "\n";
-  text += "vault=" + utf8_path(vault.probe.vault_path) + "\n";
-  text += "volume=" + utf8_path(vault.probe.vault_volume.stable_id) + "\n";
-  return text;
+  return runtime_swapper::locator_contents(vault.probe.installation_id,
+                                           vault.probe.vault_path,
+                                           vault.probe.vault_volume);
 }
 
 [[nodiscard]] std::string persistent_contents(const VaultLayout& vault,
@@ -207,12 +167,10 @@ struct PersistentFlags {
 [[nodiscard]] std::optional<bool> regular_file_exists(
     const std::filesystem::path& path) {
   std::error_code error;
-  const auto status = std::filesystem::symlink_status(path, error);
+  (void)std::filesystem::symlink_status(path, error);
   if (error == std::errc::no_such_file_or_directory) return false;
   if (error) return std::nullopt;
-  if (std::filesystem::is_symlink(status) ||
-      !std::filesystem::is_regular_file(status) ||
-      !private_regular_file(path)) {
+  if (!private_regular_file(path)) {
     return std::nullopt;
   }
   return true;
@@ -365,7 +323,7 @@ bool commit_verified_vault_object(const VaultLayout& vault,
                                   std::uint64_t expected_size) {
   if (vault_object_matches(vault, sha256, expected_size)) return true;
   std::error_code error;
-  if (!valid_hash(sha256) || !private_regular_file(verified_source) ||
+  if (!valid_hash(sha256) || !verified_regular_input(verified_source) ||
       std::filesystem::file_size(verified_source, error) != expected_size || error) {
     return false;
   }

@@ -2,12 +2,14 @@
 #include "internal/transaction_workspace.hpp"
 #include "internal/file_operations.hpp"
 #include "internal/fault_injection.hpp"
+#include "internal/vault_store.hpp"
 
 #include <runtime_swapper/sha256.hpp>
 #include <runtime_swapper/hdiff_patch.hpp>
 #include <runtime_swapper/transaction_backend.hpp>
 
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include <filesystem>
 #include <cstdlib>
@@ -167,6 +169,20 @@ int main() {
   write_file(live, "changed-after-clone");
   if (read_file(cloned_copy) != "source") return 21;
   write_file(live, "source");
+  VaultLayout linked_vault;
+  linked_vault.objects = temporary.path() / "vault-objects";
+  std::filesystem::create_directories(linked_vault.objects);
+  const auto linked_hash = sha256_file(live);
+  if (!linked_hash ||
+      !commit_verified_vault_object(linked_vault, live, *linked_hash, 6)) {
+    return 29;
+  }
+  const auto linked_object = linked_vault.objects / *linked_hash;
+  struct stat linked_object_status {};
+  if (::lstat(linked_object.c_str(), &linked_object_status) != 0 ||
+      linked_object_status.st_nlink != 1 || read_file(linked_object) != "source") {
+    return 30;
+  }
   const auto journal_path = temporary.path() / "vault" / "runtime.journal";
   TransactionJournal journal(journal_path, "0123456789abcdef0123456789abcdef",
                              "posix-test", true, true);

@@ -40,6 +40,17 @@ enum class StorageOperation : std::uint32_t {
                                        static_cast<std::uint32_t>(right));
 }
 
+[[nodiscard]] constexpr StorageOperation allowed_storage_operations(
+    SafetyMode mode) noexcept {
+  const auto persistent = StorageOperation::activate_persistent |
+                          StorageOperation::restore_persistent |
+                          StorageOperation::recover;
+  if (mode == SafetyMode::automatic) {
+    return persistent | StorageOperation::activate_session;
+  }
+  return mode == SafetyMode::hard_blocked ? StorageOperation::none : persistent;
+}
+
 struct VolumeIdentity {
   std::wstring stable_id;
   std::wstring filesystem;
