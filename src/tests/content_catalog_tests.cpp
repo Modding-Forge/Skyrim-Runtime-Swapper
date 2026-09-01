@@ -49,8 +49,14 @@ class TestEnvironment {
       previous_ = current;
       had_previous_ = true;
     }
+    if (const char* current = std::getenv("XDG_STATE_HOME")) {
+      previous_xdg_state_ = current;
+      had_previous_xdg_state_ = true;
+    }
     const auto path = catalog();
     (void)::setenv("SRS_CONTENT_CATALOG_PATH", path.c_str(), 1);
+    const auto state_home = root_ / "xdg-state";
+    (void)::setenv("XDG_STATE_HOME", state_home.c_str(), 1);
 #endif
   }
 
@@ -62,6 +68,11 @@ class TestEnvironment {
       (void)::setenv("SRS_CONTENT_CATALOG_PATH", previous_.c_str(), 1);
     } else {
       (void)::unsetenv("SRS_CONTENT_CATALOG_PATH");
+    }
+    if (had_previous_xdg_state_) {
+      (void)::setenv("XDG_STATE_HOME", previous_xdg_state_.c_str(), 1);
+    } else {
+      (void)::unsetenv("XDG_STATE_HOME");
     }
 #endif
     std::error_code error;
@@ -96,6 +107,8 @@ class TestEnvironment {
 #else
   std::string previous_;
   bool had_previous_{};
+  std::string previous_xdg_state_;
+  bool had_previous_xdg_state_{};
 #endif
 };
 
