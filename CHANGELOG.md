@@ -8,6 +8,9 @@ All notable changes to Skyrim Runtime Swapper are documented in this file.
   first v1.2.0 launch, including fallback backups, runtime caches, staging
   directories, completion markers, and stale transaction lock files. Unknown,
   linked, active, or unverifiable legacy state is preserved and blocks cleanup.
+- Writes diagnostics beside the other Skyrim mod logs under
+  `Documents\My Games\Skyrim Special Edition\SKSE`. The Copy Logs action can
+  still read the former AppData log when no new-location log exists.
 
 - Added portable storage classification and automatically selected recovery
   storage for Windows, Linux, Wine, and Proton. Trusted internal NTFS, ext4,
