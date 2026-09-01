@@ -1,0 +1,42 @@
+Skyrim Runtime Swapper - Proton Experimental
+============================================
+
+IMPORTANT: These instructions apply only to Proton Experimental. Do not use
+this override with other Proton versions unless Skyrim Runtime Swapper support
+specifically asks you to do so.
+
+Proton may prefer its built-in version.dll instead of the native version.dll
+included with Skyrim Runtime Swapper. If Skyrim Runtime Swapper does not run
+before SKSE checks the Skyrim runtime, set this environment variable for the
+process that launches SKSE:
+
+  WINEDLLOVERRIDES="version=n,b"
+
+Steam
+-----
+
+Add this to the launch options of the Steam entry that starts Skyrim, Vortex,
+or your mod manager:
+
+  WINEDLLOVERRIDES="version=n,b" %command%
+
+Other launchers and mod managers
+--------------------------------
+
+Add an environment variable to the launcher entry that starts Vortex, your mod
+manager, or skse64_loader.exe:
+
+  Name:  WINEDLLOVERRIDES
+  Value: version=n,b
+
+The setting must reach the same Wine or Proton process that runs
+skse64_loader.exe. It is not an argument for skse64_loader.exe. If the mod
+manager itself runs through Proton, set the variable when starting the mod
+manager so its child processes inherit it.
+
+After changing the setting, close the launcher and mod manager completely,
+start them again, and launch the unmodified skse64_loader.exe.
+
+If SKSE still reports the newer Skyrim runtime and no Skyrim Runtime Swapper
+dialog or log appears, the environment variable is not reaching the SKSE
+process.

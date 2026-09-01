@@ -1,5 +1,8 @@
 #include "diagnostics.hpp"
 
+#include "path_display.hpp"
+#include "storage_operations.hpp"
+
 #include <windows.h>
 #include <commctrl.h>
 #include <shlobj.h>
@@ -20,7 +23,11 @@ namespace {
 constexpr int copy_skse_log_button_id = 1001;
 constexpr int verify_game_files_button_id = 1002;
 
-[[nodiscard]] std::optional<std::filesystem::path> swapper_log_path() {
+[[nodiscard]] std::wstring wide_ascii(std::string_view value) {
+  return std::wstring(value.begin(), value.end());
+}
+
+[[nodiscard]] std::optional<std::filesystem::path> legacy_swapper_log_path() {
   const DWORD required = GetEnvironmentVariableW(L"LOCALAPPDATA", nullptr, 0);
   if (required == 0) return std::nullopt;
   std::vector<wchar_t> value(required);
@@ -31,6 +38,25 @@ constexpr int verify_game_files_button_id = 1002;
          L"SkyrimRuntimeSwapper.log";
 }
 
+[[nodiscard]] std::optional<std::filesystem::path> skse_log_directory() {
+  PWSTR documents_raw{};
+  if (FAILED(SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr,
+                                  &documents_raw))) {
+    return std::nullopt;
+  }
+  const std::filesystem::path directory =
+      std::filesystem::path(documents_raw) / L"My Games" /
+      L"Skyrim Special Edition" / L"SKSE";
+  CoTaskMemFree(documents_raw);
+  return directory;
+}
+
+[[nodiscard]] std::optional<std::filesystem::path> swapper_log_path() {
+  const auto directory = skse_log_directory();
+  if (!directory) return std::nullopt;
+  return *directory / L"SkyrimRuntimeSwapper.log";
+}
+
 [[nodiscard]] bool starts_with_ignore_case(std::wstring_view value,
                                            std::wstring_view prefix) {
   return value.size() >= prefix.size() &&
@@ -39,17 +65,11 @@ constexpr int verify_game_files_button_id = 1002;
 }
 
 [[nodiscard]] std::optional<std::filesystem::path> latest_skse_log() {
-  PWSTR documents_raw{};
-  if (FAILED(SHGetKnownFolderPath(FOLDERID_Documents, KF_FLAG_DEFAULT, nullptr,
-                                  &documents_raw))) {
-    return std::nullopt;
-  }
-  const std::filesystem::path log_directory =
-      std::filesystem::path(documents_raw) / L"My Games" / L"Skyrim Special Edition" / L"SKSE";
-  CoTaskMemFree(documents_raw);
+  const auto log_directory = skse_log_directory();
+  if (!log_directory) return std::nullopt;
 
   std::error_code error;
-  std::filesystem::directory_iterator iterator(log_directory, error);
+  std::filesystem::directory_iterator iterator(*log_directory, error);
   if (error) return std::nullopt;
 
   std::optional<std::filesystem::path> latest;
@@ -131,9 +151,18 @@ constexpr int verify_game_files_button_id = 1002;
     const auto log = latest_skse_log();
     const auto swapper_log = swapper_log_path();
     std::wstring combined;
+    bool swapper_log_read = false;
     if (swapper_log) {
       if (const auto text = read_log_text(*swapper_log)) {
         combined += L"===== Skyrim Runtime Swapper =====\r\n" + *text + L"\r\n";
+        swapper_log_read = true;
+      }
+    }
+    if (!swapper_log_read) {
+      if (const auto legacy_log = legacy_swapper_log_path()) {
+        if (const auto text = read_log_text(*legacy_log)) {
+          combined += L"===== Skyrim Runtime Swapper =====\r\n" + *text + L"\r\n";
+        }
       }
     }
     if (log) {
@@ -183,6 +212,10 @@ void show_error_dialog(const std::wstring& message) {
 
 }  // namespace
 
+bool copy_diagnostic_logs() noexcept {
+  return copy_latest_skse_log();
+}
+
 void log_diagnostic(const std::wstring& message) noexcept {
   try {
     const auto path = swapper_log_path();
@@ -218,8 +251,57 @@ void log_diagnostic(const std::wstring& message) noexcept {
   }
 }
 
+void log_storage_probe(const BackendProbeResult& probe) noexcept {
+  log_diagnostic(
+      L"Storage probe: mode=" + safety_mode_label(probe.mode) +
+      L"; backend=" + probe.description + L"; target=" +
+      probe.target_volume.description + L"; recovery-volume=" +
+      probe.vault_volume.description + L"; recovery-vault=" +
+      display_storage_path(probe, StoragePathRole::recovery_vault) +
+      L"; target-cache=" +
+      display_storage_path(probe, StoragePathRole::target_cache) +
+      L"; coordination-lock=" +
+      display_storage_path(probe, StoragePathRole::coordination_lock) +
+      L"; transaction-work=" +
+      display_storage_path(probe, StoragePathRole::transaction_work) +
+      L"; technical-reason=" + probe.technical_reason);
+}
+
+void log_operation_result(
+    const std::wstring& operation,
+    const InstallationOperationResult& result) noexcept {
+  std::wstring line =
+      L"Operation result: operation=" + operation + L"; code=" +
+      std::to_wstring(static_cast<int>(result.code)) + L" (" +
+      wide_ascii(exit_code_name(result.code)) + L"); lifecycle-state=" +
+      wide_ascii(recovery_state_name(result.lifecycle_state)) +
+      L"; lifecycle-phase=" +
+      wide_ascii(recovery_phase_name(result.lifecycle_phase)) +
+      L"; changed=" + (result.changed ? L"true" : L"false") +
+      L"; persistent=" + (result.persistent ? L"true" : L"false") +
+      L"; runtime-changed=" +
+      (result.runtime_changed ? L"true" : L"false") +
+      L"; creation-club-changed=" +
+      (result.creation_club_changed ? L"true" : L"false") +
+      L"; content-catalog-changed=" +
+      (result.content_catalog_changed ? L"true" : L"false") +
+      L"; content-catalog-persistent=" +
+      (result.content_catalog_persistent ? L"true" : L"false");
+  if (!result.backend.technical_reason.empty()) {
+    line += L"; backend-reason=" + result.backend.technical_reason;
+  }
+  log_diagnostic(line);
+  if (!result.success() && !result.technical_detail.empty()) {
+    log_diagnostic(L"Operation failure detail: operation=" + operation +
+                   L"; " + result.technical_detail);
+  }
+}
+
 int finish(ExitCode code, const std::wstring& message, UINT icon, bool quiet) {
-  log_diagnostic(L"Exit " + std::to_wstring(static_cast<int>(code)) + L": " + message);
+  log_diagnostic(L"Exit: code=" +
+                 std::to_wstring(static_cast<int>(code)) + L" (" +
+                 wide_ascii(exit_code_name(code)) + L"); message=" +
+                 message);
   if (!quiet) {
     if ((icon & MB_ICONMASK) == MB_ICONERROR) {
       show_error_dialog(message);

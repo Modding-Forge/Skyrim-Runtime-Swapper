@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -26,6 +27,7 @@ struct JournalRecordView {
   std::uint32_t file_index{};
   JournalPhase phase{};
   bool to_target{};
+  bool risk_accepted{};
   std::string transaction_id;
   std::string profile;
   std::string sha256;
@@ -39,13 +41,23 @@ struct JournalReadResult {
   std::vector<JournalRecordView> records;
 };
 
+struct JournalAppend {
+  JournalPhase phase{};
+  std::uint32_t file_index{};
+  std::string_view sha256;
+};
+
 class TransactionJournal {
  public:
   TransactionJournal(std::filesystem::path path, std::string transaction_id,
-                     std::string profile, bool to_target);
+                     std::string profile, bool to_target,
+                     bool risk_accepted = false);
 
   [[nodiscard]] bool append(JournalPhase phase, std::uint32_t file_index,
                             std::string_view sha256 = {});
+  // Commits a complete safety boundary with one file flush and one parent
+  // directory synchronization.
+  [[nodiscard]] bool append_batch(std::span<const JournalAppend> records);
   [[nodiscard]] const std::string& transaction_id() const noexcept {
     return transaction_id_;
   }
@@ -55,6 +67,8 @@ class TransactionJournal {
   std::string transaction_id_;
   std::string profile_;
   bool to_target_{};
+  bool risk_accepted_{};
+  bool usable_{true};
   std::uint64_t sequence_{};
 };
 

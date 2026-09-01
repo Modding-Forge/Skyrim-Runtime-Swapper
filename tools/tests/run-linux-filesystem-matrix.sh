@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+allow_missing_filesystems=false
+if [[ $# -eq 2 && "$2" == --allow-missing-filesystems ]]; then
+  allow_missing_filesystems=true
+elif [[ $# -ne 1 ]]; then
+  echo "usage: run-linux-filesystem-matrix.sh <storage_backend_probe> [--allow-missing-filesystems]" >&2
+  exit 2
+fi
+probe="$(realpath "$1")"
+if [[ ! -x "$probe" ]]; then
+  echo "probe is not executable: $probe" >&2
+  exit 2
+fi
+if [[ ${EUID} -ne 0 ]]; then
+  echo "the isolated loop-device matrix must run as root" >&2
+  exit 2
+fi
+
+for command in losetup mount umount truncate mkfs.ext2 mkfs.ext4 mkfs.xfs mkfs.btrfs \
+    mkfs.exfat mkfs.vfat mkfs.ntfs ntfs-3g; do
+  command -v "$command" >/dev/null || {
+    echo "missing test dependency: $command" >&2
+    exit 2
+  }
+done
+
+test_root="$(mktemp -d -p "${TMPDIR:-/tmp}" srs-storage-matrix.XXXXXX)"
+if [[ "$test_root" != /tmp/srs-storage-matrix.* &&
+      "$test_root" != "${TMPDIR:-/tmp}"/srs-storage-matrix.* ]]; then
+  echo "refusing unexpected test root: $test_root" >&2
+  exit 2
+fi
+declare -a mounts=()
+declare -a loops=()
+
+cleanup() {
+  set +e
+  for ((index=${#mounts[@]}-1; index>=0; --index)); do
+    mountpoint -q "${mounts[index]}" && umount "${mounts[index]}"
+  done
+  for ((index=${#loops[@]}-1; index>=0; --index)); do
+    if losetup "${loops[index]}" >/dev/null 2>&1; then
+      losetup -d "${loops[index]}"
+    fi
+  done
+  rm -rf -- "$test_root"
+}
+trap cleanup EXIT
+
+wait_for_persistent_identity() {
+  local loop="$1"
+  local root
+  local link
+  local attempt
+  if command -v udevadm >/dev/null; then
+    udevadm trigger --action=change "$loop" >/dev/null 2>&1 || true
+    udevadm settle --timeout=10 >/dev/null 2>&1 || true
+  fi
+  for ((attempt=0; attempt<50; ++attempt)); do
+    for root in /dev/disk/by-uuid /dev/disk/by-id; do
+      [[ -d "$root" ]] || continue
+      for link in "$root"/*; do
+        [[ -e "$link" ]] || continue
+        if [[ "$(readlink -f "$link")" == "$loop" ]]; then
+          return 0
+        fi
+      done
+    done
+    sleep 0.1
+  done
+  echo "persistent identity was not published for $loop" >&2
+  return 1
+}
+
+make_volume() {
+  local name="$1"
+  local filesystem="$2"
+  local size_mib="$3"
+  local image="$test_root/$name.img"
+  local mount_path="$test_root/mnt-$name"
+  truncate -s "${size_mib}M" "$image"
+  local loop
+  loop="$(losetup --find --show "$image")"
+  loops+=("$loop")
+  case "$filesystem" in
+    ext2) mkfs.ext2 -q -F "$loop" ;;
+    ext4) mkfs.ext4 -q -F "$loop" ;;
+    xfs) mkfs.xfs -q -f "$loop" ;;
+    btrfs) mkfs.btrfs -q -f "$loop" ;;
+    exfat) mkfs.exfat "$loop" >/dev/null ;;
+    vfat) mkfs.vfat "$loop" >/dev/null ;;
+    ntfs3g) mkfs.ntfs -F -Q "$loop" >/dev/null ;;
+    *) echo "unsupported matrix filesystem: $filesystem" >&2; exit 2 ;;
+  esac
+  mkdir -p "$mount_path"
+  if [[ "$filesystem" == ntfs3g ]]; then
+    mount -t ntfs-3g "$loop" "$mount_path"
+  else
+    mount "$loop" "$mount_path"
+  fi
+  wait_for_persistent_identity "$loop"
+  mounts+=("$mount_path")
+  created_loop="$loop"
+  created_mount="$mount_path"
+}
+
+release_volume() {
+  local mount_path="$1"
+  local loop="$2"
+  if mountpoint -q "$mount_path"; then
+    umount "$mount_path"
+  fi
+  if losetup "$loop" >/dev/null 2>&1; then
+    losetup -d "$loop"
+  fi
+}
+
+created_mount=""
+created_loop=""
+make_volume vault ext4 1024
+vault_mount="$created_mount"
+vault_state="$vault_mount/state"
+mkdir -p "$vault_state"
+chmod 0700 "$vault_state"
+
+run_case() {
+  local filesystem="$1"
+  local expected="$2"
+  local keep_volume="${3:-false}"
+  local target_mount
+  local target_loop
+  local output
+  local created
+  local actual
+  make_volume "target-$filesystem" "$filesystem" 512
+  target_mount="$created_mount"
+  target_loop="$created_loop"
+  mkdir -p "$target_mount/game"
+  output="$(XDG_STATE_HOME="$vault_state" HOME="$test_root/home" \
+    "$probe" "$target_mount/game" --prepare)"
+  printf '%s\n' "$output"
+  actual="$(sed -n 's/^mode=//p' <<<"$output")"
+  if [[ "$actual" != "$expected" ]]; then
+    echo "$filesystem was classified as $actual instead of $expected" >&2
+    return 1
+  fi
+  created="$(sed -n 's/^vault=//p' <<<"$output")"
+  [[ "$created" == "$vault_state"/modding-forge/skyrim-runtime-swapper/vaults/skyrimse-* ]]
+  [[ -d "$created" && ! -L "$created" && "$(stat -c '%a' "$created")" == 700 ]]
+  if [[ "$keep_volume" != true ]]; then
+    release_volume "$target_mount" "$target_loop"
+  fi
+}
+
+kernel_filesystem_available() {
+  local filesystem="$1"
+  grep -qw "$filesystem" /proc/filesystems && return 0
+  command -v modprobe >/dev/null && modprobe "$filesystem" 2>/dev/null || true
+  grep -qw "$filesystem" /proc/filesystems
+}
+
+exfat_available=true
+if "$allow_missing_filesystems" && ! kernel_filesystem_available exfat; then
+  exfat_available=false
+  echo "SKIP: this runner kernel does not provide exFAT mounts"
+fi
+
+run_case ext4 automatic true
+run_case xfs automatic
+run_case btrfs automatic
+if "$exfat_available"; then
+  run_case exfat persistent_only
+fi
+run_case vfat persistent_with_warning
+run_case ext2 persistent_with_warning
+run_case ntfs3g persistent_with_warning
+
+original_output="$(XDG_STATE_HOME="$vault_state" HOME="$test_root/home" \
+  "$probe" "${mounts[1]}/game")"
+printf '%s\n' "$original_output"
+[[ "$(sed -n 's/^mode=//p' <<<"$original_output")" == automatic ]]
+original_id="$(sed -n 's/^installation=//p' <<<"$original_output")"
+bind_mount="$test_root/bind-game"
+mkdir -p "$bind_mount"
+mount --bind "${mounts[1]}/game" "$bind_mount"
+mounts+=("$bind_mount")
+bind_output="$(XDG_STATE_HOME="$vault_state" HOME="$test_root/home" \
+  "$probe" "$bind_mount")"
+printf '%s\n' "$bind_output"
+[[ "$(sed -n 's/^mode=//p' <<<"$bind_output")" == automatic ]]
+bind_id="$(sed -n 's/^installation=//p' <<<"$bind_output")"
+if [[ -z "$original_id" || "$bind_id" != "$original_id" ]]; then
+  echo "installation identity changed through a bind mount" >&2
+  exit 1
+fi
+
+if "$exfat_available"; then
+  make_volume same-exfat exfat 1024
+  same_mount="$created_mount"
+  mkdir -p "$same_mount/game" "$same_mount/state"
+  XDG_STATE_HOME="$same_mount/state" HOME="$test_root/home" \
+    "$probe" "$same_mount/game" hard_blocked
+fi
+
+first_target="${mounts[1]}/game"
+bazzite_home="$vault_mount/bazzite-home"
+bazzite_home_alias="$test_root/bazzite-home-alias"
+bazzite_target="${mounts[1]}/game-bazzite"
+mkdir -p "$bazzite_home" "$bazzite_target"
+chmod 0700 "$bazzite_home"
+ln -s "$bazzite_home" "$bazzite_home_alias"
+bazzite_output="$(env -u XDG_STATE_HOME HOME="$bazzite_home_alias" \
+  "$probe" "$bazzite_target" --prepare)"
+printf '%s\n' "$bazzite_output"
+[[ "$(sed -n 's/^mode=//p' <<<"$bazzite_output")" == automatic ]]
+bazzite_vault="$(sed -n 's/^vault=//p' <<<"$bazzite_output")"
+[[ "$bazzite_vault" == "$bazzite_home"/.local/state/modding-forge/skyrim-runtime-swapper/vaults/skyrimse-* ]]
+[[ -d "$bazzite_vault" && ! -L "$bazzite_vault" &&
+   "$(stat -c '%a' "$bazzite_vault")" == 700 ]]
+
+make_volume undersized-vault ext4 128
+undersized_mount="$created_mount"
+mkdir -p "$undersized_mount/state"
+undersized_output="$(XDG_STATE_HOME="$undersized_mount/state" \
+  HOME="$test_root/home" "$probe" "$first_target" hard_blocked --prepare)"
+printf '%s\n' "$undersized_output"
+[[ "$(sed -n 's/^mode=//p' <<<"$undersized_output")" == hard_blocked ]]
+[[ "$(sed -n 's/^technical_reason=//p' <<<"$undersized_output")" == \
+   vault-insufficient-space ]]
+
+make_volume read-only-vault ext4 512
+read_only_mount="$created_mount"
+mkdir -p "$read_only_mount/state"
+mount -o remount,ro "$read_only_mount"
+read_only_output="$(XDG_STATE_HOME="$read_only_mount/state" \
+  HOME="$test_root/home" "$probe" "$first_target" hard_blocked --prepare)"
+printf '%s\n' "$read_only_output"
+[[ "$(sed -n 's/^mode=//p' <<<"$read_only_output")" == hard_blocked ]]
+[[ "$(sed -n 's/^technical_reason=//p' <<<"$read_only_output")" == \
+   vault-create-failed ]]
+
+mkdir -p "$test_root/tmpfs" "$test_root/tmpfs/game"
+mount -t tmpfs -o size=64m tmpfs "$test_root/tmpfs"
+mounts+=("$test_root/tmpfs")
+mkdir -p "$test_root/tmpfs/game"
+XDG_STATE_HOME="$vault_state" HOME="$test_root/home" \
+  "$probe" "$test_root/tmpfs/game" hard_blocked
+
+ln -s "$vault_state" "$test_root/symlink-state"
+XDG_STATE_HOME="$test_root/symlink-state" HOME="$test_root/home" \
+  "$probe" "$first_target" hard_blocked
+
+echo "Linux filesystem safety matrix passed"

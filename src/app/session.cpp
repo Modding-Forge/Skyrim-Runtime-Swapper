@@ -3,10 +3,14 @@
 #include "content_catalog.hpp"
 #include "creation_club.hpp"
 #include "diagnostics.hpp"
+#include "path_display.hpp"
 #include "runtime_labels.hpp"
+#include "storage_operations.hpp"
 #include "unique_handle.hpp"
+#include "wine_sidecar.hpp"
 
 #include <runtime_swapper/downgrade.hpp>
+#include <runtime_swapper/transaction_backend.hpp>
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -66,6 +70,37 @@ std::wstring session_complete_event_name() {
   return operation_mutex_name() + L"-SessionComplete";
 }
 
+UniqueHandle acquire_transaction_lock(
+    const CoordinationLockPath& resolved_lock) {
+  const auto& lock_path = resolved_lock.value;
+  if (lock_path.empty() || !lock_path.is_absolute() ||
+      !managed_path_is_safe(lock_path.parent_path())) {
+    return {};
+  }
+  if (!transaction_backend().prepare_coordination_lock(resolved_lock) ||
+      !managed_path_is_safe(lock_path.parent_path())) {
+    return {};
+  }
+  UniqueHandle lock(CreateFileW(
+      lock_path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS,
+      FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_WRITE_THROUGH |
+          FILE_FLAG_OPEN_REPARSE_POINT,
+      nullptr));
+  if (!lock) return {};
+  FILE_ATTRIBUTE_TAG_INFO attributes{};
+  FILE_STANDARD_INFO standard{};
+  if (!GetFileInformationByHandleEx(lock.get(), FileAttributeTagInfo,
+                                    &attributes, sizeof(attributes)) ||
+      !GetFileInformationByHandleEx(lock.get(), FileStandardInfo, &standard,
+                                    sizeof(standard)) ||
+      (attributes.FileAttributes &
+       (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0 ||
+      standard.NumberOfLinks != 1) {
+    return {};
+  }
+  return lock;
+}
+
 bool launch_session_watcher(const std::filesystem::path& helper,
                             const std::filesystem::path& game_root,
                             DWORD loader_process_id,
@@ -77,8 +112,10 @@ bool launch_session_watcher(const std::filesystem::path& helper,
   if (!ready_event) return false;
   ResetEvent(ready_event.get());
 
-  std::wstring command = L"\"" + helper.wstring() + L"\" --watch --game-root \"" +
-                         game_root.wstring() + L"\" --loader-pid " +
+  std::wstring command = quote_windows_command_argument(helper.wstring()) +
+                         L" --watch --game-root " +
+                         quote_windows_command_argument(game_root.wstring()) +
+                         L" --loader-pid " +
                          std::to_wstring(loader_process_id) + L" --ready-event \"" +
                          ready_event_name + L"\"";
   if (restore_runtime_after_session) command += L" --restore-runtime";
@@ -176,44 +213,36 @@ SessionResult watch_session_and_restore(const std::filesystem::path& game_root,
     }
   } mutex_release{mutex.get()};
 
-  const auto transaction_lock_path =
-      game_root / L".skyrim-runtime-swapper" / L"transaction.lock";
-  std::error_code lock_error;
-  std::filesystem::create_directories(transaction_lock_path.parent_path(), lock_error);
-  UniqueHandle transaction_lock(
-      lock_error ? INVALID_HANDLE_VALUE
-                 : CreateFileW(transaction_lock_path.c_str(), GENERIC_READ | GENERIC_WRITE, 0,
-                               nullptr, OPEN_ALWAYS,
-                               FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_WRITE_THROUGH, nullptr));
-  if (!transaction_lock) {
-    return {ExitCode::another_instance_failed,
-            L"The watcher could not acquire the durable runtime transaction lock."};
+  UniqueHandle transaction_lock;
+  if (!is_wine_environment()) {
+    const auto probed = probe_installation_storage(game_root);
+    if (!probed.success()) {
+      return {probed.code, probed.message};
+    }
+    transaction_lock = acquire_transaction_lock(
+        probed.backend.coordination_lock);
+    if (!transaction_lock) {
+      return {ExitCode::another_instance_failed,
+              L"The watcher could not acquire the durable runtime transaction lock."};
+    }
   }
 
-  if (restore_runtime_after_session) {
-    const auto restored = restore_runtime(game_root);
-    log_diagnostic(L"Watcher runtime restore: " + restored.message);
+  if (is_wine_environment() &&
+      (restore_runtime_after_session || restore_content_catalog_after_session ||
+       restore_creation_club_after_session)) {
+    const auto restored =
+        run_wine_sidecar(WineSidecarOperation::recover, game_root);
+    log_diagnostic(L"Native sidecar session recovery: " + restored.message);
+    return restored.success()
+               ? SessionResult{}
+               : SessionResult{restored.code, restored.message};
+  }
+
+  if (restore_runtime_after_session || restore_content_catalog_after_session ||
+      restore_creation_club_after_session) {
+    const auto restored = recover_installation(game_root);
+    log_diagnostic(L"Watcher installation restore: " + restored.message);
     if (!restored.success()) return {restored.code, restored.message};
-  }
-  if (restore_creation_club_after_session) {
-    const auto restored = recover_creation_club_content(game_root);
-    log_diagnostic(restored.success
-                       ? L"Watcher Creation Club restore: complete"
-                       : L"Watcher Creation Club restore failed: " + restored.message);
-    if (!restored.success) {
-      return {ExitCode::creation_club_cleanup_failed,
-              L"Creation Club content could not be restored after the game session."};
-    }
-  }
-  if (restore_content_catalog_after_session) {
-    const auto restored = restore_content_catalog(game_root);
-    log_diagnostic(restored.success ? L"Watcher ContentCatalog restore: complete"
-                                    : L"Watcher ContentCatalog restore failed: " +
-                                          restored.message);
-    if (!restored.success) {
-      return {ExitCode::content_catalog_cleanup_failed,
-              L"ContentCatalog.txt could not be restored after the game session."};
-    }
   }
   return {};
 }

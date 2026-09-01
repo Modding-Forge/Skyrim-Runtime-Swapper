@@ -6,7 +6,11 @@
 #include "fixed_runtime.hpp"
 #include "runtime_version_reader.hpp"
 #include "session.hpp"
+#include "storage_operations.hpp"
+#include "persistent_dialog.hpp"
+#include "path_display.hpp"
 #include "unique_handle.hpp"
+#include "wine_sidecar.hpp"
 
 #include <runtime_swapper/downgrade.hpp>
 #include <runtime_swapper/runtime_version.hpp>
@@ -37,7 +41,7 @@ struct ManualOperationResult {
 
 class ManualOperationLock {
  public:
-  explicit ManualOperationLock(const std::filesystem::path& game_root) {
+  ManualOperationLock() {
     mutex_.reset(CreateMutexW(nullptr, FALSE, operation_mutex_name().c_str()));
     complete_event_.reset(
         CreateEventW(nullptr, TRUE, TRUE, session_complete_event_name().c_str()));
@@ -47,16 +51,6 @@ class ManualOperationLock {
       return;
     }
     owns_mutex_ = true;
-
-    const auto lock_path =
-        game_root / L".skyrim-runtime-swapper" / L"transaction.lock";
-    std::error_code error;
-    std::filesystem::create_directories(lock_path.parent_path(), error);
-    if (error) return;
-    transaction_lock_.reset(
-        CreateFileW(lock_path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
-                    OPEN_ALWAYS, FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_WRITE_THROUGH,
-                    nullptr));
   }
 
   ~ManualOperationLock() {
@@ -64,13 +58,12 @@ class ManualOperationLock {
   }
 
   [[nodiscard]] bool acquired() const noexcept {
-    return owns_mutex_ && static_cast<bool>(transaction_lock_);
+    return owns_mutex_;
   }
 
  private:
   UniqueHandle mutex_;
   UniqueHandle complete_event_;
-  UniqueHandle transaction_lock_;
   bool owns_mutex_{};
 };
 
@@ -94,99 +87,70 @@ class ManualOperationLock {
 
 [[nodiscard]] ManualOperationResult switch_to_fixed_target(
     const std::filesystem::path& game_root) {
-  ManualOperationLock lock(game_root);
+  ManualOperationLock lock;
   if (!lock.acquired()) return acquire_error();
 
-  const auto backend = transaction_backend().probe(game_root);
+  const auto native_probe = is_wine_environment()
+                                ? run_wine_sidecar(WineSidecarOperation::probe,
+                                                   game_root)
+                                : InstallationOperationResult{};
+  const auto backend = is_wine_environment()
+                           ? native_probe.backend
+                           : probe_installation_storage(game_root).backend;
   if (!backend.success()) return {false, backend.message};
-  const auto fixed_state = inspect_fixed_runtime(game_root);
-  if (fixed_state == FixedRuntimeState::invalid) {
-    return {false,
-            L"The persistent runtime marker is invalid. Restore Skyrim 1.7.104 first."};
+  if (backend.mode != SafetyMode::automatic &&
+      show_persistent_downgrade_dialog(game_root, backend) !=
+          PersistentDialogChoice::accepted) {
+    return {false, L"The persistent downgrade was cancelled. No file was changed."};
   }
-  if (fixed_state == FixedRuntimeState::active) {
-    const auto finalized = finalize_fixed_target_runtime(game_root);
-    if (finalized.success()) return {true, finalized.message};
-    if (finalized.code != ExitCode::source_hash_mismatch) {
-      return {false, finalized.message};
-    }
+  UniqueHandle transaction_lock;
+  if (!is_wine_environment()) {
+    transaction_lock = acquire_transaction_lock(backend.coordination_lock);
+    if (!transaction_lock) return acquire_error();
   }
-
-  const auto recovered_runtime = recover_runtime(game_root);
-  if (!recovered_runtime.success()) {
-    return {false, recovered_runtime.message};
+  if (backend.mode == SafetyMode::persistent_with_warning) {
+    log_diagnostic(L"Persistent storage risk accepted: riskAccepted=true");
   }
-  const auto recovered_creation_club =
-      recover_creation_club_content(game_root);
-  if (!recovered_creation_club.success) {
-    return {false, recovered_creation_club.message};
-  }
-  const auto recovered_catalog = recover_content_catalog(game_root);
-  if (!recovered_catalog.success) return {false, recovered_catalog.message};
-
-  const auto downgraded = downgrade_runtime_after_recovery(
-      game_root, game_root / L"RuntimeSwap" / L"patches");
-  if (!downgraded.success()) return {false, downgraded.message};
-
-  const auto marker = enable_fixed_runtime(game_root);
-  if (!marker.success) {
-    const auto restored = restore_runtime(game_root);
-    return {false,
-            marker.message +
-                (restored.success()
-                     ? L" Skyrim 1.7.104 was restored."
-                     : L" Automatic runtime restoration also failed.")};
-  }
-  const auto finalized = finalize_fixed_target_runtime(game_root);
-  if (!finalized.success()) {
-    const auto marker_removed = disable_fixed_runtime(game_root);
-    const auto restored = marker_removed.success ? restore_runtime(game_root)
-                                                 : DowngradeResult{};
-    return {false,
-            finalized.message +
-                (restored.success()
-                     ? L" Skyrim 1.7.104 was restored."
-                     : L" Automatic runtime restoration was incomplete.")};
-  }
-  log_diagnostic(L"Manual fixed runtime switch: " + finalized.message);
-  return {true,
-          L"Skyrim " + std::wstring(target_version_label) +
-              L" is now fixed as the active runtime.\n\nThe verified 1.7.104 "
-              L"fallback backup remains available."};
+  const auto result = is_wine_environment()
+                          ? run_wine_sidecar(
+                                WineSidecarOperation::activate_persistent, game_root,
+                                backend.mode == SafetyMode::persistent_with_warning)
+                          : activate_persistent_target(
+                                game_root,
+                                backend.mode == SafetyMode::persistent_with_warning);
+  log_operation_result(L"manual-persistent-downgrade", result);
+  log_diagnostic(L"Manual persistent runtime switch: " + result.message);
+  return {result.success(), result.message};
 }
 
 [[nodiscard]] ManualOperationResult restore_source_runtime(
     const std::filesystem::path& game_root) {
-  ManualOperationLock lock(game_root);
+  ManualOperationLock lock;
   if (!lock.acquired()) return acquire_error();
-
-  const auto marker = disable_fixed_runtime(game_root);
-  if (!marker.success) return {false, marker.message};
-
-  const auto runtime = restore_runtime(game_root);
-  const auto creation_club = recover_creation_club_content(game_root);
-  const auto catalog = recover_content_catalog(game_root);
-  if (!runtime.success() || !creation_club.success || !catalog.success) {
-    std::wstring message;
-    if (!runtime.success()) message += runtime.message;
-    if (!creation_club.success) {
-      if (!message.empty()) message += L"\n";
-      message += creation_club.message;
-    }
-    if (!catalog.success) {
-      if (!message.empty()) message += L"\n";
-      message += catalog.message;
-    }
-    return {false, std::move(message)};
+  UniqueHandle transaction_lock;
+  if (!is_wine_environment()) {
+    const auto probed = probe_installation_storage(game_root);
+    if (!probed.success()) return {false, probed.message};
+    transaction_lock = acquire_transaction_lock(
+        probed.backend.coordination_lock);
+    if (!transaction_lock) return acquire_error();
   }
-  log_diagnostic(L"Manual runtime restore: " + runtime.message);
-  return {true, L"Skyrim 1.7.104 is restored and automatic runtime detection is active."};
+
+  const auto result = is_wine_environment()
+                          ? run_wine_sidecar(
+                                WineSidecarOperation::restore_persistent, game_root)
+                          : restore_persistent_source(game_root);
+  log_operation_result(L"manual-persistent-restore", result);
+  log_diagnostic(L"Manual persistent restore: " + result.message);
+  return {result.success(), result.message};
 }
 
 [[nodiscard]] std::wstring status_text(const std::filesystem::path& game_root,
                                        FixedRuntimeState fixed_state,
-                                       bool fixed_target_verified) {
-  std::wstring status = L"Game directory:\n" + game_root.wstring() + L"\n\nProfile: " +
+                                       bool fixed_target_verified,
+                                       const BackendProbeResult& backend) {
+  std::wstring status = L"Game directory:\n" + display_path(game_root) +
+                        L"\n\nProfile: " +
                         profile_name() + L"\nAvailable switch: 1.7.104 <-> " +
                         std::wstring(target_version_label) + L"\n";
   const auto version = read_runtime_version(game_root / L"SkyrimSE.exe");
@@ -206,22 +170,48 @@ class ManualOperationLock {
       status += L"invalid marker";
       break;
   }
+  status += L"\nStorage mode: " + safety_mode_label(backend.mode);
+  if (!backend.recovery_vault.value.empty() || backend.reported_paths) {
+    status += L"\nRecovery vault: " +
+              display_storage_path(backend, StoragePathRole::recovery_vault);
+  }
+  if (!backend.success()) {
+    status += L"\n\nDowngrade unavailable: " + backend.message;
+    if (!backend.technical_reason.empty()) {
+      status += L"\nTechnical reason: " + backend.technical_reason;
+    }
+  }
   return status;
 }
 
 [[nodiscard]] int show_control_panel(const std::filesystem::path& game_root) {
   for (;;) {
-    const auto fixed_state = inspect_fixed_runtime(game_root);
+    const bool wine = is_wine_environment();
+    const auto probed = wine
+                            ? run_wine_sidecar(WineSidecarOperation::probe,
+                                               game_root)
+                            : probe_installation_storage(game_root);
+    log_storage_probe(probed.backend);
+    if (!probed.success()) log_operation_result(L"manual-storage-probe", probed);
+    const auto fixed_state =
+        wine ? (probed.persistent
+                    ? FixedRuntimeState::active
+                    : (probed.code == ExitCode::journal_corrupt
+                           ? FixedRuntimeState::invalid
+                           : FixedRuntimeState::inactive))
+             : inspect_fixed_runtime(game_root);
     const bool fixed_target_verified =
         fixed_state == FixedRuntimeState::active &&
         target_runtime_is_active(game_root);
-    const auto content =
-        status_text(game_root, fixed_state, fixed_target_verified);
+    const auto content = status_text(game_root, fixed_state,
+                                     fixed_target_verified, probed.backend);
+    const auto& backend = probed.backend;
     const std::wstring switch_label =
-        L"Switch and keep Skyrim " + std::wstring(target_version_label);
+        L"Downgrade persistently to Skyrim " + std::wstring(target_version_label);
     const std::wstring restore_label = L"Restore Skyrim 1.7.104";
     std::vector<TASKDIALOG_BUTTON> buttons;
-    if (!fixed_target_verified) {
+    if (!fixed_target_verified && backend.success() &&
+        backend.allows(StorageOperation::activate_persistent)) {
       buttons.push_back({switch_button_id, switch_label.c_str()});
     }
     buttons.push_back({restore_button_id, restore_label.c_str()});
@@ -236,7 +226,8 @@ class ManualOperationLock {
     configuration.cButtons = static_cast<UINT>(buttons.size());
     configuration.pButtons = buttons.data();
     configuration.nDefaultButton =
-        fixed_target_verified ? restore_button_id : switch_button_id;
+        buttons.front().nButtonID == switch_button_id ? switch_button_id
+                                                      : restore_button_id;
     configuration.dwCommonButtons = TDCBF_CLOSE_BUTTON;
 
     int selected{};

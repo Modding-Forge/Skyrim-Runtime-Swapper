@@ -25,22 +25,37 @@ endif()
 file(READ "${REPOSITORY_ROOT}/vcpkg.json" RELEASE_MANIFEST_JSON)
 string(JSON RELEASE_VERSION GET "${RELEASE_MANIFEST_JSON}" version-string)
 file(READ "${REPOSITORY_ROOT}/CMakeLists.txt" ROOT_CMAKE_TEXT)
-string(FIND "${ROOT_CMAKE_TEXT}" "project(SkyrimRuntimeSwapper VERSION ${RELEASE_VERSION} "
-  ROOT_VERSION_POSITION)
-if(ROOT_VERSION_POSITION EQUAL -1)
+string(REGEX REPLACE "-.*$" "" RELEASE_NUMERIC_VERSION "${RELEASE_VERSION}")
+string(FIND "${ROOT_CMAKE_TEXT}"
+  "project(SkyrimRuntimeSwapper VERSION ${RELEASE_NUMERIC_VERSION} "
+  ROOT_NUMERIC_VERSION_POSITION)
+string(FIND "${ROOT_CMAKE_TEXT}"
+  "set(SKYRIM_RUNTIME_RELEASE_VERSION \"${RELEASE_VERSION}\")"
+  ROOT_RELEASE_VERSION_POSITION)
+if(ROOT_NUMERIC_VERSION_POSITION EQUAL -1 OR ROOT_RELEASE_VERSION_POSITION EQUAL -1)
   message(FATAL_ERROR "The CMake project version does not match ${RELEASE_VERSION}")
 endif()
 
 string(TIMESTAMP BUILD_ID "%Y%m%d-%H%M%S")
 set(RELEASE_ROOT "${REPOSITORY_ROOT}/dist/builds/${RELEASE_VERSION}/${BUILD_ID}")
+file(MAKE_DIRECTORY "${RELEASE_ROOT}")
+set(CHECKSUM_FILE "${RELEASE_ROOT}/SHA256SUMS.txt")
+file(WRITE "${CHECKSUM_FILE}" "")
 set(VORTEX_OVERRIDE_FILE
   "${REPOSITORY_ROOT}/assets/vortex_override_instructions.json")
 if(NOT EXISTS "${VORTEX_OVERRIDE_FILE}")
   message(FATAL_ERROR
     "Missing Vortex override instructions: ${VORTEX_OVERRIDE_FILE}")
 endif()
+set(PROTON_INSTRUCTIONS_FILE
+  "${REPOSITORY_ROOT}/assets/PROTON-EXPERIMENTAL-INSTRUCTIONS.txt")
+if(NOT EXISTS "${PROTON_INSTRUCTIONS_FILE}")
+  message(FATAL_ERROR
+    "Missing Proton Experimental instructions: ${PROTON_INSTRUCTIONS_FILE}")
+endif()
 get_filename_component(CMAKE_BIN_DIRECTORY "${CMAKE_COMMAND}" DIRECTORY)
 find_program(CTEST_COMMAND ctest HINTS "${CMAKE_BIN_DIRECTORY}" REQUIRED)
+find_program(PYTHON_COMMAND NAMES python3 python REQUIRED)
 
 foreach(ASSET_MANIFEST IN LISTS ASSET_MANIFESTS)
   if(NOT EXISTS "${ASSET_MANIFEST}")
@@ -68,23 +83,48 @@ foreach(ASSET_MANIFEST IN LISTS ASSET_MANIFESTS)
   foreach(PROFILE bobw boaw)
     runtime_profile_files("${PROFILE}" "${TARGET_VERSION}" PROFILE_FILES)
     runtime_profile_name("${PROFILE}" PROFILE_NAME)
-    set(SLUG "${PROFILE_NAME}-${SOURCE_VERSION}-to-${TARGET_VERSION}")
+    if(PROFILE STREQUAL "bobw")
+      set(PACKAGE_PROFILE "BoBW")
+    else()
+      set(PACKAGE_PROFILE "BoAW")
+    endif()
+    set(SLUG "${PACKAGE_PROFILE}-${SOURCE_VERSION}-to-${TARGET_VERSION}")
     set(BUILD_ROOT "${REPOSITORY_ROOT}/build/${TARGET_VERSION}/${PROFILE}")
     set(BINARY_ROOT "${BUILD_ROOT}/${CONFIGURATION}")
-    set(OUTPUT_ROOT "${RELEASE_ROOT}/Skyrim-Runtime-Swapper-v${RELEASE_VERSION}-${SLUG}")
+    set(OUTPUT_ROOT "${RELEASE_ROOT}/SRS-v${RELEASE_VERSION}-${SLUG}")
     set(ARCHIVE_PATH "${OUTPUT_ROOT}.zip")
+
+    set(CURRENT_NATIVE_SIDECAR "")
+    if(DEFINED NATIVE_SIDECAR_ROOT AND NOT NATIVE_SIDECAR_ROOT STREQUAL "")
+      get_filename_component(NATIVE_SIDECAR_ROOT "${NATIVE_SIDECAR_ROOT}" ABSOLUTE)
+      set(CURRENT_NATIVE_SIDECAR
+        "${NATIVE_SIDECAR_ROOT}/${TARGET_VERSION}/${PROFILE}/SkyrimRuntimeSwapper.Native")
+      if(NOT EXISTS "${CURRENT_NATIVE_SIDECAR}")
+        message(FATAL_ERROR
+          "Missing profile-specific native sidecar: ${CURRENT_NATIVE_SIDECAR}")
+      endif()
+    elseif(DEFINED NATIVE_SIDECAR AND NOT NATIVE_SIDECAR STREQUAL "")
+      message(FATAL_ERROR
+        "A single NATIVE_SIDECAR cannot safely serve multiple patch profiles. Use NATIVE_SIDECAR_ROOT/<target>/<profile>/SkyrimRuntimeSwapper.Native")
+    endif()
 
     file(REMOVE_RECURSE "${OUTPUT_ROOT}")
     file(REMOVE "${ARCHIVE_PATH}")
     message(STATUS "Building ${PROFILE_NAME} for Skyrim ${TARGET_VERSION}")
 
+    set(CONFIGURE_ARGUMENTS
+      -S "${REPOSITORY_ROOT}"
+      -B "${BUILD_ROOT}"
+      -A x64
+      "-DSKYRIM_RUNTIME_PATCH_MANIFEST=${ASSET_MANIFEST}"
+      "-DSKYRIM_RUNTIME_BUILD_PROFILE=${PROFILE}"
+    )
+    if(NOT CURRENT_NATIVE_SIDECAR STREQUAL "")
+      list(APPEND CONFIGURE_ARGUMENTS
+        "-DSKYRIM_RUNTIME_POSIX_SIDECAR=${CURRENT_NATIVE_SIDECAR}")
+    endif()
     execute_process(
-      COMMAND "${CMAKE_COMMAND}"
-        -S "${REPOSITORY_ROOT}"
-        -B "${BUILD_ROOT}"
-        -A x64
-        "-DSKYRIM_RUNTIME_PATCH_MANIFEST=${ASSET_MANIFEST}"
-        "-DSKYRIM_RUNTIME_BUILD_PROFILE=${PROFILE}"
+      COMMAND "${CMAKE_COMMAND}" ${CONFIGURE_ARGUMENTS}
       RESULT_VARIABLE CONFIGURE_RESULT
     )
     if(NOT CONFIGURE_RESULT EQUAL 0)
@@ -99,13 +139,15 @@ foreach(ASSET_MANIFEST IN LISTS ASSET_MANIFESTS)
       message(FATAL_ERROR "Compilation failed for ${PROFILE_NAME} ${TARGET_VERSION}")
     endif()
 
-    execute_process(
-      COMMAND "${CTEST_COMMAND}" --test-dir "${BUILD_ROOT}" -C "${CONFIGURATION}"
-        --output-on-failure
-      RESULT_VARIABLE TEST_RESULT
-    )
-    if(NOT TEST_RESULT EQUAL 0)
-      message(FATAL_ERROR "Tests failed for ${PROFILE_NAME} ${TARGET_VERSION}")
+    if(NOT SKIP_TESTS)
+      execute_process(
+        COMMAND "${CTEST_COMMAND}" --test-dir "${BUILD_ROOT}" -C "${CONFIGURATION}"
+          --output-on-failure
+        RESULT_VARIABLE TEST_RESULT
+      )
+      if(NOT TEST_RESULT EQUAL 0)
+        message(FATAL_ERROR "Tests failed for ${PROFILE_NAME} ${TARGET_VERSION}")
+      endif()
     endif()
 
     foreach(BINARY_NAME version.dll SkyrimRuntimeSwapper.exe)
@@ -119,9 +161,16 @@ foreach(ASSET_MANIFEST IN LISTS ASSET_MANIFESTS)
     file(COPY_FILE "${BINARY_ROOT}/version.dll" "${OUTPUT_ROOT}/version.dll")
     file(COPY_FILE "${BINARY_ROOT}/SkyrimRuntimeSwapper.exe"
       "${OUTPUT_ROOT}/SkyrimRuntimeSwapper.exe")
+    set(PACKAGED_NATIVE_SIDECAR "")
+    if(EXISTS "${BINARY_ROOT}/SkyrimRuntimeSwapper.Native")
+      file(COPY_FILE "${BINARY_ROOT}/SkyrimRuntimeSwapper.Native"
+        "${OUTPUT_ROOT}/SkyrimRuntimeSwapper.Native")
+      set(PACKAGED_NATIVE_SIDECAR SkyrimRuntimeSwapper.Native)
+    endif()
     file(COPY_FILE "${VORTEX_OVERRIDE_FILE}"
       "${OUTPUT_ROOT}/vortex_override_instructions.json")
-
+    file(COPY_FILE "${PROTON_INSTRUCTIONS_FILE}"
+      "${OUTPUT_ROOT}/PROTON-EXPERIMENTAL-INSTRUCTIONS.txt")
     set(SELECTED_ENTRIES "")
     set(FOUND_PROFILE_FILES "")
     string(JSON ASSET_FILE_COUNT LENGTH "${ASSET_JSON}" files)
@@ -187,14 +236,11 @@ foreach(ASSET_MANIFEST IN LISTS ASSET_MANIFESTS)
 ${DATA_BASELINE_FIELDS}
   \"sourceManifests\": ${SOURCE_MANIFESTS},
   \"targetManifests\": ${TARGET_MANIFESTS},
-  \"thirdParty\": {
-    \"name\": \"HDiffPatch\",
-    \"version\": \"${HDIFF_VERSION}\",
-    \"copyright\": \"Copyright (c) 2012-2025 HouSisong\",
-    \"license\": \"MIT\",
-    \"linkage\": \"statically linked into SkyrimRuntimeSwapper.exe\",
-    \"notice\": \"Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files, to deal in the Software without restriction. The copyright and permission notices must be included in all copies or substantial portions. The software is provided as is, without warranty of any kind.\"
-  },
+  \"thirdParty\": [
+    {\"name\": \"HDiffPatch\", \"version\": \"${HDIFF_VERSION}\", \"license\": \"MIT\"},
+    {\"name\": \"Zstandard\", \"license\": \"BSD-3-Clause\"},
+    {\"name\": \"xxHash\", \"license\": \"BSD-2-Clause\"}
+  ],
   \"files\": [
 ${SELECTED_ENTRIES}
   ]
@@ -204,16 +250,69 @@ ${SELECTED_ENTRIES}
 
     execute_process(
       COMMAND "${CMAKE_COMMAND}" -E tar cf "${ARCHIVE_PATH}" --format=zip
-        version.dll SkyrimRuntimeSwapper.exe RuntimeSwap
-        vortex_override_instructions.json
+        version.dll SkyrimRuntimeSwapper.exe ${PACKAGED_NATIVE_SIDECAR} RuntimeSwap
+        vortex_override_instructions.json PROTON-EXPERIMENTAL-INSTRUCTIONS.txt
       WORKING_DIRECTORY "${OUTPUT_ROOT}"
       RESULT_VARIABLE ARCHIVE_RESULT
     )
     if(NOT ARCHIVE_RESULT EQUAL 0 OR NOT EXISTS "${ARCHIVE_PATH}")
       message(FATAL_ERROR "Archive creation failed for ${PROFILE_NAME} ${TARGET_VERSION}")
     endif()
+    if(NOT PACKAGED_NATIVE_SIDECAR STREQUAL "")
+      execute_process(
+        COMMAND "${PYTHON_COMMAND}"
+          "${REPOSITORY_ROOT}/tools/set-zip-sidecar-mode.py"
+          "${ARCHIVE_PATH}"
+        RESULT_VARIABLE SIDECAR_MODE_RESULT
+      )
+      if(NOT SIDECAR_MODE_RESULT EQUAL 0)
+        message(FATAL_ERROR
+          "The packaged native sidecar mode could not be set to 0700: ${ARCHIVE_PATH}")
+      endif()
+    endif()
     file(SHA256 "${ARCHIVE_PATH}" ARCHIVE_HASH)
     file(SIZE "${ARCHIVE_PATH}" ARCHIVE_SIZE)
+    execute_process(
+      COMMAND "${CMAKE_COMMAND}" -E tar tf "${ARCHIVE_PATH}"
+      OUTPUT_VARIABLE ARCHIVE_CONTENTS
+      RESULT_VARIABLE ARCHIVE_VERIFY_RESULT)
+    foreach(REQUIRED_ENTRY
+        version.dll SkyrimRuntimeSwapper.exe RuntimeSwap/manifest.json
+        PROTON-EXPERIMENTAL-INSTRUCTIONS.txt
+        vortex_override_instructions.json)
+      string(FIND "${ARCHIVE_CONTENTS}" "${REQUIRED_ENTRY}" ENTRY_POSITION)
+      if(ENTRY_POSITION EQUAL -1)
+        message(FATAL_ERROR
+          "Archive verification failed; missing ${REQUIRED_ENTRY}: ${ARCHIVE_PATH}")
+      endif()
+    endforeach()
+    foreach(FORBIDDEN_ROOT_ENTRY README.md LICENSE THIRD_PARTY.md
+        THIRD_PARTY-LICENSES licenses)
+      string(REGEX MATCH
+        "(^|[\r\n])${FORBIDDEN_ROOT_ENTRY}/?([\r\n]|$)"
+        FORBIDDEN_MATCH "${ARCHIVE_CONTENTS}")
+      if(NOT FORBIDDEN_MATCH STREQUAL "")
+        message(FATAL_ERROR
+          "Archive verification failed; unexpected root entry ${FORBIDDEN_ROOT_ENTRY}: ${ARCHIVE_PATH}")
+      endif()
+    endforeach()
+    if(NOT ARCHIVE_VERIFY_RESULT EQUAL 0)
+      message(FATAL_ERROR "Archive verification failed: ${ARCHIVE_PATH}")
+    endif()
+    if(NOT PACKAGED_NATIVE_SIDECAR STREQUAL "")
+      execute_process(
+        COMMAND "${PYTHON_COMMAND}"
+          "${REPOSITORY_ROOT}/tools/set-zip-sidecar-mode.py" --check
+          "${ARCHIVE_PATH}"
+        RESULT_VARIABLE SIDECAR_MODE_VERIFY_RESULT
+      )
+      if(NOT SIDECAR_MODE_VERIFY_RESULT EQUAL 0)
+        message(FATAL_ERROR
+          "Archive verification failed; native sidecar is not mode 0700: ${ARCHIVE_PATH}")
+      endif()
+    endif()
+    get_filename_component(ARCHIVE_NAME "${ARCHIVE_PATH}" NAME)
+    file(APPEND "${CHECKSUM_FILE}" "${ARCHIVE_HASH}  ${ARCHIVE_NAME}\n")
     message(STATUS "Created ${ARCHIVE_PATH}")
     message(STATUS "SHA-256 ${ARCHIVE_HASH} (${ARCHIVE_SIZE} bytes)")
   endforeach()

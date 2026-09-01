@@ -1,0 +1,19 @@
+#pragma once
+
+#include <array>
+#include <cstdint>
+#include <string_view>
+
+namespace runtime_swapper::core {
+
+struct LegacyManagedFile {
+  std::string_view relative_file;
+  bool source_present;
+  std::string_view source_sha256;
+  std::uint64_t source_size;
+};
+
+inline constexpr std::array legacy_managed_files{
+@LEGACY_STORAGE_PLAN_ENTRIES@};
+
+}  // namespace runtime_swapper::core

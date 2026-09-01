@@ -2,6 +2,46 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.2.0 - 2026-09-01
+
+- Added portable storage support for Windows, Linux, Wine, and Proton. Trusted
+  internal NTFS, ext4, XFS, and Btrfs volumes use automatic sessions, while
+  external, removable, exFAT, ntfs-3g, and uncertain local filesystems can use
+  a recoverable persistent downgrade with an independent durable vault.
+- Introduced a shared crash- and power-loss-safe recovery lifecycle with
+  content-addressed backups, durable journals, conflict preservation, stable
+  volume identities, idempotent recovery, and automatic cleanup after a fully
+  verified restore.
+- Separated recovery data, reusable target cache, transaction workspace, and
+  coordination locks from the deployed Skyrim directory. Safe same-volume
+  Steam-library storage is preferred for faster switching.
+- Bound Windows and POSIX mutations to verified filesystem objects, closing
+  path-exchange races and preventing writes through unsafe links, junctions,
+  mount changes, or replaced volumes.
+- Added support for safe symlinks, hard links, reparse points, Windows volume
+  mounts, POSIX bind mounts, Bazzite home aliases, Amethyst `Data_Core` and VFS
+  layouts, and byte-identical renamed SKSE launcher entries.
+- Moved Creation Club and ContentCatalog handling into the shared recovery
+  lifecycle, including migration of older layouts and safe reuse of verified
+  transaction storage instead of unrelated XDG state paths.
+- Added a hash-pinned native Linux sidecar for Wine and Proton, built against
+  the Ubuntu 22.04 ABI and reverified before launch. Executable permissions are
+  preserved or safely repaired when a mod manager strips them.
+- Improved launch performance through verified-file reuse, batched journal and
+  directory synchronization, reflink or copy acceleration, a disposable target
+  cache, and a safe deterministic retry for FUSE-backed HDiffPatch output.
+- Added detailed failure diagnostics for storage decisions, recovery phases,
+  file identities, links, hashes, patch I/O, native errors, and timings. Logs
+  now live under `Documents\My Games\Skyrim Special Edition\SKSE`.
+- Safely retired verified v1.0.0 and v1.1.0 backups, caches, markers, and stale
+  locks on first launch while preserving active, unknown, or unverifiable state.
+- Added filesystem and fault-injection matrices, adversarial race tests,
+  ASan/UBSan coverage, HDiffPatch fuzzing, reproducible builds, dependency-pin
+  checks, and explicit ELF and PE hardening verification.
+- Release packages contain only the runtime payload, Proton Experimental
+  instructions, and Vortex metadata. Every archive is verified and listed in
+  `SHA256SUMS.txt`.
+
 ## 1.1.0 - 2026-08-29
 
 - Added a native manual control panel for persistent target-runtime switching and explicit 1.7.104 restoration.

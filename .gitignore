@@ -17,6 +17,7 @@ CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 CTestTestfile.cmake
+Testing/
 compile_commands.json
 build.ninja
 .ninja_deps
@@ -36,4 +37,5 @@ Desktop.ini
 *.orig
 *.rej
 *.tmp
+__pycache__/
 *~

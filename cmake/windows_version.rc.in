@@ -1,13 +1,13 @@
 #include <windows.h>
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,1,0,0
- PRODUCTVERSION 1,1,0,0
+ FILEVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+ PRODUCTVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
- FILEFLAGS VS_FF_DEBUG
+ FILEFLAGS VS_FF_DEBUG | @SKYRIM_RUNTIME_VERSION_FLAGS@
 #else
- FILEFLAGS 0x0L
+ FILEFLAGS @SKYRIM_RUNTIME_VERSION_FLAGS@
 #endif
  FILEOS VOS_NT_WINDOWS32
  FILETYPE @BINARY_FILE_TYPE@
@@ -19,12 +19,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Modding Forge\0"
             VALUE "FileDescription", "@BINARY_DESCRIPTION@\0"
-            VALUE "FileVersion", "1.1.0\0"
+            VALUE "FileVersion", "@SKYRIM_RUNTIME_RELEASE_VERSION@\0"
             VALUE "InternalName", "@BINARY_INTERNAL_NAME@\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 Dennis Unger (Modding Forge)\0"
             VALUE "OriginalFilename", "@BINARY_FILENAME@\0"
             VALUE "ProductName", "Skyrim Runtime Swapper\0"
-            VALUE "ProductVersion", "1.1.0\0"
+            VALUE "ProductVersion", "@SKYRIM_RUNTIME_RELEASE_VERSION@\0"
         END
     END
     BLOCK "VarFileInfo"

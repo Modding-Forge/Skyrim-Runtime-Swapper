@@ -1,0 +1,12 @@
+#pragma once
+
+#include <string_view>
+
+namespace runtime_swapper {
+
+inline constexpr std::string_view release_version_utf8 =
+    "@SKYRIM_RUNTIME_RELEASE_VERSION@";
+inline constexpr std::string_view patch_plan_hash_utf8 =
+    "@SKYRIM_RUNTIME_PATCH_PLAN_HASH@";
+
+}  // namespace runtime_swapper

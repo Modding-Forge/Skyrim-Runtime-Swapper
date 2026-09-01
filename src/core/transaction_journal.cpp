@@ -1,15 +1,30 @@
 #include "internal/transaction_journal.hpp"
+#include "internal/fault_injection.hpp"
+#include "internal/storage_entry_policy.hpp"
 
+#include <runtime_swapper/checked_arithmetic.hpp>
+#include <runtime_swapper/transaction_backend.hpp>
+
+#if defined(_WIN32)
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <sstream>
+#include <random>
 #include <system_error>
 #include <utility>
 
@@ -17,7 +32,8 @@ namespace runtime_swapper::core {
 namespace {
 
 constexpr std::uint32_t journal_magic = 0x4a535253U;
-constexpr std::uint16_t journal_version = 1;
+constexpr std::uint16_t journal_version = 2;
+constexpr std::uint16_t legacy_journal_version = 1;
 constexpr std::uint32_t no_file = 0xffffffffU;
 
 #pragma pack(push, 1)
@@ -54,7 +70,7 @@ static_assert(sizeof(DiskRecord) == 164);
 template <std::size_t Size>
 void copy_text(std::array<char, Size>& destination, std::string_view value) {
   const auto count = (std::min)(destination.size(), value.size());
-  std::memcpy(destination.data(), value.data(), count);
+  if (count != 0) std::memcpy(destination.data(), value.data(), count);
 }
 
 template <std::size_t Size>
@@ -63,47 +79,122 @@ template <std::size_t Size>
   return std::string(value.begin(), end);
 }
 
+[[nodiscard]] bool truncate_journal(const std::filesystem::path& path,
+                                    std::uint64_t size) {
+  if (fault_injected("journal.before-tail-repair")) return false;
+#if defined(_WIN32)
+  if (size > static_cast<std::uint64_t>((std::numeric_limits<LONGLONG>::max)())) {
+    return false;
+  }
+  HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE,
+                            FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
+                            OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
+  if (file == INVALID_HANDLE_VALUE) return false;
+  LARGE_INTEGER end{};
+  end.QuadPart = static_cast<LONGLONG>(size);
+  const bool truncated = SetFilePointerEx(file, end, nullptr, FILE_BEGIN) &&
+                         SetEndOfFile(file) && FlushFileBuffers(file);
+  CloseHandle(file);
+#else
+  const int file = ::open(path.c_str(), O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (file < 0) return false;
+  const bool truncated =
+      size <= static_cast<std::uint64_t>((std::numeric_limits<off_t>::max)()) &&
+      ::ftruncate(file, static_cast<off_t>(size)) == 0 && ::fsync(file) == 0;
+  const bool closed = ::close(file) == 0;
+  if (!truncated || !closed) return false;
+#endif
+  return truncated && !fault_injected("journal.after-tail-repair") &&
+         transaction_backend().sync_parent(path);
+}
+
 }  // namespace
 
 TransactionJournal::TransactionJournal(std::filesystem::path path,
                                        std::string transaction_id,
-                                       std::string profile, bool to_target)
+                                       std::string profile, bool to_target,
+                                       bool risk_accepted)
     : path_(std::move(path)),
       transaction_id_(std::move(transaction_id)),
       profile_(std::move(profile)),
-      to_target_(to_target) {
+      to_target_(to_target),
+      risk_accepted_(risk_accepted) {
+  // Keep one NUL byte for profiles. RC10 allowed the launcher-alias profile
+  // to be silently truncated, making every later recovery look like a link
+  // identity change.
+  if (profile_.empty() || profile_.size() >= DiskRecord{}.profile.size()) {
+    usable_ = false;
+    return;
+  }
   const auto existing = read_transaction_journal(path_);
   if (existing.status == JournalReadStatus::valid && !existing.records.empty()) {
     sequence_ = existing.records.back().sequence;
+  }
+  if (existing.status == JournalReadStatus::corrupt) {
+    usable_ = false;
+  } else if (existing.ignored_torn_tail) {
+    std::uint64_t valid_size{};
+    usable_ = checked_multiply(
+                  static_cast<std::uint64_t>(existing.records.size()),
+                  static_cast<std::uint64_t>(sizeof(DiskRecord)), valid_size) &&
+              truncate_journal(path_, valid_size);
   }
 }
 
 bool TransactionJournal::append(JournalPhase phase, std::uint32_t file_index,
                                 std::string_view sha256) {
+  const JournalAppend record{phase, file_index, sha256};
+  return append_batch(std::span<const JournalAppend>(&record, 1));
+}
+
+bool TransactionJournal::append_batch(
+    std::span<const JournalAppend> entries) {
+  if (entries.empty()) return true;
+  if (!usable_ || fault_injected("journal.before-append")) return false;
   std::error_code error;
   std::filesystem::create_directories(path_.parent_path(), error);
   if (error) return false;
 
-  DiskRecord record{};
-  record.magic = journal_magic;
-  record.version = journal_version;
-  record.size = sizeof(record);
-  record.sequence = ++sequence_;
-  record.file_index = file_index;
-  record.phase = static_cast<std::uint32_t>(phase);
-  record.to_target = to_target_ ? 1 : 0;
-  copy_text(record.transaction_id, transaction_id_);
-  copy_text(record.profile, profile_);
-  copy_text(record.sha256, sha256);
-  record.crc32 = crc32_bytes(&record, offsetof(DiskRecord, crc32));
+  std::vector<DiskRecord> records;
+  records.reserve(entries.size());
+  auto next_sequence = sequence_;
+  for (const auto& entry : entries) {
+    if (!checked_add(next_sequence, std::uint64_t{1}, next_sequence)) {
+      return false;
+    }
+    DiskRecord record{};
+    record.magic = journal_magic;
+    record.version = journal_version;
+    record.size = sizeof(record);
+    record.sequence = next_sequence;
+    record.file_index = entry.file_index;
+    record.phase = static_cast<std::uint32_t>(entry.phase);
+    record.to_target = to_target_ ? 1 : 0;
+    record.reserved[0] = risk_accepted_ ? 1 : 0;
+    copy_text(record.transaction_id, transaction_id_);
+    copy_text(record.profile, profile_);
+    copy_text(record.sha256, entry.sha256);
+    record.crc32 = crc32_bytes(&record, offsetof(DiskRecord, crc32));
+    records.push_back(record);
+  }
 
+#if defined(_WIN32)
   HANDLE file = CreateFileW(path_.c_str(), FILE_APPEND_DATA,
                             FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS,
                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
   if (file == INVALID_HANDLE_VALUE) return false;
+  std::size_t byte_count{};
+  if (!checked_multiply(records.size(), sizeof(DiskRecord), byte_count) ||
+      byte_count > (std::numeric_limits<DWORD>::max)()) {
+    CloseHandle(file);
+    return false;
+  }
   DWORD written{};
-  const bool success = WriteFile(file, &record, sizeof(record), &written, nullptr) &&
-                       written == sizeof(record) && FlushFileBuffers(file);
+  const bool success =
+      WriteFile(file, records.data(), static_cast<DWORD>(byte_count), &written,
+                nullptr) &&
+      written == byte_count && FlushFileBuffers(file);
   CloseHandle(file);
 #if defined(_DEBUG)
   if (success) {
@@ -111,25 +202,74 @@ bool TransactionJournal::append(JournalPhase phase, std::uint32_t file_index,
     const DWORD length = GetEnvironmentVariableW(L"SKYRIM_RUNTIME_SWAPPER_FAULT_AFTER_PHASE",
                                                   configured,
                                                   static_cast<DWORD>(std::size(configured)));
-    if (length > 0 && length < std::size(configured) &&
-        std::wcstoul(configured, nullptr, 10) == static_cast<unsigned long>(phase)) {
-      TerminateProcess(GetCurrentProcess(), 0xe0000001U);
+    if (length > 0 && length < std::size(configured)) {
+      const auto configured_phase = std::wcstoul(configured, nullptr, 10);
+      if (std::ranges::any_of(entries, [configured_phase](const auto& entry) {
+            return configured_phase ==
+                   static_cast<unsigned long>(entry.phase);
+          })) {
+        TerminateProcess(GetCurrentProcess(), 0xe0000001U);
+      }
     }
   }
 #endif
-  return success;
+#else
+  const int file = ::open(path_.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC,
+                          S_IRUSR | S_IWUSR);
+  if (file < 0) return false;
+  const auto* cursor = reinterpret_cast<const std::byte*>(records.data());
+  std::size_t remaining{};
+  if (!checked_multiply(records.size(), sizeof(DiskRecord), remaining)) {
+    (void)::close(file);
+    return false;
+  }
+  bool success = true;
+  while (remaining != 0) {
+    const auto count = ::write(file, cursor, remaining);
+    if (count <= 0) {
+      success = false;
+      break;
+    }
+    cursor += count;
+    remaining -= static_cast<std::size_t>(count);
+  }
+  success = success && ::fsync(file) == 0;
+  success = ::close(file) == 0 && success;
+#if !defined(NDEBUG)
+  if (success) {
+    if (const char* configured =
+            std::getenv("SKYRIM_RUNTIME_SWAPPER_FAULT_AFTER_PHASE")) {
+      const auto configured_phase = std::strtoul(configured, nullptr, 10);
+      if (std::ranges::any_of(entries, [configured_phase](const auto& entry) {
+            return configured_phase ==
+                   static_cast<unsigned long>(entry.phase);
+          })) {
+        _exit(201);
+      }
+    }
+  }
+#endif
+#endif
+  if (!success) return false;
+  // Once the bytes are flushed they are part of recovery history even when a
+  // later directory-boundary fault is reported to the caller.
+  sequence_ = next_sequence;
+  if (fault_injected("journal.after-file-sync")) return false;
+  const bool parent_synced =
+      static_cast<bool>(transaction_backend().sync_parent(path_));
+  if (!parent_synced || fault_injected("journal.after-directory-sync")) {
+    return false;
+  }
+  return true;
 }
 
 JournalReadResult read_transaction_journal(const std::filesystem::path& path) {
-  const DWORD attributes = GetFileAttributesW(path.c_str());
-  if (attributes == INVALID_FILE_ATTRIBUTES) {
-    const DWORD error = GetLastError();
-    return {(error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
-                ? JournalReadStatus::missing
-                : JournalReadStatus::corrupt,
-            false, {}};
+  std::error_code status_error;
+  (void)std::filesystem::symlink_status(path, status_error);
+  if (status_error == std::errc::no_such_file_or_directory) {
+    return {JournalReadStatus::missing, false, {}};
   }
-  if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+  if (status_error || !private_regular_file(path)) {
     return {JournalReadStatus::corrupt, false, {}};
   }
 
@@ -140,6 +280,7 @@ JournalReadResult read_transaction_journal(const std::filesystem::path& path) {
   std::string transaction_id;
   std::string profile;
   std::uint8_t direction{};
+  std::uint8_t risk_accepted{};
   for (;;) {
     DiskRecord record{};
     stream.read(reinterpret_cast<char*>(&record), sizeof(record));
@@ -150,9 +291,12 @@ JournalReadResult read_transaction_journal(const std::filesystem::path& path) {
       break;
     }
     const auto crc = crc32_bytes(&record, offsetof(DiskRecord, crc32));
-    if (record.magic != journal_magic || record.version != journal_version ||
+    if (record.magic != journal_magic ||
+        (record.version != journal_version &&
+         record.version != legacy_journal_version) ||
         record.size != sizeof(record) || record.sequence != expected_sequence ||
         record.crc32 != crc || record.to_target > 1 ||
+        (record.version == journal_version && record.reserved[0] > 1) ||
         record.phase < static_cast<std::uint32_t>(JournalPhase::begin) ||
         record.phase > static_cast<std::uint32_t>(JournalPhase::recovery_completed)) {
       return {JournalReadStatus::corrupt, false, {}};
@@ -163,16 +307,20 @@ JournalReadResult read_transaction_journal(const std::filesystem::path& path) {
       transaction_id = record_transaction_id;
       profile = record_profile;
       direction = record.to_target;
+      risk_accepted = record.version == journal_version ? record.reserved[0] : 0;
       if (transaction_id.empty() || profile.empty()) {
         return {JournalReadStatus::corrupt, false, {}};
       }
     } else if (transaction_id != record_transaction_id || profile != record_profile ||
-               direction != record.to_target) {
+               direction != record.to_target ||
+               risk_accepted !=
+                   (record.version == journal_version ? record.reserved[0] : 0)) {
       return {JournalReadStatus::corrupt, false, {}};
     }
     result.records.push_back({record.sequence, record.file_index,
                               static_cast<JournalPhase>(record.phase),
-                              record.to_target != 0, std::move(record_transaction_id),
+                              record.to_target != 0, risk_accepted != 0,
+                              std::move(record_transaction_id),
                               std::move(record_profile), read_text(record.sha256)});
     ++expected_sequence;
   }
@@ -180,6 +328,7 @@ JournalReadResult read_transaction_journal(const std::filesystem::path& path) {
 }
 
 std::string make_transaction_id() {
+#if defined(_WIN32)
   FILETIME time{};
   GetSystemTimeAsFileTime(&time);
   ULARGE_INTEGER ticks{};
@@ -190,6 +339,17 @@ std::string make_transaction_id() {
          << std::setw(8) << GetCurrentProcessId() << std::setw(8)
          << static_cast<std::uint32_t>(GetTickCount64());
   return output.str();
+#else
+  const auto ticks = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+  std::random_device random;
+  std::ostringstream output;
+  output << std::hex << std::setfill('0') << std::setw(16)
+         << static_cast<std::uint64_t>(ticks) << std::setw(8)
+         << static_cast<std::uint32_t>(::getpid()) << std::setw(8) << random();
+  return output.str();
+#endif
 }
 
 }  // namespace runtime_swapper::core

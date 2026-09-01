@@ -1,0 +1,286 @@
+name: Storage safety
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  supply-chain:
+    name: Recursive dependency pins
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Verify exact HDiffPatch checkout
+        run: python3 tools/tests/verify-third-party-pins.py
+      - name: Verify packaged sidecar permissions
+        run: python3 tools/tests/test-zip-sidecar-mode.py
+
+  native-linux:
+    name: Native Linux ${{ matrix.target }} ${{ matrix.profile }}
+    needs: supply-chain
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [1.6.1170, 1.5.97]
+        profile: [bobw, boaw]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Install filesystem test tools
+        run: sudo apt-get update && sudo apt-get install -y btrfs-progs dosfstools e2fsprogs exfatprogs ntfs-3g xfsprogs
+      - name: Create stable ext4 test volume
+        run: |
+          sudo bash tools/tests/create-stable-test-volume.sh \
+            "$RUNNER_TEMP/srs-tests.img" "$RUNNER_TEMP/srs-tests" \
+            "$RUNNER_TEMP/srs-tests.loop" "$USER"
+          echo "SRS_TEST_ROOT=$RUNNER_TEMP/srs-tests/tests" >>"$GITHUB_ENV"
+      - name: Configure
+        run: >-
+          cmake -S . -B build/native -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DSKYRIM_RUNTIME_PATCH_MANIFEST=${{ github.workspace }}/assets/runtime/1.7.104-to-${{ matrix.target }}/manifest.json
+          -DSKYRIM_RUNTIME_BUILD_PROFILE=${{ matrix.profile }}
+      - name: Build
+        run: cmake --build build/native --parallel
+      - name: Unit and protocol tests
+        run: ctest --test-dir build/native --output-on-failure
+      - name: Bind-mount transaction workspace
+        if: matrix.target == '1.6.1170' && matrix.profile == 'bobw'
+        run: sudo bash tools/tests/run-linux-bind-mount-workspace.sh build/native/posix_storage_tests
+      - name: Real filesystem matrix
+        if: matrix.target == '1.6.1170' && matrix.profile == 'bobw'
+        run: >-
+          sudo bash tools/tests/run-linux-filesystem-matrix.sh
+          build/native/storage_backend_probe --allow-missing-filesystems
+      - name: Remove stable test volume
+        if: always()
+        run: >-
+          sudo bash tools/tests/remove-stable-test-volume.sh
+          "$RUNNER_TEMP/srs-tests" "$RUNNER_TEMP/srs-tests.loop"
+          "$RUNNER_TEMP/srs-tests.img"
+
+  native-release:
+    name: Ubuntu 22.04 release ${{ matrix.target }} ${{ matrix.profile }}
+    needs: native-linux
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [1.6.1170, 1.5.97]
+        profile: [bobw, boaw]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Install pinned build tools
+        run: |
+          python3 -m pip install --user cmake==3.31.6 ninja==1.11.1.4
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+      - name: Configure and build release sidecar
+        run: >-
+          cmake -S . -B build/release -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DSKYRIM_RUNTIME_PATCH_MANIFEST=${{ github.workspace }}/assets/runtime/1.7.104-to-${{ matrix.target }}/manifest.json
+          -DSKYRIM_RUNTIME_BUILD_PROFILE=${{ matrix.profile }}
+      - name: Build
+        run: cmake --build build/release --target runtime_swapper_native --parallel
+      - name: Verify ABI and ELF hardening
+        run: |
+          python3 tools/tests/verify-elf-abi.py build/release/SkyrimRuntimeSwapper.Native
+          bash tools/tests/verify-elf-hardening.sh build/release/SkyrimRuntimeSwapper.Native
+          set +e
+          printf short | build/release/SkyrimRuntimeSwapper.Native
+          result=$?
+          set -e
+          test "$result" -eq 2
+      - uses: actions/upload-artifact@v5
+        with:
+          name: native-${{ matrix.target }}-${{ matrix.profile }}
+          path: build/release/SkyrimRuntimeSwapper.Native
+          if-no-files-found: error
+
+  sanitizers-and-fuzzing:
+    name: ASan, UBSan and HDiffPatch fuzzing
+    needs: supply-chain
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Create stable ext4 test volume
+        run: |
+          sudo bash tools/tests/create-stable-test-volume.sh \
+            "$RUNNER_TEMP/srs-tests.img" "$RUNNER_TEMP/srs-tests" \
+            "$RUNNER_TEMP/srs-tests.loop" "$USER"
+          echo "SRS_TEST_ROOT=$RUNNER_TEMP/srs-tests/tests" >>"$GITHUB_ENV"
+      - name: Configure instrumented build
+        env:
+          CC: clang
+          CXX: clang++
+        run: >-
+          cmake -S . -B build/sanitized -G Ninja
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          -DSKYRIM_RUNTIME_BUILD_FUZZER=ON
+          -DSKYRIM_RUNTIME_PATCH_MANIFEST=${{ github.workspace }}/assets/runtime/1.7.104-to-1.6.1170/manifest.json
+          -DSKYRIM_RUNTIME_BUILD_PROFILE=bobw
+      - name: Build instrumented targets
+        run: cmake --build build/sanitized --parallel
+      - name: Sanitized regression suite
+        env:
+          ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1:check_initialization_order=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build/sanitized --output-on-failure
+      - name: Prepare valid, truncated and corrupted corpus
+        run: |
+          mkdir -p build/fuzz-corpus
+          python3 - <<'PY'
+          from pathlib import Path
+          corpus = Path("build/fuzz-corpus")
+          patches = sorted(
+              Path("assets/runtime/1.7.104-to-1.6.1170").glob("**/*.hdiff"),
+              key=lambda path: path.stat().st_size,
+          )
+          valid = patches[0].read_bytes()
+          prefix = (0).to_bytes(8, "little")
+          (corpus / "valid-window-patch").write_bytes(prefix + valid)
+          (corpus / "truncated-window-patch").write_bytes(prefix + valid[:64])
+          damaged = bytearray(valid[:4096])
+          damaged[len(damaged) // 2] ^= 0x80
+          (corpus / "corrupted-window-patch").write_bytes(prefix + damaged)
+          (corpus / "random-boundaries").write_bytes(
+              (2**64 - 1).to_bytes(8, "little") + bytes(range(256))
+          )
+          PY
+      - name: Time-bounded adapter fuzzing
+        env:
+          ASAN_OPTIONS: detect_leaks=1:allocator_may_return_null=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            seconds=600
+          else
+            seconds=30
+          fi
+          build/sanitized/hdiff_adapter_fuzz \
+            -max_total_time="$seconds" -timeout=15 -rss_limit_mb=3072 \
+            build/fuzz-corpus
+      - name: Remove stable test volume
+        if: always()
+        run: >-
+          sudo bash tools/tests/remove-stable-test-volume.sh
+          "$RUNNER_TEMP/srs-tests" "$RUNNER_TEMP/srs-tests.loop"
+          "$RUNNER_TEMP/srs-tests.img"
+
+  reproducible-linux:
+    name: Reproducible native release
+    needs: supply-chain
+    runs-on: ubuntu-22.04
+    env:
+      SOURCE_DATE_EPOCH: "1788202466"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Install pinned build tools
+        run: |
+          python3 -m pip install --user cmake==3.31.6 ninja==1.11.1.4
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+      - name: Configure two clean builds
+        run: |
+          for build in build/repro-a build/repro-b; do
+            cmake -S . -B "$build" -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DSKYRIM_RUNTIME_PATCH_MANIFEST=${{ github.workspace }}/assets/runtime/1.7.104-to-1.6.1170/manifest.json \
+              -DSKYRIM_RUNTIME_BUILD_PROFILE=bobw
+          done
+      - name: Build and compare
+        run: |
+          cmake --build build/repro-a --target runtime_swapper_native --parallel
+          cmake --build build/repro-b --target runtime_swapper_native --parallel
+          sha256sum build/repro-a/SkyrimRuntimeSwapper.Native \
+                     build/repro-b/SkyrimRuntimeSwapper.Native
+          cmp build/repro-a/SkyrimRuntimeSwapper.Native \
+              build/repro-b/SkyrimRuntimeSwapper.Native
+
+  windows:
+    name: Windows ${{ matrix.target }} ${{ matrix.profile }}
+    needs: [native-linux, native-release]
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [1.6.1170, 1.5.97]
+        profile: [bobw, boaw]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: actions/download-artifact@v5
+        with:
+          name: native-${{ matrix.target }}-${{ matrix.profile }}
+          path: native
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -S . -B build/windows -A x64 `
+            "-DSKYRIM_RUNTIME_PATCH_MANIFEST=${{ github.workspace }}/assets/runtime/1.7.104-to-${{ matrix.target }}/manifest.json" `
+            "-DSKYRIM_RUNTIME_BUILD_PROFILE=${{ matrix.profile }}" `
+            "-DSKYRIM_RUNTIME_POSIX_SIDECAR=${{ github.workspace }}/native/SkyrimRuntimeSwapper.Native"
+      - name: Build
+        run: cmake --build build/windows --config Release --parallel
+      - name: Unit tests
+        run: ctest --test-dir build/windows -C Release --output-on-failure
+      - name: Verify PE hardening
+        shell: pwsh
+        run: |
+          ./tools/tests/verify-pe-hardening.ps1 -Path @(
+            'build/windows/Release/SkyrimRuntimeSwapper.exe'
+            'build/windows/Release/version.dll'
+          )
+      - uses: actions/upload-artifact@v5
+        with:
+          name: wine-bridge-${{ matrix.target }}-${{ matrix.profile }}
+          path: |
+            build/windows/Release/WineSidecarProbe.exe
+            build/windows/Release/SkyrimRuntimeSwapper.Native
+          if-no-files-found: error
+
+  wine-stable:
+    name: Wine Stable ${{ matrix.target }} ${{ matrix.profile }}
+    needs: windows
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [1.6.1170, 1.5.97]
+        profile: [bobw, boaw]
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: wine-bridge-${{ matrix.target }}-${{ matrix.profile }}
+          path: bridge
+      - name: Install Wine
+        run: sudo dpkg --add-architecture i386 && sudo apt-get update && sudo apt-get install -y wine64
+      - name: Verify native ELF launch through Wine
+        env:
+          WINEDEBUG: -all
+          WINEPREFIX: ${{ runner.temp }}/wine-prefix
+        run: |
+          mkdir -p /tmp/srs-wine-game
+          chmod 0644 bridge/SkyrimRuntimeSwapper.Native
+          wine bridge/WineSidecarProbe.exe 'Z:\tmp\srs-wine-game'
+          test "$(stat -c %a bridge/SkyrimRuntimeSwapper.Native)" = 700
