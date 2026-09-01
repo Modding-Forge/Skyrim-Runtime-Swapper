@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -24,6 +25,25 @@ enum class StorageMedium {
   removable,
   network,
   unknown,
+};
+
+enum class PathSyntax : std::uint8_t {
+  windows,
+  posix,
+};
+
+struct ReportedPath {
+  std::string utf8;
+  PathSyntax syntax{PathSyntax::windows};
+
+  [[nodiscard]] bool empty() const noexcept { return utf8.empty(); }
+};
+
+struct ReportedStoragePaths {
+  ReportedPath recovery_vault;
+  ReportedPath target_cache;
+  ReportedPath coordination_lock;
+  ReportedPath transaction_work;
 };
 
 enum class StorageOperation : std::uint32_t {
@@ -96,6 +116,7 @@ struct BackendProbeResult {
   TargetCachePath target_cache;
   CoordinationLockPath coordination_lock;
   TransactionWorkPath transaction_work;
+  std::optional<ReportedStoragePaths> reported_paths;
 
   [[nodiscard]] bool success() const noexcept { return code == ExitCode::success; }
   [[nodiscard]] bool allows(StorageOperation operation) const noexcept {

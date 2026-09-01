@@ -3,6 +3,7 @@
 #include <runtime_swapper/release_version.hpp>
 
 #include <array>
+#include <cstdint>
 #include <fstream>
 #include <iterator>
 #include <utility>
@@ -15,6 +16,32 @@ namespace {
   return std::string(reinterpret_cast<const char*>(value.data()), value.size());
 }
 
+[[nodiscard]] std::string utf8_identity(std::wstring_view value) {
+  std::string result;
+  for (const wchar_t character : value) {
+    const auto code = static_cast<std::uint32_t>(character);
+    if (code <= 0x7fU) {
+      result.push_back(static_cast<char>(code));
+    } else if (code <= 0x7ffU) {
+      result.push_back(static_cast<char>(0xc0U | (code >> 6U)));
+      result.push_back(static_cast<char>(0x80U | (code & 0x3fU)));
+    } else {
+      result.push_back(static_cast<char>(0xe0U | (code >> 12U)));
+      result.push_back(static_cast<char>(0x80U | ((code >> 6U) & 0x3fU)));
+      result.push_back(static_cast<char>(0x80U | (code & 0x3fU)));
+    }
+  }
+  return result;
+}
+
+[[nodiscard]] bool identity_line_matches(std::string_view line,
+                                         std::string_view prefix,
+                                         std::wstring_view identity) {
+  return line == std::string(prefix) + utf8_identity(identity) ||
+         line ==
+             std::string(prefix) + utf8_path(std::filesystem::path(identity));
+}
+
 }  // namespace
 
 std::string locator_contents(std::string_view installation,
@@ -22,7 +49,7 @@ std::string locator_contents(std::string_view installation,
                              const VolumeIdentity& vault_volume) {
   return "SRS-VAULT-LOCATOR-1\ninstallation=" + std::string(installation) +
          "\nvault=" + utf8_path(vault) + "\nvolume=" +
-         utf8_path(vault_volume.stable_id) + "\n";
+         utf8_identity(vault_volume.stable_id) + "\n";
 }
 
 bool locator_matches(const std::filesystem::path& locator,
@@ -30,10 +57,15 @@ bool locator_matches(const std::filesystem::path& locator,
                      const std::filesystem::path& vault,
                      const VolumeIdentity& vault_volume) {
   std::ifstream stream(locator, std::ios::binary);
-  if (!stream) return false;
-  const std::string text(std::istreambuf_iterator<char>(stream), {});
-  return !stream.bad() &&
-         text == locator_contents(installation, vault, vault_volume);
+  std::array<std::string, 4> lines;
+  for (auto& line : lines) {
+    if (!std::getline(stream, line)) return false;
+  }
+  return stream.peek() == std::ifstream::traits_type::eof() &&
+         lines[0] == "SRS-VAULT-LOCATOR-1" &&
+         lines[1] == "installation=" + std::string(installation) &&
+         lines[2] == "vault=" + utf8_path(vault) &&
+         identity_line_matches(lines[3], "volume=", vault_volume.stable_id);
 }
 
 std::optional<std::filesystem::path> locator_vault_path(
@@ -75,8 +107,10 @@ bool vault_manifest_identity_matches(
          lines[1] == "installation=" + std::string(installation) &&
          lines[2].starts_with("source=") && lines[2].size() > 7 &&
          lines[3].starts_with("target=") && lines[3].size() > 7 &&
-         lines[4] == "targetVolume=" + utf8_path(target_volume.stable_id) &&
-         lines[5] == "vaultVolume=" + utf8_path(vault_volume.stable_id);
+         identity_line_matches(lines[4], "targetVolume=",
+                               target_volume.stable_id) &&
+         identity_line_matches(lines[5], "vaultVolume=",
+                               vault_volume.stable_id);
 }
 
 BackendProbeResult blocked(

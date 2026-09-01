@@ -300,10 +300,12 @@ int run_tests() {
   std::filesystem::remove(game_marker, error);
   if (error) return 15;
 
-  if (read_recovery_metadata(temporary.path(), "missing-metadata")) return 16;
+  if (!read_recovery_metadata(temporary.path(), "missing-metadata").missing()) {
+    return 16;
+  }
   if (!write_recovery_metadata(temporary.path(), "test-metadata", "verified\n") ||
-      read_recovery_metadata(temporary.path(), "test-metadata") !=
-          std::optional<std::string>("verified\n")) {
+      read_recovery_metadata(temporary.path(), "test-metadata").contents !=
+          "verified\n") {
     return 17;
   }
   const auto metadata = vault->probe.vault_path / L"attachments" /
@@ -313,21 +315,38 @@ int run_tests() {
   if (!CreateHardLinkW(metadata_alias.c_str(), metadata.c_str(), nullptr)) return 21;
   const auto linked_metadata =
       read_recovery_metadata(temporary.path(), "test-metadata");
-  if (!linked_metadata || !linked_metadata->empty() ||
+  if (linked_metadata.status != RecoveryMetadataStatus::invalid_entry ||
       remove_recovery_metadata(temporary.path(), "test-metadata")) {
     return 22;
   }
   std::filesystem::remove(metadata_alias, error);
-  if (error || read_recovery_metadata(temporary.path(), "test-metadata") !=
-                   std::optional<std::string>("verified\n")) {
+  if (error ||
+      read_recovery_metadata(temporary.path(), "test-metadata").contents !=
+          "verified\n") {
     return 23;
   }
+  if (read_recovery_metadata(temporary.path(), "../invalid").status !=
+          RecoveryMetadataStatus::invalid_entry ||
+      read_recovery_metadata({}, "test-metadata")
+              .status != RecoveryMetadataStatus::unavailable) {
+    return 24;
+  }
+  const HANDLE blocked_metadata = CreateFileW(
+      metadata.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (blocked_metadata == INVALID_HANDLE_VALUE ||
+      read_recovery_metadata(temporary.path(), "test-metadata").status !=
+          RecoveryMetadataStatus::io_error) {
+    if (blocked_metadata != INVALID_HANDLE_VALUE) CloseHandle(blocked_metadata);
+    return 25;
+  }
+  CloseHandle(blocked_metadata);
   const auto unsafe_metadata = vault->probe.vault_path / L"attachments" /
                                L"unsafe-metadata";
   std::filesystem::create_directories(unsafe_metadata, error);
   const auto invalid_metadata =
       read_recovery_metadata(temporary.path(), "unsafe-metadata");
-  if (error || !invalid_metadata || !invalid_metadata->empty() ||
+  if (error || invalid_metadata.status != RecoveryMetadataStatus::invalid_entry ||
       remove_recovery_metadata(temporary.path(), "unsafe-metadata")) {
     return 18;
   }

@@ -38,6 +38,9 @@ endif()
 
 string(TIMESTAMP BUILD_ID "%Y%m%d-%H%M%S")
 set(RELEASE_ROOT "${REPOSITORY_ROOT}/dist/builds/${RELEASE_VERSION}/${BUILD_ID}")
+file(MAKE_DIRECTORY "${RELEASE_ROOT}")
+set(CHECKSUM_FILE "${RELEASE_ROOT}/SHA256SUMS.txt")
+file(WRITE "${CHECKSUM_FILE}" "")
 set(VORTEX_OVERRIDE_FILE
   "${REPOSITORY_ROOT}/assets/vortex_override_instructions.json")
 if(NOT EXISTS "${VORTEX_OVERRIDE_FILE}")
@@ -165,6 +168,22 @@ foreach(ASSET_MANIFEST IN LISTS ASSET_MANIFESTS)
       "${OUTPUT_ROOT}/vortex_override_instructions.json")
     file(COPY_FILE "${PROTON_INSTRUCTIONS_FILE}"
       "${OUTPUT_ROOT}/PROTON-EXPERIMENTAL-INSTRUCTIONS.txt")
+    file(COPY_FILE "${REPOSITORY_ROOT}/README.md"
+      "${OUTPUT_ROOT}/README.md")
+    file(COPY_FILE "${REPOSITORY_ROOT}/LICENSE"
+      "${OUTPUT_ROOT}/LICENSE")
+    file(COPY_FILE "${REPOSITORY_ROOT}/THIRD_PARTY.md"
+      "${OUTPUT_ROOT}/THIRD_PARTY.md")
+    file(MAKE_DIRECTORY "${OUTPUT_ROOT}/THIRD_PARTY-LICENSES")
+    file(COPY_FILE
+      "${REPOSITORY_ROOT}/third_party/HDiffPatch5/HDiffPatch/LICENSE"
+      "${OUTPUT_ROOT}/THIRD_PARTY-LICENSES/HDiffPatch.txt")
+    file(COPY_FILE
+      "${REPOSITORY_ROOT}/third_party/HDiffPatch5/zstd/LICENSE"
+      "${OUTPUT_ROOT}/THIRD_PARTY-LICENSES/Zstandard.txt")
+    file(COPY_FILE
+      "${REPOSITORY_ROOT}/third_party/HDiffPatch5/xxHash/LICENSE"
+      "${OUTPUT_ROOT}/THIRD_PARTY-LICENSES/xxHash.txt")
 
     set(SELECTED_ENTRIES "")
     set(FOUND_PROFILE_FILES "")
@@ -231,14 +250,11 @@ foreach(ASSET_MANIFEST IN LISTS ASSET_MANIFESTS)
 ${DATA_BASELINE_FIELDS}
   \"sourceManifests\": ${SOURCE_MANIFESTS},
   \"targetManifests\": ${TARGET_MANIFESTS},
-  \"thirdParty\": {
-    \"name\": \"HDiffPatch\",
-    \"version\": \"${HDIFF_VERSION}\",
-    \"copyright\": \"Copyright (c) 2012-2025 HouSisong\",
-    \"license\": \"MIT\",
-    \"linkage\": \"statically linked into SkyrimRuntimeSwapper.exe\",
-    \"notice\": \"Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files, to deal in the Software without restriction. The copyright and permission notices must be included in all copies or substantial portions. The software is provided as is, without warranty of any kind.\"
-  },
+  \"thirdParty\": [
+    {\"name\": \"HDiffPatch\", \"version\": \"${HDIFF_VERSION}\", \"license\": \"MIT\"},
+    {\"name\": \"Zstandard\", \"license\": \"BSD-3-Clause\"},
+    {\"name\": \"xxHash\", \"license\": \"BSD-2-Clause\"}
+  ],
   \"files\": [
 ${SELECTED_ENTRIES}
   ]
@@ -250,6 +266,7 @@ ${SELECTED_ENTRIES}
       COMMAND "${CMAKE_COMMAND}" -E tar cf "${ARCHIVE_PATH}" --format=zip
         version.dll SkyrimRuntimeSwapper.exe ${PACKAGED_NATIVE_SIDECAR} RuntimeSwap
         vortex_override_instructions.json PROTON-EXPERIMENTAL-INSTRUCTIONS.txt
+        README.md LICENSE THIRD_PARTY.md THIRD_PARTY-LICENSES
       WORKING_DIRECTORY "${OUTPUT_ROOT}"
       RESULT_VARIABLE ARCHIVE_RESULT
     )
@@ -258,6 +275,27 @@ ${SELECTED_ENTRIES}
     endif()
     file(SHA256 "${ARCHIVE_PATH}" ARCHIVE_HASH)
     file(SIZE "${ARCHIVE_PATH}" ARCHIVE_SIZE)
+    execute_process(
+      COMMAND "${CMAKE_COMMAND}" -E tar tf "${ARCHIVE_PATH}"
+      OUTPUT_VARIABLE ARCHIVE_CONTENTS
+      RESULT_VARIABLE ARCHIVE_VERIFY_RESULT)
+    foreach(REQUIRED_ENTRY
+        version.dll SkyrimRuntimeSwapper.exe RuntimeSwap/manifest.json
+        README.md LICENSE THIRD_PARTY.md PROTON-EXPERIMENTAL-INSTRUCTIONS.txt
+        THIRD_PARTY-LICENSES/HDiffPatch.txt
+        THIRD_PARTY-LICENSES/Zstandard.txt
+        THIRD_PARTY-LICENSES/xxHash.txt)
+      string(FIND "${ARCHIVE_CONTENTS}" "${REQUIRED_ENTRY}" ENTRY_POSITION)
+      if(ENTRY_POSITION EQUAL -1)
+        message(FATAL_ERROR
+          "Archive verification failed; missing ${REQUIRED_ENTRY}: ${ARCHIVE_PATH}")
+      endif()
+    endforeach()
+    if(NOT ARCHIVE_VERIFY_RESULT EQUAL 0)
+      message(FATAL_ERROR "Archive verification failed: ${ARCHIVE_PATH}")
+    endif()
+    get_filename_component(ARCHIVE_NAME "${ARCHIVE_PATH}" NAME)
+    file(APPEND "${CHECKSUM_FILE}" "${ARCHIVE_HASH}  ${ARCHIVE_NAME}\n")
     message(STATUS "Created ${ARCHIVE_PATH}")
     message(STATUS "SHA-256 ${ARCHIVE_HASH} (${ARCHIVE_SIZE} bytes)")
   endforeach()

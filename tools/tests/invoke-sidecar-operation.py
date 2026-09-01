@@ -13,7 +13,7 @@ import tempfile
 
 
 MAGIC = 0x50535253
-VERSION = 5
+VERSION = 6
 MAXIMUM_PAYLOAD = 1024 * 1024
 HEADER = struct.Struct("<IHHI32s")
 OPERATIONS = {
@@ -81,6 +81,7 @@ def parse_response(response: bytes, operation: int, nonce: bytes) -> dict[str, o
     lifecycle_state, offset = take_integer(payload, offset)
     lifecycle_phase, offset = take_integer(payload, offset)
     installation, offset = take_string(payload, offset)
+    path_syntax, offset = take_integer(payload, offset)
     vault, offset = take_string(payload, offset)
     target_cache, offset = take_string(payload, offset)
     coordination_lock, offset = take_string(payload, offset)
@@ -95,6 +96,7 @@ def parse_response(response: bytes, operation: int, nonce: bytes) -> dict[str, o
     vault_flags, offset = take_integer(payload, offset)
     target_description, offset = take_string(payload, offset)
     vault_description, offset = take_string(payload, offset)
+    backend_description, offset = take_string(payload, offset)
     technical_reason, offset = take_string(payload, offset)
     technical_detail, offset = take_string(payload, offset)
     message, offset = take_string(payload, offset)
@@ -108,6 +110,7 @@ def parse_response(response: bytes, operation: int, nonce: bytes) -> dict[str, o
         "lifecycle_state": lifecycle_state,
         "lifecycle_phase": lifecycle_phase,
         "installation": installation,
+        "path_syntax": path_syntax,
         "vault": vault,
         "target_cache": target_cache,
         "coordination_lock": coordination_lock,
@@ -122,6 +125,7 @@ def parse_response(response: bytes, operation: int, nonce: bytes) -> dict[str, o
         "vault_flags": vault_flags,
         "target_description": target_description,
         "vault_description": vault_description,
+        "backend_description": backend_description,
         "technical_reason": technical_reason,
         "technical_detail": technical_detail,
         "message": message,
@@ -156,7 +160,8 @@ def main() -> int:
     )
     request = HEADER.pack(MAGIC, VERSION, operation, len(payload), nonce) + payload
 
-    with tempfile.TemporaryDirectory(prefix="srs-sidecar-invoke-", dir=sidecar.parent) as root:
+    test_root = pathlib.Path(os.environ.get("SRS_TEST_ROOT", sidecar.parent))
+    with tempfile.TemporaryDirectory(prefix="srs-sidecar-invoke-", dir=test_root) as root:
         ipc = pathlib.Path(root)
         ipc.chmod(0o700)
         request_path = ipc / "request.bin"

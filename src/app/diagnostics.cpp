@@ -1,5 +1,7 @@
 #include "diagnostics.hpp"
 
+#include "path_display.hpp"
+
 #include <windows.h>
 #include <commctrl.h>
 #include <shlobj.h>
@@ -220,6 +222,22 @@ void log_diagnostic(const std::wstring& message) noexcept {
     CloseHandle(file);
   } catch (...) {
   }
+}
+
+void log_storage_probe(const BackendProbeResult& probe) noexcept {
+  log_diagnostic(
+      L"Storage probe: mode=" + safety_mode_label(probe.mode) +
+      L"; backend=" + probe.description + L"; target=" +
+      probe.target_volume.description + L"; recovery-volume=" +
+      probe.vault_volume.description + L"; recovery-vault=" +
+      display_storage_path(probe, StoragePathRole::recovery_vault) +
+      L"; target-cache=" +
+      display_storage_path(probe, StoragePathRole::target_cache) +
+      L"; coordination-lock=" +
+      display_storage_path(probe, StoragePathRole::coordination_lock) +
+      L"; transaction-work=" +
+      display_storage_path(probe, StoragePathRole::transaction_work) +
+      L"; technical-reason=" + probe.technical_reason);
 }
 
 int finish(ExitCode code, const std::wstring& message, UINT icon, bool quiet) {

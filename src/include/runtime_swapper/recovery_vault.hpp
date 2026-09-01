@@ -22,6 +22,46 @@ struct RecoveryLocatorMigrationResult {
   }
 };
 
+enum class RecoveryMetadataStatus {
+  missing,
+  present,
+  unavailable,
+  invalid_entry,
+  io_error,
+};
+
+[[nodiscard]] constexpr std::wstring_view recovery_metadata_status_name(
+    RecoveryMetadataStatus status) noexcept {
+  switch (status) {
+    case RecoveryMetadataStatus::missing:
+      return L"missing";
+    case RecoveryMetadataStatus::present:
+      return L"present";
+    case RecoveryMetadataStatus::unavailable:
+      return L"vault unavailable";
+    case RecoveryMetadataStatus::invalid_entry:
+      return L"unsafe or invalid entry";
+    case RecoveryMetadataStatus::io_error:
+      return L"I/O error";
+  }
+  return L"unknown metadata state";
+}
+
+struct RecoveryMetadataReadResult {
+  RecoveryMetadataStatus status{RecoveryMetadataStatus::unavailable};
+  std::string contents;
+
+  [[nodiscard]] bool present() const noexcept {
+    return status == RecoveryMetadataStatus::present;
+  }
+  [[nodiscard]] bool missing() const noexcept {
+    return status == RecoveryMetadataStatus::missing;
+  }
+  [[nodiscard]] bool failed() const noexcept {
+    return !present() && !missing();
+  }
+};
+
 [[nodiscard]] bool commit_recovery_file(const std::filesystem::path& game_root,
                                         const std::filesystem::path& source,
                                         std::string_view sha256,
@@ -37,7 +77,7 @@ struct RecoveryLocatorMigrationResult {
 [[nodiscard]] bool write_recovery_metadata(const std::filesystem::path& game_root,
                                            std::string_view name,
                                            std::string_view contents);
-[[nodiscard]] std::optional<std::string> read_recovery_metadata(
+[[nodiscard]] RecoveryMetadataReadResult read_recovery_metadata(
     const std::filesystem::path& game_root, std::string_view name);
 [[nodiscard]] bool remove_recovery_metadata(const std::filesystem::path& game_root,
                                             std::string_view name);

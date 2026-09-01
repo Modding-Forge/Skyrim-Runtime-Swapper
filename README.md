@@ -2,7 +2,12 @@
 
 Skyrim Runtime Swapper lets a Skyrim mod collection built for an older runtime start through the unmodified `skse64_loader.exe`. On trusted internal filesystems it restores the original Steam runtime automatically after every game session. On external, removable, exFAT, or otherwise uncertain local storage it offers a recoverable persistent downgrade instead.
 
-Current release: `1.2.0-rc16`.
+Current release: `1.2.0-rc17`.
+
+Release archives include `SHA256SUMS.txt` beside the four packages. Windows
+binaries are currently not Authenticode-signed; release integrity is provided
+through those checksums and reproducible native builds. The native x86-64 Linux
+helper targets Ubuntu 22.04 or newer (glibc 2.35).
 
 ## Profiles
 
@@ -11,7 +16,7 @@ Both profiles are available for Skyrim `1.6.1170` and `1.5.97`. They switch an i
 | Patcher type | Target game version: `1.6.1170` | Target game version: `1.5.97` |
 | --- | --- | --- |
 | **Best of Both Worlds** | Binary-patches `SkyrimSE.exe`, `SkyrimSELauncher.exe`, and `Data\Skyrim - Shaders.bsa` to their 1.6.1170 versions. | Binary-patches `SkyrimSE.exe`, `SkyrimSELauncher.exe`, `steam_api64.dll`, and `Data\Skyrim - Shaders.bsa`. Creates the target-only `binkw64.dll`. The executable runtime is 1.5.97, while runtime-facing data uses the proven 1.6.1170 AE-compatible baseline. |
-| **Best of All Worlds** | Applies all Best of Both Worlds changes. Also binary-patches `Data\Skyrim - Interface.bsa`, `Skyrim.esm`, `Update.esm`, `Dawnguard.esm`, `HearthFires.esm`, and `Dragonborn.esm`. | Applies all Best of Both Worlds changes and the additional interface and master-file patches. Before launch, every present `cc*.bsa`, `cc*.esl`, `cc*.esm`, and `cc*.esp` in the root of `Data` is hash-verified and moved into the fallback backup. These files are restored after the game session. |
+| **Best of All Worlds** | Applies all Best of Both Worlds changes. Also binary-patches `Data\Skyrim - Interface.bsa`, `Skyrim.esm`, `Update.esm`, `Dawnguard.esm`, `HearthFires.esm`, and `Dragonborn.esm`. | Applies all Best of Both Worlds changes and the additional interface and master-file patches. Before launch, every present `cc*.bsa`, `cc*.esl`, `cc*.esm`, and `cc*.esp` in the root of `Data` is committed to the Recovery Vault and moved into the external transaction workspace. These files are restored after the game session. |
 
 Other source files, stores, and runtimes are rejected without modification.
 
@@ -34,7 +39,7 @@ The helper validates the runtime, patch assets, and game files with SHA-256. HDi
 
 Every SKSE launch checks the current user's `ContentCatalog.txt`, including launches where Skyrim already uses the target runtime. Its own volume is classified independently. A catalog on storage without automatic durability is committed to the recovery vault and remains persistent until the GUI restore. Conflicting regenerated catalogs are preserved before the original is restored.
 
-For the 1.5.97 Best of All Worlds profile, official Creation Club files with the `cc` filename prefix and a `.bsa`, `.esl`, `.esm`, or `.esp` extension are handled separately. Before a persistent move, every original and the checksummed inventory are committed to the independent vault. The same-volume quarantine remains an optimization, not the only recovery source. Unicode names are stored portably, Windows case collisions are rejected, and conflicting live files are preserved before recovery.
+For the 1.5.97 Best of All Worlds profile, official Creation Club files with the `cc` filename prefix and a `.bsa`, `.esl`, `.esm`, or `.esp` extension are handled separately. Before any move, every original and the checksummed inventory are committed to the independent vault. The same-volume transaction workspace stays outside Skyrim and remains an optimization, not the only recovery source. Unicode names are stored portably, Windows case collisions are rejected, and conflicting live files are preserved before recovery.
 
 Visible Runtime Swapper errors include buttons to copy the Runtime Swapper and newest SKSE logs or open Steam's file verification action.
 

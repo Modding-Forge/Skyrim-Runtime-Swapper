@@ -3,6 +3,7 @@
 #include "internal/file_operations.hpp"
 #include "internal/fault_injection.hpp"
 #include "internal/vault_store.hpp"
+#include "test_paths.hpp"
 
 #include <runtime_swapper/sha256.hpp>
 #include <runtime_swapper/hdiff_patch.hpp>
@@ -44,8 +45,8 @@ void exchange_parent_at_resolve(std::string_view point) noexcept {
 class TemporaryDirectory {
  public:
   TemporaryDirectory() {
-    std::string pattern = "/tmp/skyrim-runtime-swapper-tests-XXXXXX";
-    pattern.push_back('\0');
+    auto pattern =
+        runtime_swapper::tests::temporary_pattern("skyrim-runtime-swapper-tests");
     if (char* created = ::mkdtemp(pattern.data())) path_ = created;
   }
   ~TemporaryDirectory() {

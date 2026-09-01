@@ -5,7 +5,7 @@ project(SkyrimRuntimeSwapper VERSION 1.2.0 LANGUAGES C CXX)
 option(SKYRIM_RUNTIME_BUILD_FUZZER
   "Build the Linux libFuzzer target for the handle-bound HDiffPatch adapter" OFF)
 
-set(SKYRIM_RUNTIME_RELEASE_VERSION "1.2.0-rc16")
+set(SKYRIM_RUNTIME_RELEASE_VERSION "1.2.0-rc17")
 if(SKYRIM_RUNTIME_RELEASE_VERSION MATCHES "-")
   set(SKYRIM_RUNTIME_VERSION_FLAGS "VS_FF_PRERELEASE")
 else()
@@ -22,6 +22,27 @@ set(CMAKE_C_EXTENSIONS OFF)
 if(MSVC)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
+
+function(srs_harden_compile TARGET)
+  if(MSVC)
+    target_compile_options(${TARGET} PRIVATE /guard:cf)
+  else()
+    target_compile_options(${TARGET} PRIVATE
+      -fstack-protector-strong
+      $<$<CONFIG:Release,RelWithDebInfo>:-D_FORTIFY_SOURCE=2>)
+  endif()
+endfunction()
+
+function(srs_harden_binary TARGET)
+  srs_harden_compile(${TARGET})
+  if(MSVC)
+    target_link_options(${TARGET} PRIVATE
+      /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /guard:cf)
+  else()
+    target_compile_options(${TARGET} PRIVATE -fPIE)
+    target_link_options(${TARGET} PRIVATE -pie -Wl,-z,relro,-z,now)
+  endif()
+endfunction()
 
 set(SKYRIM_RUNTIME_PATCH_MANIFEST "" CACHE FILEPATH "Verified patch manifest to embed in this build")
 set(SKYRIM_RUNTIME_BUILD_PROFILE "" CACHE STRING "Runtime package profile: bobw or boaw")
@@ -252,6 +273,7 @@ add_library(runtime_swapper_core STATIC
   src/core/file_operations.cpp
   src/core/fault_injection.cpp
   src/core/hdiff_patch.cpp
+  src/core/path_presentation.cpp
   src/core/persistent_runtime.cpp
   src/core/prepared_storage.cpp
   src/core/recovery_vault.cpp
@@ -263,6 +285,7 @@ add_library(runtime_swapper_core STATIC
   src/core/runtime_activation.cpp
   src/core/runtime_transform.cpp
   src/core/storage_probe_common.cpp
+  src/core/storage_classification.cpp
   src/core/storage_entry_policy.cpp
   src/core/transaction_workspace.cpp
   src/core/transaction_journal.cpp
@@ -273,6 +296,7 @@ target_include_directories(runtime_swapper_core BEFORE
   PUBLIC "${GENERATED_INCLUDE}" src/include
   PRIVATE src/core
 )
+srs_harden_compile(runtime_swapper_core)
 if(WIN32)
   target_compile_definitions(runtime_swapper_core PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -288,7 +312,7 @@ include(CTest)
 if(BUILD_TESTING)
   add_executable(prepared_storage_tests src/tests/prepared_storage_tests.cpp)
   target_include_directories(prepared_storage_tests BEFORE PRIVATE
-    "${GENERATED_INCLUDE}" src/include src/core)
+    "${GENERATED_INCLUDE}" src/include src/core src/tests)
   target_link_libraries(prepared_storage_tests PRIVATE runtime_swapper_core)
   if(MSVC)
     target_compile_options(prepared_storage_tests PRIVATE
@@ -333,6 +357,9 @@ add_library(version_proxy SHARED
 target_include_directories(version_proxy PRIVATE src/include src/proxy)
 target_compile_definitions(version_proxy PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 set_target_properties(version_proxy PROPERTIES OUTPUT_NAME version PREFIX "")
+srs_harden_compile(version_proxy)
+target_link_options(version_proxy PRIVATE
+  /DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /guard:cf)
 add_windows_version_resource(version_proxy "version.dll"
   "Skyrim Runtime Swapper Version API Proxy" "version" "VFT_DLL")
 
@@ -341,24 +368,30 @@ add_executable(runtime_swapper_helper WIN32
   src/app/application.cpp
   src/app/command_line.cpp
   src/app/content_catalog.cpp
+  src/app/content_catalog_location_windows.cpp
   src/app/creation_club.cpp
+  src/app/creation_club_inventory.cpp
   src/app/diagnostics.cpp
   src/app/fixed_runtime.cpp
   src/app/manual_gui.cpp
+  src/app/path_display.cpp
   src/app/persistent_dialog.cpp
   src/app/runtime_version_reader.cpp
   src/app/session.cpp
   src/app/storage_operations.cpp
   src/app/wine_sidecar.cpp
+  src/app/wine_sidecar_protocol.cpp
 )
 target_include_directories(runtime_swapper_helper BEFORE PRIVATE
   "${GENERATED_INCLUDE}"
   src/include
   src/app
+  src/core
 )
 target_compile_definitions(runtime_swapper_helper PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(runtime_swapper_helper PRIVATE runtime_swapper_core version shell32 comctl32)
 set_target_properties(runtime_swapper_helper PROPERTIES OUTPUT_NAME SkyrimRuntimeSwapper)
+srs_harden_binary(runtime_swapper_helper)
 add_windows_version_resource(runtime_swapper_helper "SkyrimRuntimeSwapper.exe"
   "Skyrim Runtime Swapper" "SkyrimRuntimeSwapper" "VFT_APP")
 if(SKYRIM_RUNTIME_POSIX_SIDECAR)
@@ -373,6 +406,7 @@ target_include_directories(patch_validator BEFORE PRIVATE "${GENERATED_INCLUDE}"
 target_compile_definitions(patch_validator PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(patch_validator PRIVATE runtime_swapper_core shell32)
 set_target_properties(patch_validator PROPERTIES OUTPUT_NAME SkyrimRuntimePatchValidator)
+srs_harden_binary(patch_validator)
 add_windows_version_resource(patch_validator "SkyrimRuntimePatchValidator.exe"
   "Skyrim Runtime Swapper Patch Validator" "SkyrimRuntimePatchValidator" "VFT_APP")
 
@@ -459,8 +493,9 @@ if(BUILD_TESTING)
   add_executable(content_catalog_tests
     src/tests/content_catalog_tests.cpp
     src/app/content_catalog.cpp
+    src/app/content_catalog_location_windows.cpp
   )
-  target_include_directories(content_catalog_tests PRIVATE src/app)
+  target_include_directories(content_catalog_tests PRIVATE src/app src/tests)
   target_compile_definitions(content_catalog_tests PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_link_libraries(content_catalog_tests PRIVATE runtime_swapper_core)
@@ -471,11 +506,28 @@ if(BUILD_TESTING)
   add_windows_version_resource(content_catalog_tests "content_catalog_tests.exe"
     "Skyrim Runtime Swapper Content Catalog Tests" "content_catalog_tests" "VFT_APP")
 
+  add_executable(path_display_tests
+    src/tests/path_display_tests.cpp
+    src/app/path_display.cpp)
+  target_include_directories(path_display_tests BEFORE PRIVATE
+    "${GENERATED_INCLUDE}" src/include src/app)
+  target_compile_definitions(path_display_tests PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_link_libraries(path_display_tests PRIVATE runtime_swapper_core)
+  if(MSVC)
+    target_compile_options(path_display_tests PRIVATE
+      /W4 /permissive- /EHsc /utf-8)
+  endif()
+  add_test(NAME path_display_tests COMMAND path_display_tests)
+  add_windows_version_resource(path_display_tests "path_display_tests.exe"
+    "Skyrim Runtime Swapper Path Display Tests" "path_display_tests" "VFT_APP")
+
   add_executable(creation_club_tests
     src/tests/creation_club_tests.cpp
     src/app/creation_club.cpp
+    src/app/creation_club_inventory.cpp
   )
-  target_include_directories(creation_club_tests PRIVATE src/app)
+  target_include_directories(creation_club_tests PRIVATE src/app src/core)
   target_compile_definitions(creation_club_tests PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_link_libraries(creation_club_tests PRIVATE runtime_swapper_core)
@@ -527,7 +579,9 @@ if(BUILD_TESTING)
   if(SKYRIM_RUNTIME_POSIX_SIDECAR)
     add_executable(wine_sidecar_probe
       src/tests/wine_sidecar_probe.cpp
-      src/app/wine_sidecar.cpp)
+      src/app/wine_sidecar.cpp
+      src/app/wine_sidecar_protocol.cpp
+      src/app/path_display.cpp)
     target_include_directories(wine_sidecar_probe BEFORE PRIVATE
       "${GENERATED_INCLUDE}" src/include src/app)
     target_compile_definitions(wine_sidecar_probe PRIVATE
@@ -557,17 +611,20 @@ else()
   endif()
   add_executable(runtime_swapper_native
     src/sidecar/posix_sidecar.cpp
-    src/sidecar/posix_content_catalog.cpp
+    src/app/content_catalog.cpp
+    src/app/content_catalog_location_posix.cpp
     src/app/creation_club.cpp
+    src/app/creation_club_inventory.cpp
     src/app/fixed_runtime.cpp
     src/app/storage_operations.cpp
   )
   target_include_directories(runtime_swapper_native BEFORE PRIVATE
-    "${GENERATED_INCLUDE}" src/include src/app)
+    "${GENERATED_INCLUDE}" src/include src/app src/core)
   target_compile_definitions(runtime_swapper_native PRIVATE _FILE_OFFSET_BITS=64)
   target_link_libraries(runtime_swapper_native PRIVATE runtime_swapper_core)
   set_target_properties(runtime_swapper_native PROPERTIES
     OUTPUT_NAME SkyrimRuntimeSwapper.Native)
+  srs_harden_binary(runtime_swapper_native)
   target_compile_options(runtime_swapper_native PRIVATE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
 
@@ -586,7 +643,7 @@ else()
   if(BUILD_TESTING)
     add_executable(posix_storage_tests src/tests/posix_storage_tests.cpp)
     target_include_directories(posix_storage_tests BEFORE PRIVATE
-      "${GENERATED_INCLUDE}" src/include src/core)
+      "${GENERATED_INCLUDE}" src/include src/core src/tests)
     target_link_libraries(posix_storage_tests PRIVATE runtime_swapper_core)
     target_compile_options(posix_storage_tests PRIVATE
       -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
@@ -595,7 +652,7 @@ else()
     add_executable(posix_fault_injection_tests
       src/tests/posix_fault_injection_tests.cpp)
     target_include_directories(posix_fault_injection_tests BEFORE PRIVATE
-      "${GENERATED_INCLUDE}" src/include src/core)
+      "${GENERATED_INCLUDE}" src/include src/core src/tests)
     target_link_libraries(posix_fault_injection_tests PRIVATE runtime_swapper_core)
     target_compile_options(posix_fault_injection_tests PRIVATE
       -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
@@ -603,13 +660,25 @@ else()
 
     add_executable(posix_creation_club_tests
       src/tests/posix_creation_club_tests.cpp
-      src/app/creation_club.cpp)
+      src/app/creation_club.cpp
+      src/app/creation_club_inventory.cpp)
     target_include_directories(posix_creation_club_tests BEFORE PRIVATE
-      "${GENERATED_INCLUDE}" src/include src/app)
+      "${GENERATED_INCLUDE}" src/include src/app src/core src/tests)
     target_link_libraries(posix_creation_club_tests PRIVATE runtime_swapper_core)
     target_compile_options(posix_creation_club_tests PRIVATE
       -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
     add_test(NAME posix_creation_club_tests COMMAND posix_creation_club_tests)
+
+    add_executable(posix_content_catalog_tests
+      src/tests/content_catalog_tests.cpp
+      src/app/content_catalog.cpp
+      src/app/content_catalog_location_posix.cpp)
+    target_include_directories(posix_content_catalog_tests BEFORE PRIVATE
+      "${GENERATED_INCLUDE}" src/include src/app src/core src/tests)
+    target_link_libraries(posix_content_catalog_tests PRIVATE runtime_swapper_core)
+    target_compile_options(posix_content_catalog_tests PRIVATE
+      -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    add_test(NAME posix_content_catalog_tests COMMAND posix_content_catalog_tests)
 
     find_package(Python3 COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)

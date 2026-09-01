@@ -830,6 +830,10 @@ class PosixTransactionBackend final : public TransactionBackend {
 
   MutationResult move_atomic(const std::filesystem::path& source,
                    const std::filesystem::path& destination) override {
+    if (core::fault_injected("move.before")) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
+    }
     const auto source_parent = resolve_parent_secure(source);
     const auto destination_parent = resolve_parent_secure(destination, true);
     auto source_file = source_parent ? open_regular_at(*source_parent, O_RDONLY)
@@ -852,11 +856,19 @@ class PosixTransactionBackend final : public TransactionBackend {
       return posix_failure(MutationStep::move_source,
                            MutationState::source_relocated);
     }
+    if (core::fault_injected("move.after-rename")) {
+      return MutationResult::failure(MutationStep::move_source,
+                                     MutationState::source_relocated);
+    }
     if (::fsync(source_file.value) != 0 ||
         !fsync_directory_descriptor(source_parent->directory.value) ||
         !fsync_directory_descriptor(destination_parent->directory.value)) {
       return posix_failure(MutationStep::flush_directory,
                            MutationState::source_relocated);
+    }
+    if (core::fault_injected("move.after-sync")) {
+      return MutationResult::failure(MutationStep::flush_directory,
+                                     MutationState::fully_durable);
     }
     return MutationResult::success();
   }
@@ -1015,19 +1027,6 @@ class PosixTransactionBackend final : public TransactionBackend {
   }
 };
 
-[[nodiscard]] bool equal_ascii(std::wstring_view left,
-                               std::wstring_view right) noexcept {
-  if (left.size() != right.size()) return false;
-  for (std::size_t index = 0; index < left.size(); ++index) {
-    wchar_t a = left[index];
-    wchar_t b = right[index];
-    if (a >= L'A' && a <= L'Z') a += L'a' - L'A';
-    if (b >= L'A' && b <= L'Z') b += L'a' - L'A';
-    if (a != b) return false;
-  }
-  return true;
-}
-
 }  // namespace
 
 std::optional<std::filesystem::path> posix_existing_directory_ancestor(
@@ -1070,39 +1069,6 @@ bool managed_path_entry_is_redirected(
   const auto parent_mount = posix_mount_id(absolute.parent_path());
   const auto entry_mount = posix_mount_id(absolute);
   return !parent_mount || !entry_mount || *parent_mount != *entry_mount;
-}
-
-SafetyMode classify_storage(const VolumeIdentity& target,
-                            const VolumeIdentity& vault,
-                            bool different_volume) noexcept {
-  if (!target.local || !target.stable || target.medium == StorageMedium::network ||
-      !vault.local || !vault.stable || !vault.native_durability) {
-    return SafetyMode::hard_blocked;
-  }
-  if (target.medium == StorageMedium::internal && target.native_durability) {
-    return SafetyMode::automatic;
-  }
-  if (!different_volume) return SafetyMode::hard_blocked;
-  if (target.medium == StorageMedium::external ||
-      target.medium == StorageMedium::removable ||
-      equal_ascii(target.filesystem, L"exfat")) {
-    return SafetyMode::persistent_only;
-  }
-  return SafetyMode::persistent_with_warning;
-}
-
-std::wstring safety_mode_label(SafetyMode mode) {
-  switch (mode) {
-    case SafetyMode::automatic:
-      return L"Automatic";
-    case SafetyMode::persistent_only:
-      return L"Persistent only";
-    case SafetyMode::persistent_with_warning:
-      return L"Persistent with warning";
-    case SafetyMode::hard_blocked:
-      return L"Hard blocked";
-  }
-  return L"Hard blocked";
 }
 
 bool is_wine_environment() noexcept { return false; }

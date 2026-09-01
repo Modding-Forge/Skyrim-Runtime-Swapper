@@ -2,7 +2,7 @@ name: Storage safety
 
 on:
   push:
-    branches: [master, feat/1-portable-storage-backends]
+    branches: [master]
   pull_request:
   workflow_dispatch:
   schedule:
@@ -37,6 +37,12 @@ jobs:
           submodules: recursive
       - name: Install filesystem test tools
         run: sudo apt-get update && sudo apt-get install -y btrfs-progs dosfstools e2fsprogs exfatprogs ntfs-3g xfsprogs
+      - name: Create stable ext4 test volume
+        run: |
+          sudo bash tools/tests/create-stable-test-volume.sh \
+            "$RUNNER_TEMP/srs-tests.img" "$RUNNER_TEMP/srs-tests" \
+            "$RUNNER_TEMP/srs-tests.loop" "$USER"
+          echo "SRS_TEST_ROOT=$RUNNER_TEMP/srs-tests/tests" >>"$GITHUB_ENV"
       - name: Configure
         run: >-
           cmake -S . -B build/native -G Ninja
@@ -55,10 +61,50 @@ jobs:
         run: >-
           sudo bash tools/tests/run-linux-filesystem-matrix.sh
           build/native/storage_backend_probe --allow-missing-filesystems
+      - name: Remove stable test volume
+        if: always()
+        run: >-
+          sudo bash tools/tests/remove-stable-test-volume.sh
+          "$RUNNER_TEMP/srs-tests" "$RUNNER_TEMP/srs-tests.loop"
+
+  native-release:
+    name: Ubuntu 22.04 release ${{ matrix.target }} ${{ matrix.profile }}
+    needs: native-linux
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [1.6.1170, 1.5.97]
+        profile: [bobw, boaw]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install pinned build tools
+        run: |
+          python3 -m pip install --user cmake==3.31.6 ninja==1.11.1.4
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+      - name: Configure and build release sidecar
+        run: >-
+          cmake -S . -B build/release -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DSKYRIM_RUNTIME_PATCH_MANIFEST=${{ github.workspace }}/assets/runtime/1.7.104-to-${{ matrix.target }}/manifest.json
+          -DSKYRIM_RUNTIME_BUILD_PROFILE=${{ matrix.profile }}
+      - name: Build
+        run: cmake --build build/release --target runtime_swapper_native --parallel
+      - name: Verify ABI and ELF hardening
+        run: |
+          python3 tools/tests/verify-elf-abi.py build/release/SkyrimRuntimeSwapper.Native
+          bash tools/tests/verify-elf-hardening.sh build/release/SkyrimRuntimeSwapper.Native
+          set +e
+          printf short | build/release/SkyrimRuntimeSwapper.Native
+          result=$?
+          set -e
+          test "$result" -eq 2
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.target }}-${{ matrix.profile }}
-          path: build/native/SkyrimRuntimeSwapper.Native
+          path: build/release/SkyrimRuntimeSwapper.Native
           if-no-files-found: error
 
   sanitizers-and-fuzzing:
@@ -69,6 +115,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Create stable ext4 test volume
+        run: |
+          sudo bash tools/tests/create-stable-test-volume.sh \
+            "$RUNNER_TEMP/srs-tests.img" "$RUNNER_TEMP/srs-tests" \
+            "$RUNNER_TEMP/srs-tests.loop" "$USER"
+          echo "SRS_TEST_ROOT=$RUNNER_TEMP/srs-tests/tests" >>"$GITHUB_ENV"
       - name: Configure instrumented build
         env:
           CC: clang
@@ -123,17 +175,26 @@ jobs:
           build/sanitized/hdiff_adapter_fuzz \
             -max_total_time="$seconds" -timeout=15 -rss_limit_mb=3072 \
             build/fuzz-corpus
+      - name: Remove stable test volume
+        if: always()
+        run: >-
+          sudo bash tools/tests/remove-stable-test-volume.sh
+          "$RUNNER_TEMP/srs-tests" "$RUNNER_TEMP/srs-tests.loop"
 
   reproducible-linux:
     name: Reproducible native release
     needs: supply-chain
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     env:
       SOURCE_DATE_EPOCH: "1788202466"
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      - name: Install pinned build tools
+        run: |
+          python3 -m pip install --user cmake==3.31.6 ninja==1.11.1.4
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
       - name: Configure two clean builds
         run: |
           for build in build/repro-a build/repro-b; do
@@ -153,7 +214,7 @@ jobs:
 
   windows:
     name: Windows ${{ matrix.target }} ${{ matrix.profile }}
-    needs: native-linux
+    needs: [native-linux, native-release]
     runs-on: windows-2025
     strategy:
       fail-fast: false
@@ -179,6 +240,13 @@ jobs:
         run: cmake --build build/windows --config Release --parallel
       - name: Unit tests
         run: ctest --test-dir build/windows -C Release --output-on-failure
+      - name: Verify PE hardening
+        shell: pwsh
+        run: |
+          ./tools/tests/verify-pe-hardening.ps1 -Path @(
+            'build/windows/Release/SkyrimRuntimeSwapper.exe'
+            'build/windows/Release/version.dll'
+          )
       - uses: actions/upload-artifact@v4
         with:
           name: wine-bridge-${{ matrix.target }}-${{ matrix.profile }}

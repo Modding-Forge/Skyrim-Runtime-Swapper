@@ -704,6 +704,10 @@ class WindowsTransactionBackend final : public TransactionBackend {
 
   MutationResult move_atomic(const std::filesystem::path& source,
                    const std::filesystem::path& destination) override {
+    if (core::fault_injected("move.before")) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
+    }
     std::error_code error;
     if (!std::filesystem::is_regular_file(source, error) || error) {
       return MutationResult::failure(MutationStep::validate,
@@ -732,10 +736,18 @@ class WindowsTransactionBackend final : public TransactionBackend {
       return windows_failure(MutationStep::move_source,
                              MutationState::untouched);
     }
+    if (core::fault_injected("move.after-rename")) {
+      return MutationResult::failure(MutationStep::move_source,
+                                     MutationState::source_relocated);
+    }
     if (!flush_directory_handle(source_parent.get()) ||
         !flush_directory_handle(destination_parent.get())) {
       return windows_failure(MutationStep::flush_directory,
                              MutationState::source_relocated);
+    }
+    if (core::fault_injected("move.after-sync")) {
+      return MutationResult::failure(MutationStep::flush_directory,
+                                     MutationState::fully_durable);
     }
     return MutationResult::success();
   }
@@ -1084,39 +1096,6 @@ bool managed_path_entry_is_redirected(
   const DWORD attributes = GetFileAttributesW(path.c_str());
   return attributes == INVALID_FILE_ATTRIBUTES ||
          (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
-}
-
-SafetyMode classify_storage(const VolumeIdentity& target,
-                            const VolumeIdentity& vault,
-                            bool different_volume) noexcept {
-  if (!target.local || !target.stable || target.medium == StorageMedium::network ||
-      !vault.local || !vault.stable || !vault.native_durability) {
-    return SafetyMode::hard_blocked;
-  }
-  if (target.medium == StorageMedium::internal && target.native_durability) {
-    return SafetyMode::automatic;
-  }
-  if (!different_volume) return SafetyMode::hard_blocked;
-  if (target.medium == StorageMedium::external ||
-      target.medium == StorageMedium::removable ||
-      equal_ordinal(target.filesystem, L"exFAT")) {
-    return SafetyMode::persistent_only;
-  }
-  return SafetyMode::persistent_with_warning;
-}
-
-std::wstring safety_mode_label(SafetyMode mode) {
-  switch (mode) {
-    case SafetyMode::automatic:
-      return L"Automatic";
-    case SafetyMode::persistent_only:
-      return L"Persistent only";
-    case SafetyMode::persistent_with_warning:
-      return L"Persistent with warning";
-    case SafetyMode::hard_blocked:
-      return L"Hard blocked";
-  }
-  return L"Hard blocked";
 }
 
 bool is_wine_environment() noexcept {

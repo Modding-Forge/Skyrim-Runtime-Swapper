@@ -3,6 +3,7 @@
 #include "content_catalog.hpp"
 #include "creation_club.hpp"
 #include "diagnostics.hpp"
+#include "path_display.hpp"
 #include "runtime_labels.hpp"
 #include "storage_operations.hpp"
 #include "unique_handle.hpp"
@@ -111,8 +112,10 @@ bool launch_session_watcher(const std::filesystem::path& helper,
   if (!ready_event) return false;
   ResetEvent(ready_event.get());
 
-  std::wstring command = L"\"" + helper.wstring() + L"\" --watch --game-root \"" +
-                         game_root.wstring() + L"\" --loader-pid " +
+  std::wstring command = quote_windows_command_argument(helper.wstring()) +
+                         L" --watch --game-root " +
+                         quote_windows_command_argument(game_root.wstring()) +
+                         L" --loader-pid " +
                          std::to_wstring(loader_process_id) + L" --ready-event \"" +
                          ready_event_name + L"\"";
   if (restore_runtime_after_session) command += L" --restore-runtime";

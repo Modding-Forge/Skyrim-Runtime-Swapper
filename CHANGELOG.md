@@ -2,6 +2,19 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.2.0-rc17 - 2026-09-01
+
+- Moves Creation Club recovery data and temporary holds outside Skyrim, binds
+  link layout and volume identity, and retains migration from older layouts.
+- Unifies Windows and POSIX ContentCatalog recovery under one v2 state machine
+  while retaining both v1 formats for recovery.
+- Separates operational paths from Windows, Wine, and POSIX presentation and
+  adds normalized, safely quoted diagnostics with phase timings.
+- Builds the Linux sidecar against the Ubuntu 22.04 ABI, verifies Linux and
+  Windows binary hardening, and runs CI safety tests on a stable ext4 volume.
+- Adds verified release archives, SHA-256 sums, complete third-party notices,
+  and the Proton Experimental instructions to every package.
+
 ## 1.2.0-rc16 - 2026-09-01
 
 - Separates runtime activation, recovery, transaction support, and workspace

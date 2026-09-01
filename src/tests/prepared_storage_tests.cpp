@@ -1,4 +1,6 @@
 #include "internal/file_operations.hpp"
+#include "internal/storage_probe_common.hpp"
+#include "test_paths.hpp"
 
 #include <runtime_swapper/checked_arithmetic.hpp>
 #include <runtime_swapper/prepared_storage.hpp>
@@ -12,6 +14,8 @@
 
 #include <filesystem>
 #include <fstream>
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <limits>
@@ -28,13 +32,7 @@ class TemporaryDirectory {
 #else
     const auto process = static_cast<unsigned long long>(::getpid());
 #endif
-#if defined(_WIN32)
-    const auto parent = std::filesystem::temp_directory_path();
-#else
-    // /tmp is commonly tmpfs and intentionally unsupported by the POSIX
-    // backend. CTest runs this binary from the durable build volume.
-    const auto parent = std::filesystem::current_path();
-#endif
+    const auto parent = runtime_swapper::tests::test_root();
     path_ = parent /
             ("prepared-storage-tests-" + std::to_string(process));
     std::error_code error;
@@ -80,6 +78,32 @@ int main() {
     return 10;
   }
   const TemporaryDirectory temporary;
+#if defined(_WIN32)
+  const runtime_swapper::VolumeIdentity locator_volume{
+      L"\\\\?\\Volume{11111111-2222-3333-4444-555555555555}\\",
+      L"NTFS", L"test", runtime_swapper::StorageMedium::internal, true, true,
+      true};
+  const auto locator = temporary.path() / "locator";
+  const auto vault = temporary.path() / "vault";
+  const auto current_locator = runtime_swapper::locator_contents(
+      "skyrimse-test", vault, locator_volume);
+  if (current_locator.find("volume=\\\\?\\Volume{") == std::string::npos ||
+      !write_file(locator, current_locator) ||
+      !runtime_swapper::locator_matches(locator, "skyrimse-test", vault,
+                                        locator_volume)) {
+    return 11;
+  }
+  auto legacy_locator = current_locator;
+  const auto volume_line = legacy_locator.find("volume=");
+  std::ranges::replace(legacy_locator.begin() +
+                           static_cast<std::ptrdiff_t>(volume_line + 7),
+                       legacy_locator.end(), '\\', '/');
+  if (!write_file(locator, legacy_locator) ||
+      !runtime_swapper::locator_matches(locator, "skyrimse-test", vault,
+                                        locator_volume)) {
+    return 12;
+  }
+#endif
   const auto library = temporary.path() / "SteamLibrary";
   const auto game = library / "steamapps" / "common" / "Prepared Storage Test";
   const auto staged = game / ".skyrim-runtime-swapper" / "staged.bin";

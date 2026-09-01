@@ -95,26 +95,29 @@ bool write_recovery_metadata(const std::filesystem::path& game_root,
   return vault && transaction_backend().write_atomic(metadata_path(*vault, name), contents);
 }
 
-std::optional<std::string> read_recovery_metadata(
+RecoveryMetadataReadResult read_recovery_metadata(
     const std::filesystem::path& game_root, std::string_view name) {
-  if (!valid_name(name)) return std::nullopt;
+  if (!valid_name(name)) {
+    return {RecoveryMetadataStatus::invalid_entry, {}};
+  }
   const auto vault = core::resolve_vault_layout(game_root);
-  // Missing metadata is the only non-error absence. Returning a present but
-  // invalid value for inaccessible or unsafe metadata makes every caller fail
-  // closed instead of mistaking a damaged pending transaction for no transaction.
-  if (!vault) return std::string{};
+  if (!vault) return {RecoveryMetadataStatus::unavailable, {}};
   const auto path = metadata_path(*vault, name);
   std::error_code error;
   (void)std::filesystem::symlink_status(path, error);
-  if (error == std::errc::no_such_file_or_directory) return std::nullopt;
+  if (error == std::errc::no_such_file_or_directory) {
+    return {RecoveryMetadataStatus::missing, {}};
+  }
   if (error || !core::private_regular_file(path)) {
-    return std::string{};
+    return {RecoveryMetadataStatus::invalid_entry, {}};
   }
   std::ifstream stream(path, std::ios::binary);
-  if (!stream) return std::string{};
+  if (!stream) return {RecoveryMetadataStatus::io_error, {}};
   std::string contents(std::istreambuf_iterator<char>(stream), {});
-  return stream.bad() ? std::optional<std::string>(std::string{})
-                      : std::optional<std::string>(std::move(contents));
+  return stream.bad()
+             ? RecoveryMetadataReadResult{RecoveryMetadataStatus::io_error, {}}
+             : RecoveryMetadataReadResult{RecoveryMetadataStatus::present,
+                                          std::move(contents)};
 }
 
 bool remove_recovery_metadata(const std::filesystem::path& game_root,
@@ -135,7 +138,7 @@ bool remove_recovery_metadata(const std::filesystem::path& game_root,
 std::optional<RecoveryLifecycleState> inspect_recovery_lifecycle(
     const std::filesystem::path& game_root) {
   const auto stored = read_recovery_metadata(game_root, "lifecycle");
-  if (!stored) {
+  if (stored.missing()) {
     if (source_runtime_is_active(game_root)) {
       return RecoveryLifecycleState::clean_source;
     }
@@ -144,13 +147,15 @@ std::optional<RecoveryLifecycleState> inspect_recovery_lifecycle(
     }
     return RecoveryLifecycleState::restoring;
   }
+  if (!stored.present()) return std::nullopt;
   constexpr std::string_view prefix =
       "SRS-RECOVERY-LIFECYCLE-1\nstate=";
-  if (!stored->starts_with(prefix) || !stored->ends_with('\n')) {
+  if (!stored.contents.starts_with(prefix) ||
+      !stored.contents.ends_with('\n')) {
     return std::nullopt;
   }
-  const auto name = std::string_view(*stored).substr(
-      prefix.size(), stored->size() - prefix.size() - 1);
+  const auto name = std::string_view(stored.contents).substr(
+      prefix.size(), stored.contents.size() - prefix.size() - 1);
   for (const auto state : {RecoveryLifecycleState::clean_source,
                            RecoveryLifecycleState::preparing,
                            RecoveryLifecycleState::target_active,

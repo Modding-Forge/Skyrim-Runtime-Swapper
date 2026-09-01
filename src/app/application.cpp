@@ -5,6 +5,7 @@
 #include "creation_club.hpp"
 #include "diagnostics.hpp"
 #include "manual_gui.hpp"
+#include "path_display.hpp"
 #include "persistent_dialog.hpp"
 #include "runtime_labels.hpp"
 #include "runtime_version_reader.hpp"
@@ -15,6 +16,7 @@
 
 #include <runtime_swapper/downgrade.hpp>
 #include <runtime_swapper/exit_code.hpp>
+#include <runtime_swapper/release_version.hpp>
 #include <runtime_swapper/runtime_version.hpp>
 #include <runtime_swapper/session_gate.hpp>
 #include <runtime_swapper/session_plan.hpp>
@@ -24,9 +26,46 @@
 
 #include <filesystem>
 #include <string>
+#include <string_view>
 
 namespace runtime_swapper::app {
 namespace {
+
+[[nodiscard]] std::wstring wide_ascii(std::string_view value) {
+  return std::wstring(value.begin(), value.end());
+}
+
+[[nodiscard]] std::wstring operation_label(int argc,
+                                           const CommandLineOptions& options) {
+  if (argc == 1) return L"manual-gui";
+  if (options.watch) return L"session-watcher";
+  return options.from_skse_loader ? L"skse-launch" : L"runtime-launch";
+}
+
+[[nodiscard]] std::wstring environment_label(bool wine) {
+  if (!wine) return L"Windows";
+  return GetEnvironmentVariableW(L"STEAM_COMPAT_DATA_PATH", nullptr, 0) != 0 ||
+                 GetEnvironmentVariableW(L"SteamGameId", nullptr, 0) != 0
+             ? L"Proton (Windows process with native Linux sidecar)"
+             : L"Wine (Windows process with native Linux sidecar)";
+}
+
+void log_session_header(int argc, const CommandLineOptions& options,
+                        bool wine) {
+  std::wstring header =
+      L"Session: SRS=" + wide_ascii(release_version_utf8) +
+      L"; profile=" + wide_ascii(build_profile_label) +
+      L"; operation=" + operation_label(argc, options) +
+      L"; runtime=" + std::wstring(source_version_label) + L" -> " +
+      std::wstring(target_version_label) +
+      L"; environment=" + environment_label(wine);
+  if (options.game_root) {
+    header += L"; game-root=" + display_path(*options.game_root);
+  } else {
+    header += L"; helper=" + display_path(options.helper_path);
+  }
+  log_diagnostic(header);
+}
 
 class MutexLock {
  public:
@@ -86,6 +125,8 @@ class MutexLock {
 
 int run(int argc, wchar_t** argv) {
   const auto options = parse_command_line(argc, argv);
+  const bool wine = is_wine_environment();
+  log_session_header(argc, options, wine);
   if (argc == 1) return run_manual_gui(options.helper_path);
   if (!options.game_root) {
     return finish(ExitCode::invalid_arguments, L"The game directory was not specified.",
@@ -133,7 +174,6 @@ int run(int argc, wchar_t** argv) {
                   MB_ICONERROR, options.quiet);
   }
 
-  const bool wine = is_wine_environment();
   InstallationOperationResult prepared;
   auto probe = BackendProbeResult{};
   bool risk_accepted = false;
@@ -164,11 +204,7 @@ int run(int argc, wchar_t** argv) {
   } else {
     probe = probe_installation_storage(*options.game_root).backend;
   }
-  log_diagnostic(L"Storage backend: " + probe.description + L"; vault: " +
-                 probe.vault_path.wstring() + L"; transaction workspace: " +
-                 probe.transaction_work.value.wstring() +
-                 L"; technical reason: " + probe.technical_reason +
-                 L"; message: " + probe.message);
+  log_storage_probe(probe);
   if (!probe.success()) {
     mutex_lock.unlock();
     if (!options.quiet) show_hard_blocked_dialog(probe);
@@ -208,7 +244,14 @@ int run(int argc, wchar_t** argv) {
     // operation so authenticated large files and native handles are reused.
     prepared = prepare_launch(*options.game_root, true, risk_accepted);
   }
-  log_diagnostic(L"Installation prepare: " + prepared.message);
+  if (prepared.message != probe.message) {
+    log_diagnostic(L"Installation prepare: " + prepared.message);
+  } else {
+    log_diagnostic(L"Installation prepare completed: code=" +
+                   std::to_wstring(static_cast<int>(prepared.code)) +
+                   L"; lifecycle-phase=" +
+                   std::to_wstring(static_cast<int>(prepared.lifecycle_phase)));
+  }
   if (!prepared.success()) {
     mutex_lock.unlock();
     return finish(prepared.code,

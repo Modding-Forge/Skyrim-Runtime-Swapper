@@ -7,12 +7,19 @@ Skyrim Runtime Swapper uses the HDiffPatch 5.1.3 source tree from
 repositories are pinned by commit and checked by
 `tools/tests/verify-third-party-pins.py` in CI.
 
-Only the HDIFFW26, Zstandard and xxHash128 paths required by the signed runtime
-manifests are compiled. The SRS adapter supplies already-opened source, patch and
+Only the HDIFFW26, Zstandard and xxHash128 paths required by the embedded,
+hash-verified runtime manifests are compiled. The SRS adapter supplies
+already-opened source, patch and
 output streams, applies bounds checks at the adapter boundary, and verifies the
 manifest SHA-256 values outside HDiffPatch. Upstream code is built with ASan and
 UBSan in the Linux security job and exercised with a generated regression
 corpus plus a time-bounded libFuzzer target.
 
-The bundled license and copyright notice remain in
-`third_party/HDiffPatch5/HDiffPatch/LICENSE`.
+The bundled license and copyright notices remain in:
+
+- `third_party/HDiffPatch5/HDiffPatch/LICENSE` for HDiffPatch (MIT)
+- `third_party/HDiffPatch5/zstd/LICENSE` for Zstandard (BSD 3-Clause)
+- `third_party/HDiffPatch5/xxHash/LICENSE` for xxHash (BSD 2-Clause)
+
+The release archives include this notice and complete copies of all three
+licenses under `THIRD_PARTY-LICENSES/`.

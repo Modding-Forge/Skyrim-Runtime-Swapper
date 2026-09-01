@@ -8,6 +8,7 @@
 #include "session.hpp"
 #include "storage_operations.hpp"
 #include "persistent_dialog.hpp"
+#include "path_display.hpp"
 #include "unique_handle.hpp"
 #include "wine_sidecar.hpp"
 
@@ -146,7 +147,8 @@ class ManualOperationLock {
                                        FixedRuntimeState fixed_state,
                                        bool fixed_target_verified,
                                        const BackendProbeResult& backend) {
-  std::wstring status = L"Game directory:\n" + game_root.wstring() + L"\n\nProfile: " +
+  std::wstring status = L"Game directory:\n" + display_path(game_root) +
+                        L"\n\nProfile: " +
                         profile_name() + L"\nAvailable switch: 1.7.104 <-> " +
                         std::wstring(target_version_label) + L"\n";
   const auto version = read_runtime_version(game_root / L"SkyrimSE.exe");
@@ -167,8 +169,9 @@ class ManualOperationLock {
       break;
   }
   status += L"\nStorage mode: " + safety_mode_label(backend.mode);
-  if (!backend.vault_path.empty()) {
-    status += L"\nRecovery vault: " + backend.vault_path.wstring();
+  if (!backend.recovery_vault.value.empty() || backend.reported_paths) {
+    status += L"\nRecovery vault: " +
+              display_storage_path(backend, StoragePathRole::recovery_vault);
   }
   if (!backend.success()) {
     status += L"\n\nDowngrade unavailable: " + backend.message;
@@ -186,6 +189,7 @@ class ManualOperationLock {
                             ? run_wine_sidecar(WineSidecarOperation::probe,
                                                game_root)
                             : probe_installation_storage(game_root);
+    log_storage_probe(probed.backend);
     const auto fixed_state =
         wine ? (probed.persistent
                     ? FixedRuntimeState::active

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <runtime_swapper/exit_code.hpp>
+#include <runtime_swapper/transaction_backend.hpp>
 
 #include <windows.h>
 
@@ -9,6 +10,7 @@
 namespace runtime_swapper::app {
 
 void log_diagnostic(const std::wstring& message) noexcept;
+void log_storage_probe(const BackendProbeResult& probe) noexcept;
 [[nodiscard]] bool copy_diagnostic_logs() noexcept;
 
 int finish(ExitCode code, const std::wstring& message, UINT icon, bool quiet = false);

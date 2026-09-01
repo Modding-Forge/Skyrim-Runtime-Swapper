@@ -95,6 +95,25 @@ int main() {
   }
   clear_fault();
 
+  const auto move_source = temporary.path() / L"move-source";
+  const auto move_destination = temporary.path() / L"move-destination";
+  for (const auto* point : {"move.before", "move.after-rename",
+                            "move.after-sync"}) {
+    std::error_code error;
+    std::filesystem::remove(move_source, error);
+    std::filesystem::remove(move_destination, error);
+    write_file(move_source, "move-content");
+    fault(point);
+    if (backend.move_atomic(move_source, move_destination)) return 30;
+    clear_fault();
+    const bool moved = std::string_view(point) != "move.before";
+    if (std::filesystem::exists(move_source) == moved ||
+        std::filesystem::exists(move_destination) != moved ||
+        (moved && read_file(move_destination) != "move-content")) {
+      return 31;
+    }
+  }
+
   const auto live = temporary.path() / L"live";
   const auto staged = temporary.path() / L"staged";
   const auto rollback = temporary.path() / L"rollback";

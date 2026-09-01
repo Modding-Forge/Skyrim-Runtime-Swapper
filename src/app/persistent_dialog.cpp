@@ -1,6 +1,7 @@
 #include "persistent_dialog.hpp"
 
 #include "diagnostics.hpp"
+#include "path_display.hpp"
 
 #include <runtime_swapper/runtime_version.hpp>
 
@@ -25,11 +26,12 @@ PersistentDialogChoice show_persistent_downgrade_dialog(
       L"keep Skyrim " +
       std::wstring(target_version_label) +
       L" active and retain verified original files in:\n\n" +
-      probe.vault_path.wstring() + L"\n\nGame volume: " +
+      display_storage_path(probe, StoragePathRole::recovery_vault) +
+      L"\n\nGame volume: " +
       probe.target_volume.description + L"\nRecovery vault: " +
       probe.vault_volume.description + L"\n\nTo restore Skyrim " +
       std::wstring(source_version_label) + L" later, run:\n\n" +
-      (game_root / L"SkyrimRuntimeSwapper.exe").wstring() +
+      quote_display_path(game_root / L"SkyrimRuntimeSwapper.exe") +
       L"\n\nand select Restore Skyrim " + std::wstring(source_version_label) +
       L".\n\nDo not delete or modify the recovery vault while the persistent "
       L"downgrade is active.";

@@ -1,6 +1,8 @@
 #include "wine_sidecar.hpp"
 
+#include "path_display.hpp"
 #include "unique_handle.hpp"
+#include "wine_sidecar_protocol.hpp"
 
 #include <runtime_swapper/posix_sidecar_hash.hpp>
 #include <runtime_swapper/sha256.hpp>
@@ -14,7 +16,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -22,26 +23,18 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace runtime_swapper::app {
 namespace {
 
-constexpr std::uint32_t protocol_magic = 0x50535253U;
-constexpr std::uint16_t protocol_version = 5;
-constexpr std::uint32_t maximum_payload = 1024U * 1024U;
+using wine_sidecar_protocol::FrameHeader;
+using wine_sidecar_protocol::maximum_payload;
+using wine_sidecar_protocol::protocol_magic;
+using wine_sidecar_protocol::protocol_version;
 
 #pragma pack(push, 1)
-struct FrameHeader {
-  std::uint32_t magic{};
-  std::uint16_t version{};
-  std::uint16_t operation{};
-  std::uint32_t payload_size{};
-  std::array<std::byte, 32> nonce{};
-};
-
 struct Elf64Header {
   std::array<std::byte, 16> identification{};
   std::uint16_t type{};
@@ -71,7 +64,6 @@ struct Elf64ProgramHeader {
 };
 #pragma pack(pop)
 
-static_assert(sizeof(FrameHeader) == 44);
 static_assert(sizeof(Elf64Header) == 64);
 static_assert(sizeof(Elf64ProgramHeader) == 56);
 
@@ -299,198 +291,6 @@ class IpcCleanup {
   std::filesystem::path directory_;
 };
 
-template <typename Value>
-void append_integer(std::vector<std::byte>& bytes, Value value) {
-  const auto offset = bytes.size();
-  bytes.resize(offset + sizeof(value));
-  std::memcpy(bytes.data() + offset, &value, sizeof(value));
-}
-
-void append_string(std::vector<std::byte>& bytes, std::string_view value) {
-  append_integer(bytes, static_cast<std::uint32_t>(value.size()));
-  const auto* begin = reinterpret_cast<const std::byte*>(value.data());
-  bytes.insert(bytes.end(), begin, begin + value.size());
-}
-
-template <typename Value>
-[[nodiscard]] std::optional<Value> take_integer(std::span<const std::byte>& bytes) {
-  static_assert(std::is_integral_v<Value> || std::is_enum_v<Value>);
-  if (bytes.size() < sizeof(Value)) return std::nullopt;
-  Value value{};
-  std::memcpy(&value, bytes.data(), sizeof(value));
-  bytes = bytes.subspan(sizeof(value));
-  return value;
-}
-
-[[nodiscard]] std::optional<std::string> take_string(
-    std::span<const std::byte>& bytes) {
-  const auto size = take_integer<std::uint32_t>(bytes);
-  if (!size || *size > maximum_payload || bytes.size() < *size) return std::nullopt;
-  std::string value(reinterpret_cast<const char*>(bytes.data()), *size);
-  if (value.find('\0') != std::string::npos) return std::nullopt;
-  bytes = bytes.subspan(*size);
-  return value;
-}
-
-[[nodiscard]] std::optional<std::wstring> wide(std::string_view utf8) {
-  if (utf8.empty()) return std::wstring{};
-  const int required = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(),
-                                           static_cast<int>(utf8.size()), nullptr, 0);
-  if (required <= 0) return std::nullopt;
-  std::wstring result(static_cast<std::size_t>(required), L'\0');
-  return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(),
-                             static_cast<int>(utf8.size()), result.data(), required) == required
-             ? std::optional(result)
-             : std::nullopt;
-}
-
-[[nodiscard]] bool valid_exit_code(std::int32_t value) noexcept {
-  switch (static_cast<ExitCode>(value)) {
-    case ExitCode::success:
-    case ExitCode::invalid_arguments:
-    case ExitCode::game_not_found:
-    case ExitCode::version_read_failed:
-    case ExitCode::unsupported_runtime:
-    case ExitCode::patch_files_missing:
-    case ExitCode::source_hash_mismatch:
-    case ExitCode::insufficient_disk_space:
-    case ExitCode::patch_failed:
-    case ExitCode::backup_failed:
-    case ExitCode::commit_failed:
-    case ExitCode::another_instance_failed:
-    case ExitCode::content_catalog_cleanup_failed:
-    case ExitCode::internal_error:
-    case ExitCode::watcher_start_failed:
-    case ExitCode::restore_failed:
-    case ExitCode::unsupported_filesystem:
-    case ExitCode::journal_corrupt:
-    case ExitCode::recovery_failed:
-    case ExitCode::creation_club_cleanup_failed:
-    case ExitCode::user_cancelled:
-      return true;
-  }
-  return false;
-}
-
-[[nodiscard]] std::optional<InstallationOperationResult> parse_response(
-    std::span<const std::byte> payload) {
-  const auto code = take_integer<std::int32_t>(payload);
-  const auto mode = take_integer<std::uint32_t>(payload);
-  const auto flags = take_integer<std::uint32_t>(payload);
-  const auto operations = take_integer<std::uint32_t>(payload);
-  const auto lifecycle_state = take_integer<std::uint32_t>(payload);
-  const auto lifecycle_phase = take_integer<std::uint32_t>(payload);
-  const auto installation = take_string(payload);
-  const auto vault = take_string(payload);
-  const auto target_cache = take_string(payload);
-  const auto coordination_lock = take_string(payload);
-  const auto transaction_work = take_string(payload);
-  const auto target_id = take_string(payload);
-  const auto target_filesystem = take_string(payload);
-  const auto target_medium = take_integer<std::uint32_t>(payload);
-  const auto target_flags = take_integer<std::uint32_t>(payload);
-  const auto vault_id = take_string(payload);
-  const auto vault_filesystem = take_string(payload);
-  const auto vault_medium = take_integer<std::uint32_t>(payload);
-  const auto vault_flags = take_integer<std::uint32_t>(payload);
-  const auto target_description = take_string(payload);
-  const auto vault_description = take_string(payload);
-  const auto technical = take_string(payload);
-  const auto technical_detail = take_string(payload);
-  const auto message = take_string(payload);
-  if (!code || !valid_exit_code(*code) || !mode ||
-      *mode > static_cast<std::uint32_t>(SafetyMode::hard_blocked) ||
-      !flags || (*flags & ~63U) != 0 || !operations ||
-      (*operations & ~15U) != 0 || !lifecycle_state ||
-      *lifecycle_state >
-          static_cast<std::uint32_t>(RecoveryLifecycleState::persistent) ||
-      !lifecycle_phase ||
-      *lifecycle_phase >
-          static_cast<std::uint32_t>(RecoveryLifecyclePhase::complete) ||
-      !installation || !vault || !target_cache ||
-      !coordination_lock || !transaction_work || !target_id ||
-      !target_filesystem || !target_medium ||
-      *target_medium > static_cast<std::uint32_t>(StorageMedium::unknown) ||
-      !target_flags || *target_flags > 7U || !vault_id || !vault_filesystem ||
-      !vault_medium ||
-      *vault_medium > static_cast<std::uint32_t>(StorageMedium::unknown) ||
-      !vault_flags || *vault_flags > 7U || !target_description ||
-      !vault_description || !technical || !technical_detail || !message ||
-      !payload.empty()) {
-    return std::nullopt;
-  }
-  const auto target_wide = wide(*target_description);
-  const auto vault_wide = wide(*vault_description);
-  const auto target_id_wide = wide(*target_id);
-  const auto target_filesystem_wide = wide(*target_filesystem);
-  const auto vault_id_wide = wide(*vault_id);
-  const auto vault_filesystem_wide = wide(*vault_filesystem);
-  const auto technical_wide = wide(*technical);
-  const auto technical_detail_wide = wide(*technical_detail);
-  const auto message_wide = wide(*message);
-  if (!target_wide || !vault_wide || !target_id_wide ||
-      !target_filesystem_wide || !vault_id_wide || !vault_filesystem_wide ||
-      !technical_wide || !technical_detail_wide || !message_wide) {
-    return std::nullopt;
-  }
-  InstallationOperationResult result;
-  result.code = static_cast<ExitCode>(*code);
-  result.backend.code = result.code;
-  result.backend.mode = static_cast<SafetyMode>(*mode);
-  result.backend.allowed_operations = static_cast<StorageOperation>(*operations);
-  result.lifecycle_state =
-      static_cast<RecoveryLifecycleState>(*lifecycle_state);
-  result.lifecycle_phase =
-      static_cast<RecoveryLifecyclePhase>(*lifecycle_phase);
-  result.backend.installation_id = *installation;
-  try {
-    const auto* vault_begin = reinterpret_cast<const char8_t*>(vault->data());
-    result.backend.vault_path = std::filesystem::path(
-        std::u8string(vault_begin, vault_begin + vault->size()));
-    const auto* cache_begin =
-        reinterpret_cast<const char8_t*>(target_cache->data());
-    result.backend.target_cache.value = std::filesystem::path(
-        std::u8string(cache_begin, cache_begin + target_cache->size()));
-    const auto* lock_begin =
-        reinterpret_cast<const char8_t*>(coordination_lock->data());
-    result.backend.coordination_lock.value = std::filesystem::path(
-        std::u8string(lock_begin, lock_begin + coordination_lock->size()));
-    const auto* work_begin =
-        reinterpret_cast<const char8_t*>(transaction_work->data());
-    result.backend.transaction_work.value = std::filesystem::path(
-        std::u8string(work_begin, work_begin + transaction_work->size()));
-    result.backend.recovery_vault.value = result.backend.vault_path;
-  } catch (const std::filesystem::filesystem_error&) {
-    return std::nullopt;
-  }
-  result.backend.target_volume.description = *target_wide;
-  result.backend.target_volume.stable_id = *target_id_wide;
-  result.backend.target_volume.filesystem = *target_filesystem_wide;
-  result.backend.target_volume.medium =
-      static_cast<StorageMedium>(*target_medium);
-  result.backend.target_volume.local = (*target_flags & 1U) != 0;
-  result.backend.target_volume.stable = (*target_flags & 2U) != 0;
-  result.backend.target_volume.native_durability = (*target_flags & 4U) != 0;
-  result.backend.vault_volume.description = *vault_wide;
-  result.backend.vault_volume.stable_id = *vault_id_wide;
-  result.backend.vault_volume.filesystem = *vault_filesystem_wide;
-  result.backend.vault_volume.medium = static_cast<StorageMedium>(*vault_medium);
-  result.backend.vault_volume.local = (*vault_flags & 1U) != 0;
-  result.backend.vault_volume.stable = (*vault_flags & 2U) != 0;
-  result.backend.vault_volume.native_durability = (*vault_flags & 4U) != 0;
-  result.backend.technical_reason = *technical_wide;
-  result.technical_detail = *technical_detail_wide;
-  result.backend.message = *message_wide;
-  result.changed = (*flags & 1U) != 0;
-  result.persistent = (*flags & 2U) != 0;
-  result.runtime_changed = (*flags & 4U) != 0;
-  result.content_catalog_changed = (*flags & 8U) != 0;
-  result.creation_club_changed = (*flags & 16U) != 0;
-  result.content_catalog_persistent = (*flags & 32U) != 0;
-  result.message = *message_wide;
-  return result;
-}
-
 }  // namespace
 
 InstallationOperationResult run_wine_sidecar(
@@ -516,7 +316,9 @@ InstallationOperationResult run_wine_sidecar(
                                       *unix_local_app_data +
                                       "/Skyrim Special Edition/ContentCatalog.txt")
                                 : std::nullopt;
-  const auto wide_sidecar = unix_sidecar ? wide(*unix_sidecar) : std::nullopt;
+  const auto wide_sidecar =
+      unix_sidecar ? wine_sidecar_protocol::decode_utf8(*unix_sidecar)
+                   : std::nullopt;
   if (!unix_game) {
     return error_result(L"wine-game-path-translation-failed",
                         L"Wine could not translate the Skyrim directory to a native Linux path.");
@@ -550,11 +352,12 @@ InstallationOperationResult run_wine_sidecar(
                         L"A secure native-helper protocol nonce could not be generated.");
   }
   std::vector<std::byte> payload;
-  append_string(payload, *unix_game);
-  append_string(payload, *unix_catalog);
-  append_integer(payload, static_cast<std::uint8_t>(risk_accepted ? 1 : 0));
-  append_integer(payload,
-                 static_cast<std::uint8_t>(allow_persistent ? 1 : 0));
+  wine_sidecar_protocol::append_string(payload, *unix_game);
+  wine_sidecar_protocol::append_string(payload, *unix_catalog);
+  wine_sidecar_protocol::append_byte(
+      payload, static_cast<std::uint8_t>(risk_accepted ? 1 : 0));
+  wine_sidecar_protocol::append_byte(
+      payload, static_cast<std::uint8_t>(allow_persistent ? 1 : 0));
   request.payload_size = static_cast<std::uint32_t>(payload.size());
 
   const auto ipc_parent = *local_app_data / L"Modding Forge" /
@@ -591,9 +394,11 @@ InstallationOperationResult run_wine_sidecar(
 
   const auto unix_ipc = wine_unix_path(ipc_directory);
   const auto wide_request =
-      unix_ipc ? wide(*unix_ipc + "/request.bin") : std::nullopt;
+      unix_ipc ? wine_sidecar_protocol::decode_utf8(*unix_ipc + "/request.bin")
+               : std::nullopt;
   const auto wide_response =
-      unix_ipc ? wide(*unix_ipc + "/response.bin") : std::nullopt;
+      unix_ipc ? wine_sidecar_protocol::decode_utf8(*unix_ipc + "/response.bin")
+               : std::nullopt;
   if (!unix_ipc || !wide_request || !wide_response) {
     return error_result(L"sidecar-ipc-path-translation-failed",
                         L"Wine could not translate the isolated native-helper channel.");
@@ -621,10 +426,12 @@ InstallationOperationResult run_wine_sidecar(
                           CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
                           nullptr, game_root.c_str(), &startup, &process_info);
   };
-  const auto sidecar_arguments = L" \"" + *wide_request + L"\" \"" +
-                                 *wide_response + L"\"";
+  const auto sidecar_arguments =
+      L" " + quote_windows_command_argument(*wide_request) + L" " +
+      quote_windows_command_argument(*wide_response);
   BOOL started = start_process(
-      sidecar, L"\"" + sidecar.wstring() + L"\"" + sidecar_arguments);
+      sidecar, quote_windows_command_argument(sidecar.wstring()) +
+                   sidecar_arguments);
   const DWORD direct_error = started ? ERROR_SUCCESS : GetLastError();
   if (!started) {
     auto chmod_path = wine_windows_path("/bin/chmod");
@@ -638,8 +445,9 @@ InstallationOperationResult run_wine_sidecar(
       STARTUPINFOW chmod_startup{};
       chmod_startup.cb = sizeof(chmod_startup);
       PROCESS_INFORMATION chmod_process{};
-      auto chmod_command = L"\"" + chmod_path->wstring() + L"\" 0700 \"" +
-                           *wide_sidecar + L"\"";
+      auto chmod_command = quote_windows_command_argument(chmod_path->wstring()) +
+                           L" 0700 " +
+                           quote_windows_command_argument(*wide_sidecar);
       std::vector<wchar_t> mutable_chmod(chmod_command.begin(),
                                          chmod_command.end());
       mutable_chmod.push_back(L'\0');
@@ -665,7 +473,8 @@ InstallationOperationResult run_wine_sidecar(
           }
           started = start_process(
               sidecar,
-              L"\"" + sidecar.wstring() + L"\"" + sidecar_arguments);
+              quote_windows_command_argument(sidecar.wstring()) +
+                  sidecar_arguments);
         }
       }
     }
@@ -685,8 +494,10 @@ InstallationOperationResult run_wine_sidecar(
       }
     }
     if (interpreter && windows_interpreter) {
-      const auto command = L"\"" + windows_interpreter->wstring() + L"\" \"" +
-                           *wide_sidecar + L"\"" + sidecar_arguments;
+      const auto command =
+          quote_windows_command_argument(windows_interpreter->wstring()) +
+          L" " + quote_windows_command_argument(*wide_sidecar) +
+          sidecar_arguments;
       started = start_process(*windows_interpreter, command);
       if (!started) interpreter_error = GetLastError();
     }
@@ -757,7 +568,7 @@ InstallationOperationResult run_wine_sidecar(
     return error_result(L"sidecar-response-incomplete",
                         L"The native helper response was truncated.");
   }
-  const auto parsed = parse_response(response_payload);
+  const auto parsed = wine_sidecar_protocol::parse_response(response_payload);
   return parsed ? *parsed
                 : error_result(L"sidecar-payload-invalid",
                                L"The native helper response payload is invalid.");

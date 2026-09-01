@@ -13,7 +13,7 @@ import tempfile
 
 
 MAGIC = 0x50535253
-VERSION = 5
+VERSION = 6
 HEADER = struct.Struct("<IHHI32s")
 MAXIMUM_PAYLOAD = 1024 * 1024
 
@@ -104,8 +104,9 @@ def main() -> int:
     )
     expect_rejected(sidecar, frame(1, b""), 4)
 
+    test_root = pathlib.Path(os.environ.get("SRS_TEST_ROOT", sidecar.parent))
     with tempfile.TemporaryDirectory(
-        prefix="srs-sidecar-protocol-", dir=sidecar.parent
+        prefix="srs-sidecar-protocol-", dir=test_root
     ) as root:
         game = pathlib.Path(root, "game").resolve()
         catalog = pathlib.Path(root, "state", "ContentCatalog.txt").resolve()

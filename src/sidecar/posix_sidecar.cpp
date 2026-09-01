@@ -27,7 +27,7 @@
 namespace {
 
 constexpr std::uint32_t protocol_magic = 0x50535253U;  // SRSP
-constexpr std::uint16_t protocol_version = 5;
+constexpr std::uint16_t protocol_version = 6;
 constexpr std::uint32_t maximum_payload = 1024U * 1024U;
 
 enum class Operation : std::uint16_t {
@@ -325,6 +325,8 @@ struct OperationPolicy {
   append_integer(payload, static_cast<std::uint32_t>(result.lifecycle_state));
   append_integer(payload, static_cast<std::uint32_t>(result.lifecycle_phase));
   append_string(payload, result.backend.installation_id);
+  append_integer(payload, static_cast<std::uint32_t>(
+                              runtime_swapper::PathSyntax::posix));
   append_string(payload, path_utf8(result.backend.vault_path));
   append_string(payload, path_utf8(result.backend.target_cache.value));
   append_string(payload, path_utf8(result.backend.coordination_lock.value));
@@ -347,6 +349,7 @@ struct OperationPolicy {
                      (result.backend.vault_volume.native_durability ? 4U : 0U));
   append_string(payload, text_utf8(result.backend.target_volume.description));
   append_string(payload, text_utf8(result.backend.vault_volume.description));
+  append_string(payload, text_utf8(result.backend.description));
   append_string(payload, text_utf8(result.backend.technical_reason));
   append_string(payload, text_utf8(result.technical_detail));
   append_string(payload,

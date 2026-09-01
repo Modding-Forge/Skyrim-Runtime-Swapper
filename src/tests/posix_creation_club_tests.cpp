@@ -1,10 +1,12 @@
 #include "creation_club.hpp"
+#include "test_paths.hpp"
 
 #include <runtime_swapper/runtime_version.hpp>
 
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -16,9 +18,7 @@ namespace {
 class TemporaryDirectory {
  public:
   TemporaryDirectory() {
-    std::string pattern =
-        (std::filesystem::current_path() / "srs-creation-club-XXXXXX").string();
-    pattern.push_back('\0');
+    auto pattern = runtime_swapper::tests::temporary_pattern("srs-creation-club");
     if (char* created = ::mkdtemp(pattern.data())) {
       path_ = created;
       std::filesystem::create_directories(path_ / "Data");
@@ -78,6 +78,17 @@ int main() {
   if (!recovered.success || !std::filesystem::is_regular_file(unicode)) {
     std::cerr << "Unicode Creation Club recovery failed\n";
     return 4;
+  }
+  (void)::setenv("SKYRIM_RUNTIME_SWAPPER_FAULT_POINT", "move.after-rename", 1);
+  const auto interrupted =
+      runtime_swapper::app::quarantine_creation_club_content(temporary.path());
+  (void)::unsetenv("SKYRIM_RUNTIME_SWAPPER_FAULT_POINT");
+  const auto interrupted_recovery =
+      runtime_swapper::app::recover_creation_club_content(temporary.path());
+  if (interrupted.success || !interrupted_recovery.success ||
+      !std::filesystem::is_regular_file(unicode)) {
+    std::cerr << "Interrupted Creation Club recovery failed\n";
+    return 5;
   }
   return 0;
 }

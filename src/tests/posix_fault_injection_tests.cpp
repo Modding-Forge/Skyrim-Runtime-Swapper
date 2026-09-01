@@ -1,4 +1,5 @@
 #include "internal/transaction_journal.hpp"
+#include "test_paths.hpp"
 
 #include <runtime_swapper/transaction_backend.hpp>
 
@@ -17,9 +18,7 @@ namespace {
 class TemporaryDirectory {
  public:
   TemporaryDirectory() {
-    std::string pattern =
-        (std::filesystem::current_path() / "srs-posix-faults-XXXXXX").string();
-    pattern.push_back('\0');
+    auto pattern = runtime_swapper::tests::temporary_pattern("srs-posix-faults");
     if (char* created = ::mkdtemp(pattern.data())) path_ = created;
   }
   ~TemporaryDirectory() {
@@ -83,6 +82,25 @@ int main() {
     fault(point);
     if (backend.copy_atomic(source, copy) || read_file(copy) != "source") return 3;
     clear_fault();
+  }
+
+  const auto move_source = temporary.path() / "move-source";
+  const auto move_destination = temporary.path() / "move-destination";
+  for (const auto* point : {"move.before", "move.after-rename",
+                            "move.after-sync"}) {
+    std::error_code error;
+    std::filesystem::remove(move_source, error);
+    std::filesystem::remove(move_destination, error);
+    write_file(move_source, "move-content");
+    fault(point);
+    if (backend.move_atomic(move_source, move_destination)) return 40;
+    clear_fault();
+    const bool moved = std::string_view(point) != "move.before";
+    if (std::filesystem::exists(move_source) == moved ||
+        std::filesystem::exists(move_destination) != moved ||
+        (moved && read_file(move_destination) != "move-content")) {
+      return 41;
+    }
   }
 
   const auto live = temporary.path() / "live";
