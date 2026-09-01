@@ -20,18 +20,34 @@ class TemporaryDirectory {
   TemporaryDirectory() {
     auto pattern = runtime_swapper::tests::temporary_pattern("srs-creation-club");
     if (char* created = ::mkdtemp(pattern.data())) {
-      path_ = created;
+      root_ = created;
+      if (const char* current = std::getenv("XDG_STATE_HOME")) {
+        previous_xdg_state_ = current;
+        had_previous_xdg_state_ = true;
+      }
+      const auto state_home = root_ / "xdg-state";
+      (void)::setenv("XDG_STATE_HOME", state_home.c_str(), 1);
+      path_ = root_ / "SteamLibrary" / "steamapps" / "common" /
+              "Creation Club Test";
       std::filesystem::create_directories(path_ / "Data");
     }
   }
   ~TemporaryDirectory() {
+    if (had_previous_xdg_state_) {
+      (void)::setenv("XDG_STATE_HOME", previous_xdg_state_.c_str(), 1);
+    } else {
+      (void)::unsetenv("XDG_STATE_HOME");
+    }
     std::error_code error;
-    std::filesystem::remove_all(path_, error);
+    std::filesystem::remove_all(root_, error);
   }
   const std::filesystem::path& path() const noexcept { return path_; }
 
  private:
+  std::filesystem::path root_;
   std::filesystem::path path_;
+  std::string previous_xdg_state_;
+  bool had_previous_xdg_state_{};
 };
 
 void write_file(const std::filesystem::path& path, std::string_view value) {
