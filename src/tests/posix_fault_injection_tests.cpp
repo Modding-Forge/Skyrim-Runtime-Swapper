@@ -311,6 +311,19 @@ int main() {
   std::filesystem::create_directories(steam_game);
   const auto steam_probe = backend.probe(steam_game);
   if (steam_probe.success() && steam_probe.mode == SafetyMode::automatic) {
+    const auto irrelevant_state = temporary.path() / "irrelevant-state";
+    std::filesystem::create_directories(irrelevant_state);
+    if (::chmod(irrelevant_state.c_str(), 0777) != 0 ||
+        ::setenv("XDG_STATE_HOME", irrelevant_state.c_str(), 1) != 0) {
+      return 41;
+    }
+    const auto state_independent_probe = backend.probe(steam_game);
+    if (!state_independent_probe.success() ||
+        state_independent_probe.mode != SafetyMode::automatic ||
+        state_independent_probe.vault_path != steam_probe.vault_path ||
+        ::setenv("XDG_STATE_HOME", state.c_str(), 1) != 0) {
+      return 42;
+    }
     const auto local_storage = temporary.path() / "SteamLibrary" /
                                ".runtime-swapper";
     if (steam_probe.vault_path.lexically_relative(local_storage).empty() ||

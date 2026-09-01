@@ -2,7 +2,7 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
-## 1.2.0 - 2026-09-01
+## 1.2.0-rc18 - 2026-09-01
 
 - Added portable storage classification and automatically selected recovery
   storage for Windows, Linux, Wine, and Proton. Trusted internal NTFS, ext4,
@@ -43,7 +43,12 @@ All notable changes to Skyrim Runtime Swapper are documented in this file.
   and recovery phase timings without adding redundant full-file hash passes.
 - Uses the same Core transaction logic through a hash-pinned native ELF sidecar
   under Wine and Proton. Release sidecars target the Ubuntu 22.04 ABI and are
-  reverified immediately before every launch attempt.
+  reverified immediately before every launch attempt. Archives preserve the
+  executable mode, while Proton can synchronously repair and verify it when a
+  mod manager strips the permission during extraction.
+- Keeps trusted volume-local Steam storage independent of an unrelated XDG
+  state directory, so a safe internal ext4 installation is not blocked by the
+  ownership or permissions of a state path that is not used by the operation.
 - Added recursive dependency-pin checks, ASan and UBSan coverage, HDiffPatch
   adapter fuzzing, adversarial race and fault-injection tests, stable-volume CI,
   filesystem matrices, reproducible native builds, and explicit ELF and PE

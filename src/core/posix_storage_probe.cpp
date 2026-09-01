@@ -412,30 +412,38 @@ BackendProbeResult probe_posix_storage(
                      target.value_or(VolumeIdentity{}));
     }
     const auto id = installation_id(absolute, *mount, *target);
-    const auto state = state_home();
-    if (!id || !state) {
-      return blocked(L"state-home-unavailable",
-                     L"XDG_STATE_HOME or HOME does not resolve to a safe absolute path.",
+    if (!id) {
+      return blocked(L"target-installation-identity-unavailable",
+                     L"The installation could not be bound to the target volume.",
                      *target);
     }
-    const auto system_base = *state / "modding-forge" /
-                             "skyrim-runtime-swapper";
     const auto library_root = steam_library_root(absolute);
     const auto local_base = target->medium == StorageMedium::internal &&
                                     target->native_durability
                                 ? library_root
                                 : std::nullopt;
+    const auto state = local_base ? std::optional<std::filesystem::path>{}
+                                  : state_home();
+    if (!local_base && !state) {
+      return blocked(L"state-home-unavailable",
+                     L"XDG_STATE_HOME or HOME does not resolve to a safe absolute path.",
+                     *target);
+    }
     const auto target_storage_base =
         library_root ? *library_root / ".runtime-swapper"
                      : absolute.parent_path() / ".runtime-swapper";
-    const auto storage_base = local_base
-                                  ? *local_base / ".runtime-swapper"
-                                  : system_base;
+    const auto storage_base =
+        local_base ? *local_base / ".runtime-swapper"
+                   : *state / "modding-forge" / "skyrim-runtime-swapper";
     auto vault_path = local_base
                           ? storage_base / "recovery" / *id / "active"
-                          : system_base / "vaults" / *id;
-    const auto state_anchor = posix_existing_directory_ancestor(*state);
-    if (!state_anchor || !posix_directory_controlled_by_user(*state_anchor)) {
+                          : storage_base / "vaults" / *id;
+    const auto state_anchor = local_base
+                                  ? std::optional<std::filesystem::path>{}
+                                  : posix_existing_directory_ancestor(*state);
+    if (!local_base &&
+        (!state_anchor ||
+         !posix_directory_controlled_by_user(*state_anchor))) {
       return blocked(L"state-home-not-controlled",
                      L"The state directory is not owned and controlled by the current "
                      L"user.", *target, {}, vault_path, *id);
@@ -557,7 +565,9 @@ BackendProbeResult probe_posix_storage(
     // but never chmodded.
     const auto secure_anchor = storage_base.parent_path();
     if ((!local_base &&
-         !posix_ensure_directory_hierarchy(*state_anchor, secure_anchor, false)) ||
+         (!state_anchor ||
+          !posix_ensure_directory_hierarchy(*state_anchor, secure_anchor,
+                                            false))) ||
         !posix_secure_private_hierarchy(secure_anchor, vault_path) ||
         !managed_path_is_safe(vault_path)) {
       return blocked(L"vault-create-failed",

@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <bcrypt.h>
 #include <knownfolders.h>
+#include <shellapi.h>
 #include <shlobj.h>
 
 #include <algorithm>
@@ -291,6 +292,85 @@ class IpcCleanup {
   std::filesystem::path directory_;
 };
 
+enum class PermissionRepairStatus {
+  launch_failed,
+  timed_out,
+  wait_failed,
+  exit_failed,
+  succeeded,
+};
+
+struct PermissionRepairResult {
+  PermissionRepairStatus status{PermissionRepairStatus::launch_failed};
+  DWORD detail{};
+
+  [[nodiscard]] bool success() const noexcept {
+    return status == PermissionRepairStatus::succeeded;
+  }
+
+  [[nodiscard]] std::wstring diagnostic() const {
+    switch (status) {
+      case PermissionRepairStatus::launch_failed:
+        return L"launch-error-" + std::to_wstring(detail);
+      case PermissionRepairStatus::timed_out:
+        return L"timeout";
+      case PermissionRepairStatus::wait_failed:
+        return L"wait-error-" + std::to_wstring(detail);
+      case PermissionRepairStatus::exit_failed:
+        return L"exit-" + std::to_wstring(detail);
+      case PermissionRepairStatus::succeeded:
+        return L"succeeded";
+    }
+    return L"unknown";
+  }
+};
+
+[[nodiscard]] PermissionRepairResult repair_sidecar_permissions(
+    std::wstring_view unix_sidecar,
+    const std::filesystem::path& working_directory) {
+  if (unix_sidecar.empty() || unix_sidecar.front() != L'/' ||
+      unix_sidecar.find(L'\0') != std::wstring_view::npos) {
+    return {PermissionRepairStatus::launch_failed, ERROR_INVALID_NAME};
+  }
+
+  std::wstring parameters =
+      L"0700 " + quote_windows_command_argument(unix_sidecar);
+  std::wstring chmod_path = L"\\\\?\\unix/bin/chmod";
+  SHELLEXECUTEINFOW execution{};
+  execution.cbSize = sizeof(execution);
+  execution.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC |
+                    SEE_MASK_NO_CONSOLE | SEE_MASK_FLAG_NO_UI;
+  execution.lpVerb = L"open";
+  execution.lpFile = chmod_path.c_str();
+  execution.lpParameters = parameters.c_str();
+  execution.lpDirectory = working_directory.c_str();
+  execution.nShow = SW_HIDE;
+  if (!ShellExecuteExW(&execution) || execution.hProcess == nullptr ||
+      execution.hProcess == INVALID_HANDLE_VALUE) {
+    return {PermissionRepairStatus::launch_failed, GetLastError()};
+  }
+
+  UniqueHandle process(execution.hProcess);
+  constexpr DWORD permission_timeout_ms = 30'000;
+  const DWORD wait = WaitForSingleObject(process.get(), permission_timeout_ms);
+  if (wait == WAIT_TIMEOUT) {
+    (void)TerminateProcess(process.get(), ERROR_TIMEOUT);
+    (void)WaitForSingleObject(process.get(), 5'000);
+    return {PermissionRepairStatus::timed_out, ERROR_TIMEOUT};
+  }
+  if (wait != WAIT_OBJECT_0) {
+    return {PermissionRepairStatus::wait_failed, GetLastError()};
+  }
+  DWORD exit_code{};
+  if (!GetExitCodeProcess(process.get(), &exit_code)) {
+    return {PermissionRepairStatus::wait_failed, GetLastError()};
+  }
+  return exit_code == 0
+             ? PermissionRepairResult{PermissionRepairStatus::succeeded, 0}
+             : PermissionRepairResult{PermissionRepairStatus::exit_failed,
+                                      exit_code};
+}
+
 }  // namespace
 
 InstallationOperationResult run_wine_sidecar(
@@ -433,50 +513,19 @@ InstallationOperationResult run_wine_sidecar(
       sidecar, quote_windows_command_argument(sidecar.wstring()) +
                    sidecar_arguments);
   const DWORD direct_error = started ? ERROR_SUCCESS : GetLastError();
+  std::optional<PermissionRepairResult> permission_repair;
   if (!started) {
-    auto chmod_path = wine_windows_path("/bin/chmod");
-    if (chmod_path) {
-      std::error_code canonical_error;
-      const auto canonical_chmod =
-          std::filesystem::weakly_canonical(*chmod_path, canonical_error);
-      if (!canonical_error && canonical_chmod.is_absolute()) {
-        chmod_path = canonical_chmod;
+    permission_repair =
+        repair_sidecar_permissions(*wide_sidecar, game_root);
+    if (permission_repair->success()) {
+      if (!verify_sidecar(sidecar, initially_verified->identity)) {
+        return error_result(
+            L"native-sidecar-hash-mismatch",
+            L"The native Linux helper changed while its executable permission was restored.");
       }
-      STARTUPINFOW chmod_startup{};
-      chmod_startup.cb = sizeof(chmod_startup);
-      PROCESS_INFORMATION chmod_process{};
-      auto chmod_command = quote_windows_command_argument(chmod_path->wstring()) +
-                           L" 0700 " +
-                           quote_windows_command_argument(*wide_sidecar);
-      std::vector<wchar_t> mutable_chmod(chmod_command.begin(),
-                                         chmod_command.end());
-      mutable_chmod.push_back(L'\0');
-      if (CreateProcessW(chmod_path->c_str(), mutable_chmod.data(), nullptr,
-                         nullptr, FALSE,
-                         CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
-                         nullptr, game_root.c_str(), &chmod_startup,
-                         &chmod_process)) {
-        if (chmod_process.hThread != nullptr &&
-            chmod_process.hThread != INVALID_HANDLE_VALUE) {
-          CloseHandle(chmod_process.hThread);
-        }
-        if (chmod_process.hProcess != nullptr &&
-            chmod_process.hProcess != INVALID_HANDLE_VALUE) {
-          CloseHandle(chmod_process.hProcess);
-        }
-        for (unsigned attempt = 0; attempt != 200 && !started; ++attempt) {
-          Sleep(10);
-          if (!verify_sidecar(sidecar, initially_verified->identity)) {
-            return error_result(
-                L"native-sidecar-hash-mismatch",
-                L"The native Linux helper changed while its executable permission was restored.");
-          }
-          started = start_process(
-              sidecar,
-              quote_windows_command_argument(sidecar.wstring()) +
-                  sidecar_arguments);
-        }
-      }
+      started = start_process(
+          sidecar, quote_windows_command_argument(sidecar.wstring()) +
+                       sidecar_arguments);
     }
   }
   DWORD interpreter_error = ERROR_SUCCESS;
@@ -511,7 +560,12 @@ InstallationOperationResult run_wine_sidecar(
     return error_result(L"native-sidecar-start-failed",
                         L"Wine could not start the verified native Linux helper (direct error " +
                             std::to_wstring(direct_error) + L", interpreter error " +
-                            std::to_wstring(interpreter_error) + L").");
+                            std::to_wstring(interpreter_error) +
+                            (permission_repair
+                                 ? L", permission repair " +
+                                       permission_repair->diagnostic()
+                                 : std::wstring{}) +
+                            L").");
   }
   UniqueHandle process(process_info.hProcess);
   UniqueHandle thread(process_info.hThread);

@@ -21,6 +21,8 @@ jobs:
           submodules: recursive
       - name: Verify exact HDiffPatch checkout
         run: python3 tools/tests/verify-third-party-pins.py
+      - name: Verify packaged sidecar permissions
+        run: python3 tools/tests/test-zip-sidecar-mode.py
 
   native-linux:
     name: Native Linux ${{ matrix.target }} ${{ matrix.profile }}
@@ -281,3 +283,4 @@ jobs:
           mkdir -p /tmp/srs-wine-game
           chmod 0644 bridge/SkyrimRuntimeSwapper.Native
           wine bridge/WineSidecarProbe.exe 'Z:\tmp\srs-wine-game'
+          test "$(stat -c %a bridge/SkyrimRuntimeSwapper.Native)" = 700

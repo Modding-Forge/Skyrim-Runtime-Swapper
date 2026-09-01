@@ -55,6 +55,7 @@ if(NOT EXISTS "${PROTON_INSTRUCTIONS_FILE}")
 endif()
 get_filename_component(CMAKE_BIN_DIRECTORY "${CMAKE_COMMAND}" DIRECTORY)
 find_program(CTEST_COMMAND ctest HINTS "${CMAKE_BIN_DIRECTORY}" REQUIRED)
+find_program(PYTHON_COMMAND NAMES python3 python REQUIRED)
 
 foreach(ASSET_MANIFEST IN LISTS ASSET_MANIFESTS)
   if(NOT EXISTS "${ASSET_MANIFEST}")
@@ -273,6 +274,18 @@ ${SELECTED_ENTRIES}
     if(NOT ARCHIVE_RESULT EQUAL 0 OR NOT EXISTS "${ARCHIVE_PATH}")
       message(FATAL_ERROR "Archive creation failed for ${PROFILE_NAME} ${TARGET_VERSION}")
     endif()
+    if(NOT PACKAGED_NATIVE_SIDECAR STREQUAL "")
+      execute_process(
+        COMMAND "${PYTHON_COMMAND}"
+          "${REPOSITORY_ROOT}/tools/set-zip-sidecar-mode.py"
+          "${ARCHIVE_PATH}"
+        RESULT_VARIABLE SIDECAR_MODE_RESULT
+      )
+      if(NOT SIDECAR_MODE_RESULT EQUAL 0)
+        message(FATAL_ERROR
+          "The packaged native sidecar mode could not be set to 0700: ${ARCHIVE_PATH}")
+      endif()
+    endif()
     file(SHA256 "${ARCHIVE_PATH}" ARCHIVE_HASH)
     file(SIZE "${ARCHIVE_PATH}" ARCHIVE_SIZE)
     execute_process(
@@ -293,6 +306,18 @@ ${SELECTED_ENTRIES}
     endforeach()
     if(NOT ARCHIVE_VERIFY_RESULT EQUAL 0)
       message(FATAL_ERROR "Archive verification failed: ${ARCHIVE_PATH}")
+    endif()
+    if(NOT PACKAGED_NATIVE_SIDECAR STREQUAL "")
+      execute_process(
+        COMMAND "${PYTHON_COMMAND}"
+          "${REPOSITORY_ROOT}/tools/set-zip-sidecar-mode.py" --check
+          "${ARCHIVE_PATH}"
+        RESULT_VARIABLE SIDECAR_MODE_VERIFY_RESULT
+      )
+      if(NOT SIDECAR_MODE_VERIFY_RESULT EQUAL 0)
+        message(FATAL_ERROR
+          "Archive verification failed; native sidecar is not mode 0700: ${ARCHIVE_PATH}")
+      endif()
     endif()
     get_filename_component(ARCHIVE_NAME "${ARCHIVE_PATH}" NAME)
     file(APPEND "${CHECKSUM_FILE}" "${ARCHIVE_HASH}  ${ARCHIVE_NAME}\n")
