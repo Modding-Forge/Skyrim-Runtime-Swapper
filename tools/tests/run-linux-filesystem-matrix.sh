@@ -49,6 +49,31 @@ cleanup() {
 }
 trap cleanup EXIT
 
+wait_for_persistent_identity() {
+  local loop="$1"
+  local root
+  local link
+  local attempt
+  if command -v udevadm >/dev/null; then
+    udevadm trigger --action=change "$loop" >/dev/null 2>&1 || true
+    udevadm settle --timeout=10 >/dev/null 2>&1 || true
+  fi
+  for ((attempt=0; attempt<50; ++attempt)); do
+    for root in /dev/disk/by-uuid /dev/disk/by-id; do
+      [[ -d "$root" ]] || continue
+      for link in "$root"/*; do
+        [[ -e "$link" ]] || continue
+        if [[ "$(readlink -f "$link")" == "$loop" ]]; then
+          return 0
+        fi
+      done
+    done
+    sleep 0.1
+  done
+  echo "persistent identity was not published for $loop" >&2
+  return 1
+}
+
 make_volume() {
   local name="$1"
   local filesystem="$2"
@@ -75,6 +100,7 @@ make_volume() {
   else
     mount "$loop" "$mount_path"
   fi
+  wait_for_persistent_identity "$loop"
   mounts+=("$mount_path")
   created_loop="$loop"
   created_mount="$mount_path"
