@@ -9,8 +9,12 @@
 
 namespace runtime_swapper::app {
 
+struct InstallationOperationResult;
+
 void log_diagnostic(const std::wstring& message) noexcept;
 void log_storage_probe(const BackendProbeResult& probe) noexcept;
+void log_operation_result(const std::wstring& operation,
+                          const InstallationOperationResult& result) noexcept;
 [[nodiscard]] bool copy_diagnostic_logs() noexcept;
 
 int finish(ExitCode code, const std::wstring& message, UINT icon, bool quiet = false);

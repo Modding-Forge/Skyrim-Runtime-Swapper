@@ -118,6 +118,7 @@ class ManualOperationLock {
                           : activate_persistent_target(
                                 game_root,
                                 backend.mode == SafetyMode::persistent_with_warning);
+  log_operation_result(L"manual-persistent-downgrade", result);
   log_diagnostic(L"Manual persistent runtime switch: " + result.message);
   return {result.success(), result.message};
 }
@@ -139,6 +140,7 @@ class ManualOperationLock {
                           ? run_wine_sidecar(
                                 WineSidecarOperation::restore_persistent, game_root)
                           : restore_persistent_source(game_root);
+  log_operation_result(L"manual-persistent-restore", result);
   log_diagnostic(L"Manual persistent restore: " + result.message);
   return {result.success(), result.message};
 }
@@ -190,6 +192,7 @@ class ManualOperationLock {
                                                game_root)
                             : probe_installation_storage(game_root);
     log_storage_probe(probed.backend);
+    if (!probed.success()) log_operation_result(L"manual-storage-probe", probed);
     const auto fixed_state =
         wine ? (probed.persistent
                     ? FixedRuntimeState::active

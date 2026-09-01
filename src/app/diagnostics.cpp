@@ -1,6 +1,7 @@
 #include "diagnostics.hpp"
 
 #include "path_display.hpp"
+#include "storage_operations.hpp"
 
 #include <windows.h>
 #include <commctrl.h>
@@ -21,6 +22,10 @@ namespace {
 
 constexpr int copy_skse_log_button_id = 1001;
 constexpr int verify_game_files_button_id = 1002;
+
+[[nodiscard]] std::wstring wide_ascii(std::string_view value) {
+  return std::wstring(value.begin(), value.end());
+}
 
 [[nodiscard]] std::optional<std::filesystem::path> legacy_swapper_log_path() {
   const DWORD required = GetEnvironmentVariableW(L"LOCALAPPDATA", nullptr, 0);
@@ -262,8 +267,41 @@ void log_storage_probe(const BackendProbeResult& probe) noexcept {
       L"; technical-reason=" + probe.technical_reason);
 }
 
+void log_operation_result(
+    const std::wstring& operation,
+    const InstallationOperationResult& result) noexcept {
+  std::wstring line =
+      L"Operation result: operation=" + operation + L"; code=" +
+      std::to_wstring(static_cast<int>(result.code)) + L" (" +
+      wide_ascii(exit_code_name(result.code)) + L"); lifecycle-state=" +
+      wide_ascii(recovery_state_name(result.lifecycle_state)) +
+      L"; lifecycle-phase=" +
+      wide_ascii(recovery_phase_name(result.lifecycle_phase)) +
+      L"; changed=" + (result.changed ? L"true" : L"false") +
+      L"; persistent=" + (result.persistent ? L"true" : L"false") +
+      L"; runtime-changed=" +
+      (result.runtime_changed ? L"true" : L"false") +
+      L"; creation-club-changed=" +
+      (result.creation_club_changed ? L"true" : L"false") +
+      L"; content-catalog-changed=" +
+      (result.content_catalog_changed ? L"true" : L"false") +
+      L"; content-catalog-persistent=" +
+      (result.content_catalog_persistent ? L"true" : L"false");
+  if (!result.backend.technical_reason.empty()) {
+    line += L"; backend-reason=" + result.backend.technical_reason;
+  }
+  log_diagnostic(line);
+  if (!result.success() && !result.technical_detail.empty()) {
+    log_diagnostic(L"Operation failure detail: operation=" + operation +
+                   L"; " + result.technical_detail);
+  }
+}
+
 int finish(ExitCode code, const std::wstring& message, UINT icon, bool quiet) {
-  log_diagnostic(L"Exit " + std::to_wstring(static_cast<int>(code)) + L": " + message);
+  log_diagnostic(L"Exit: code=" +
+                 std::to_wstring(static_cast<int>(code)) + L" (" +
+                 wide_ascii(exit_code_name(code)) + L"); message=" +
+                 message);
   if (!quiet) {
     if ((icon & MB_ICONMASK) == MB_ICONERROR) {
       show_error_dialog(message);

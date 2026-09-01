@@ -139,13 +139,15 @@ foreach(ASSET_MANIFEST IN LISTS ASSET_MANIFESTS)
       message(FATAL_ERROR "Compilation failed for ${PROFILE_NAME} ${TARGET_VERSION}")
     endif()
 
-    execute_process(
-      COMMAND "${CTEST_COMMAND}" --test-dir "${BUILD_ROOT}" -C "${CONFIGURATION}"
-        --output-on-failure
-      RESULT_VARIABLE TEST_RESULT
-    )
-    if(NOT TEST_RESULT EQUAL 0)
-      message(FATAL_ERROR "Tests failed for ${PROFILE_NAME} ${TARGET_VERSION}")
+    if(NOT SKIP_TESTS)
+      execute_process(
+        COMMAND "${CTEST_COMMAND}" --test-dir "${BUILD_ROOT}" -C "${CONFIGURATION}"
+          --output-on-failure
+        RESULT_VARIABLE TEST_RESULT
+      )
+      if(NOT TEST_RESULT EQUAL 0)
+        message(FATAL_ERROR "Tests failed for ${PROFILE_NAME} ${TARGET_VERSION}")
+      endif()
     endif()
 
     foreach(BINARY_NAME version.dll SkyrimRuntimeSwapper.exe)

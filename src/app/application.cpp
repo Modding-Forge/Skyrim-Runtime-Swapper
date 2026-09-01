@@ -244,13 +244,9 @@ int run(int argc, wchar_t** argv) {
     // operation so authenticated large files and native handles are reused.
     prepared = prepare_launch(*options.game_root, true, risk_accepted);
   }
-  if (prepared.message != probe.message) {
+  log_operation_result(L"prepare-launch", prepared);
+  if (prepared.success() && prepared.message != probe.message) {
     log_diagnostic(L"Installation prepare: " + prepared.message);
-  } else {
-    log_diagnostic(L"Installation prepare completed: code=" +
-                   std::to_wstring(static_cast<int>(prepared.code)) +
-                   L"; lifecycle-phase=" +
-                   std::to_wstring(static_cast<int>(prepared.lifecycle_phase)));
   }
   if (!prepared.success()) {
     mutex_lock.unlock();

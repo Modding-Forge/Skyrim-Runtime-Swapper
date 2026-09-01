@@ -7,11 +7,12 @@
 #if defined(_WIN32)
 #include <windows.h>
 #else
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
-#include <filesystem>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -22,7 +23,7 @@
 namespace {
 
 class TestEnvironment {
- public:
+public:
   TestEnvironment()
       : root_(runtime_swapper::tests::test_root() /
               ("skyrim-runtime-swapper-catalog-tests-" +
@@ -31,12 +32,13 @@ class TestEnvironment {
 #else
                std::to_string(::getpid())
 #endif
-               )) {
+                   )) {
 #if defined(_WIN32)
     const DWORD required = GetEnvironmentVariableW(L"LOCALAPPDATA", nullptr, 0);
     if (required != 0) {
       previous_.resize(required);
-      if (GetEnvironmentVariableW(L"LOCALAPPDATA", previous_.data(), required) == 0) {
+      if (GetEnvironmentVariableW(L"LOCALAPPDATA", previous_.data(),
+                                  required) == 0) {
         previous_.clear();
       }
     }
@@ -45,11 +47,11 @@ class TestEnvironment {
     std::filesystem::create_directories(root_);
     SetEnvironmentVariableW(L"LOCALAPPDATA", root_.c_str());
 #else
-    if (const char* current = std::getenv("SRS_CONTENT_CATALOG_PATH")) {
+    if (const char *current = std::getenv("SRS_CONTENT_CATALOG_PATH")) {
       previous_ = current;
       had_previous_ = true;
     }
-    if (const char* current = std::getenv("XDG_STATE_HOME")) {
+    if (const char *current = std::getenv("XDG_STATE_HOME")) {
       previous_xdg_state_ = current;
       had_previous_xdg_state_ = true;
     }
@@ -62,7 +64,8 @@ class TestEnvironment {
 
   ~TestEnvironment() {
 #if defined(_WIN32)
-    SetEnvironmentVariableW(L"LOCALAPPDATA", previous_.empty() ? nullptr : previous_.data());
+    SetEnvironmentVariableW(L"LOCALAPPDATA",
+                            previous_.empty() ? nullptr : previous_.data());
 #else
     if (had_previous_) {
       (void)::setenv("SRS_CONTENT_CATALOG_PATH", previous_.c_str(), 1);
@@ -100,7 +103,7 @@ class TestEnvironment {
            L"Content Catalog Test";
   }
 
- private:
+private:
   std::filesystem::path root_;
 #if defined(_WIN32)
   std::vector<wchar_t> previous_;
@@ -112,18 +115,18 @@ class TestEnvironment {
 #endif
 };
 
-void write_file(const std::filesystem::path& path, std::string_view contents) {
+void write_file(const std::filesystem::path &path, std::string_view contents) {
   std::filesystem::create_directories(path.parent_path());
   std::ofstream stream(path, std::ios::binary | std::ios::trunc);
   stream.write(contents.data(), static_cast<std::streamsize>(contents.size()));
 }
 
-std::string read_file(const std::filesystem::path& path) {
+std::string read_file(const std::filesystem::path &path) {
   std::ifstream stream(path, std::ios::binary);
   return std::string(std::istreambuf_iterator<char>(stream), {});
 }
 
-void set_fault(const char* point) {
+void set_fault(const char *point) {
 #if defined(_WIN32)
   SetEnvironmentVariableA("SKYRIM_RUNTIME_SWAPPER_FAULT_POINT", point);
 #else
@@ -139,7 +142,7 @@ void clear_fault() {
 #endif
 }
 
-}  // namespace
+} // namespace
 
 int run_tests() {
   using namespace runtime_swapper::app;
@@ -147,19 +150,37 @@ int run_tests() {
   const auto catalog = environment.catalog();
 
   const auto game_root = environment.game_root();
-  const auto legacy = game_root / L".skyrim-runtime-swapper" / L"backups" / L"1.7.104" /
-                      L"ContentCatalog.txt";
+#if !defined(_WIN32)
+  const auto uncontrolled_state = catalog.parent_path() / "uncontrolled-state";
+  std::filesystem::create_directories(uncontrolled_state);
+  if (::chmod(uncontrolled_state.c_str(), 0777) != 0 ||
+      ::setenv("XDG_STATE_HOME", uncontrolled_state.c_str(), 1) != 0) {
+    return 14;
+  }
+  const auto direct_catalog_probe =
+      runtime_swapper::transaction_backend().probe(catalog.parent_path());
+  const auto installation_probe =
+      runtime_swapper::transaction_backend().probe(game_root);
+  const auto shared_catalog_probe = probe_content_catalog_storage(game_root);
+  if (direct_catalog_probe.technical_reason != L"state-home-not-controlled" ||
+      !installation_probe.success() || !shared_catalog_probe.success() ||
+      shared_catalog_probe.transaction_work.value !=
+          installation_probe.transaction_work.value) {
+    return 14;
+  }
+#endif
+  const auto legacy = game_root / L".skyrim-runtime-swapper" / L"backups" /
+                      L"1.7.104" / L"ContentCatalog.txt";
   write_file(legacy, "catalog-v1");
   write_file(catalog, "legacy-conflict");
   const auto legacy_recovery = recover_content_catalog(game_root);
   if (!legacy_recovery.success || !legacy_recovery.changed ||
       read_file(catalog) != "catalog-v1" || std::filesystem::exists(legacy)) {
-    std::wcerr << L"Legacy recovery failed: success="
-               << legacy_recovery.success << L", changed="
-               << legacy_recovery.changed << L", message="
-               << legacy_recovery.message << L", catalog="
-               << catalog.wstring() << L", legacy-exists="
-               << std::filesystem::exists(legacy) << L'\n';
+    std::wcerr << L"Legacy recovery failed: success=" << legacy_recovery.success
+               << L", changed=" << legacy_recovery.changed << L", message="
+               << legacy_recovery.message << L", catalog=" << catalog.wstring()
+               << L", legacy-exists=" << std::filesystem::exists(legacy)
+               << L'\n';
     return 1;
   }
   const auto legacy_conflict_hash =
@@ -174,12 +195,13 @@ int run_tests() {
   }
 
   const auto removed = remove_incompatible_content_catalog(game_root);
-  if (!removed.success || !removed.changed || std::filesystem::exists(catalog)) {
+  if (!removed.success || !removed.changed ||
+      std::filesystem::exists(catalog)) {
     std::wcerr << L"Initial removal failed: " << removed.message << L"\n";
     return 2;
   }
-  std::filesystem::create_directories(
-      catalog.parent_path() / L".skyrim-runtime-swapper");
+  std::filesystem::create_directories(catalog.parent_path() /
+                                      L".skyrim-runtime-swapper");
   const auto restored = restore_content_catalog(game_root);
   if (!restored.success || !restored.changed ||
       read_file(catalog) != "catalog-v1" ||
@@ -189,7 +211,7 @@ int run_tests() {
   }
 
   const auto current_workspace =
-      probe_content_catalog_storage().transaction_work.value /
+      probe_content_catalog_storage(game_root).transaction_work.value /
       L"content-catalog";
   write_file(current_workspace / L"ContentCatalog.journal",
              "competing-current");
@@ -197,15 +219,18 @@ int run_tests() {
                  L"ContentCatalog.journal",
              "competing-legacy");
   const auto competing = recover_content_catalog(game_root);
-  if (competing.success || read_file(catalog) != "catalog-v1") return 13;
+  if (competing.success || read_file(catalog) != "catalog-v1")
+    return 13;
   std::filesystem::remove_all(current_workspace);
   std::filesystem::remove_all(catalog.parent_path() /
                               L".skyrim-runtime-swapper");
 
   const auto removed_again = remove_incompatible_content_catalog(game_root);
-  if (!removed_again.success || !removed_again.changed) return 4;
-  const auto catalog_probe = probe_content_catalog_storage();
-  if (!catalog_probe.success() || catalog_probe.transaction_work.value.empty()) {
+  if (!removed_again.success || !removed_again.changed)
+    return 4;
+  const auto catalog_probe = probe_content_catalog_storage(game_root);
+  if (!catalog_probe.success() ||
+      catalog_probe.transaction_work.value.empty()) {
     return 10;
   }
   const auto workspace =
@@ -219,7 +244,8 @@ int run_tests() {
   }
 
   const auto removed_third = remove_incompatible_content_catalog(game_root);
-  if (!removed_third.success) return 6;
+  if (!removed_third.success)
+    return 6;
   write_file(catalog, "conflict");
   const auto conflict = recover_content_catalog(game_root);
   if (!conflict.success || read_file(catalog) != "catalog-v1" ||
@@ -230,7 +256,8 @@ int run_tests() {
   if (!conflict_hash ||
       !std::filesystem::is_regular_file(
           vault.vault_path / L"conflicts" / L"content-catalog-conflict" /
-          std::filesystem::path(conflict_hash->begin(), conflict_hash->end()))) {
+          std::filesystem::path(conflict_hash->begin(),
+                                conflict_hash->end()))) {
     return 8;
   }
 
@@ -238,8 +265,9 @@ int run_tests() {
       catalog.parent_path() / L".skyrim-runtime-swapper";
   const auto legacy_hold = legacy_workspace / L"ContentCatalog.hold";
   const auto legacy_journal = legacy_workspace / L"ContentCatalog.journal";
-  const auto catalog_hash = runtime_swapper::sha256_string("catalog-v1").value();
-  for (const auto& journal_text :
+  const auto catalog_hash =
+      runtime_swapper::sha256_string("catalog-v1").value();
+  for (const auto &journal_text :
        {std::string("SRS-CATALOG-1\n") + catalog_hash + "\n",
         std::string("SRS-CATALOG-POSIX-1\nhash=") + catalog_hash +
             "\nsize=10\n"}) {
@@ -255,7 +283,7 @@ int run_tests() {
     }
   }
 
-  for (const auto* point : {"copy.after-rename", "remove.after-unlink"}) {
+  for (const auto *point : {"copy.after-rename", "remove.after-unlink"}) {
     write_file(catalog, "catalog-v1");
     set_fault(point);
     const auto interrupted = remove_incompatible_content_catalog(game_root);

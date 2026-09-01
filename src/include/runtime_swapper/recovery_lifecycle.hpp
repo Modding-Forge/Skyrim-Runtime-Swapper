@@ -45,5 +45,7 @@ struct RecoveryLifecycleResult {
     RecoveryLifecycleState from, RecoveryLifecycleState to) noexcept;
 [[nodiscard]] std::string_view recovery_state_name(
     RecoveryLifecycleState state) noexcept;
+[[nodiscard]] std::string_view recovery_phase_name(
+    RecoveryLifecyclePhase phase) noexcept;
 
 }  // namespace runtime_swapper

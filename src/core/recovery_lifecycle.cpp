@@ -50,4 +50,21 @@ std::string_view recovery_state_name(RecoveryLifecycleState state) noexcept {
   return "invalid";
 }
 
+std::string_view recovery_phase_name(RecoveryLifecyclePhase phase) noexcept {
+  using Phase = RecoveryLifecyclePhase;
+  switch (phase) {
+    case Phase::inspect: return "inspect";
+    case Phase::prepare: return "prepare";
+    case Phase::activate: return "activate";
+    case Phase::restore: return "restore";
+    case Phase::verify_source: return "verify_source";
+    case Phase::detach_locator: return "detach_locator";
+    case Phase::delete_recovery: return "delete_recovery";
+    case Phase::delete_installation_metadata:
+      return "delete_installation_metadata";
+    case Phase::complete: return "complete";
+  }
+  return "invalid";
+}
+
 }  // namespace runtime_swapper

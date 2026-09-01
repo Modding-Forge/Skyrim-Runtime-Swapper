@@ -9,9 +9,41 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <system_error>
 
 namespace runtime_swapper::core {
+namespace {
+
+[[nodiscard]] std::wstring_view mutation_step_name(MutationStep step) {
+  switch (step) {
+    case MutationStep::none: return L"none";
+    case MutationStep::validate: return L"validate";
+    case MutationStep::create_temporary: return L"create-temporary";
+    case MutationStep::copy_or_clone: return L"copy-or-clone";
+    case MutationStep::move_source: return L"move-source";
+    case MutationStep::install_replacement: return L"install-replacement";
+    case MutationStep::flush_file: return L"flush-file";
+    case MutationStep::flush_directory: return L"flush-directory";
+    case MutationStep::remove: return L"remove";
+  }
+  return L"invalid";
+}
+
+[[nodiscard]] std::wstring_view mutation_state_name(MutationState state) {
+  switch (state) {
+    case MutationState::untouched: return L"untouched";
+    case MutationState::temporary_created: return L"temporary-created";
+    case MutationState::source_relocated: return L"source-relocated";
+    case MutationState::replacement_installed:
+      return L"replacement-installed";
+    case MutationState::file_durable: return L"file-durable";
+    case MutationState::fully_durable: return L"fully-durable";
+  }
+  return L"invalid";
+}
+
+}  // namespace
 
 std::wstring source_version() { return std::wstring(source_version_label); }
 
@@ -90,16 +122,19 @@ DowngradeResult probe_backend(const std::filesystem::path& game_root) {
 }
 
 std::wstring mutation_failure_detail(const MutationResult& result) {
-  std::wstring detail =
-      L"Backend step " +
-      std::to_wstring(static_cast<unsigned>(result.step)) + L", state " +
-      std::to_wstring(static_cast<unsigned>(result.state));
+  std::wstring detail = L"Backend mutation failed: step=" +
+                        std::wstring(mutation_step_name(result.step)) +
+                        L"; reached-state=" +
+                        std::wstring(mutation_state_name(result.state));
   if (result.error) {
     const auto message = result.error.message();
-    detail += L", native error " + std::to_wstring(result.error.value()) +
-              L" (" + std::wstring(message.begin(), message.end()) + L")";
+    const std::string category = result.error.category().name();
+    detail += L"; native-error=" + std::to_wstring(result.error.value()) +
+              L" (" + std::wstring(message.begin(), message.end()) + L")" +
+              L"; category=" +
+              std::wstring(category.begin(), category.end());
   }
-  if (!result.detail.empty()) detail += L": " + result.detail;
+  if (!result.detail.empty()) detail += L"; detail=" + result.detail;
   return detail;
 }
 

@@ -226,6 +226,7 @@ add_library(hdiffpatch_native STATIC
   "${HDIFFPATCH5_ROOT}/zstd/lib/decompress/zstd_decompress_block.c"
 )
 target_include_directories(hdiffpatch_native PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/include"
   "${HDIFFPATCH_ROOT}"
   "${HDIFFPATCH5_ROOT}/zstd/lib"
   "${HDIFFPATCH5_ROOT}/zstd/lib/common"

@@ -1,4 +1,5 @@
 #include <runtime_swapper/checked_arithmetic.hpp>
+#include <runtime_swapper/native_hpatch_adapter.h>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -9,10 +10,6 @@
 #include <cstdint>
 #include <cstring>
 #include <span>
-
-extern "C" int runtime_swapper_hpatch_handles(std::intptr_t source,
-                                               std::intptr_t patch,
-                                               std::intptr_t output);
 
 namespace {
 
@@ -93,6 +90,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
       !write_all(patch.get(), bytes.subspan(patch_offset))) {
     return 0;
   }
-  (void)runtime_swapper_hpatch_handles(source.get(), patch.get(), output.get());
+  runtime_swapper_hpatch_diagnostics diagnostics{};
+  (void)runtime_swapper_hpatch_handles(source.get(), patch.get(), output.get(),
+                                       1, &diagnostics);
   return 0;
 }

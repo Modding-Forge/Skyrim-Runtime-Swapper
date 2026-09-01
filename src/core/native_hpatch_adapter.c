@@ -3,12 +3,14 @@
 // from resolving security-sensitive paths a second time after verification.
 #include "hpatchz.c"
 
+#include <runtime_swapper/native_hpatch_adapter.h>
+
+#include <errno.h>
 #include <stdint.h>
 
 #if defined(_WIN32)
 #include <windows.h>
 #else
-#include <errno.h>
 #include <limits.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -19,6 +21,10 @@ typedef struct runtime_swapper_native_input {
   hpatch_TStreamInput base;
   intptr_t handle;
   int io_error;
+  int native_error;
+  hpatch_StreamPos_t error_position;
+  hpatch_StreamPos_t error_length;
+  int io_stage;
 #if defined(_WIN32)
   CRITICAL_SECTION lock;
 #endif
@@ -28,13 +34,21 @@ typedef struct runtime_swapper_native_output {
   hpatch_TStreamOutput base;
   intptr_t handle;
   int io_error;
+  int native_error;
+  hpatch_StreamPos_t error_position;
+  hpatch_StreamPos_t error_length;
+  int io_stage;
 #if defined(_WIN32)
   CRITICAL_SECTION lock;
 #endif
 } runtime_swapper_native_output;
 
 static void runtime_swapper_set_input_error(
-    runtime_swapper_native_input* stream) {
+    runtime_swapper_native_input* stream, int native_error,
+    hpatch_StreamPos_t position, hpatch_StreamPos_t length) {
+  stream->native_error = native_error;
+  stream->error_position = position;
+  stream->error_length = length;
 #if defined(_WIN32)
   InterlockedExchange((volatile LONG*)&stream->io_error, 1);
 #else
@@ -43,7 +57,12 @@ static void runtime_swapper_set_input_error(
 }
 
 static void runtime_swapper_set_output_error(
-    runtime_swapper_native_output* stream) {
+    runtime_swapper_native_output* stream, int native_error,
+    hpatch_StreamPos_t position, hpatch_StreamPos_t length, int io_stage) {
+  stream->native_error = native_error;
+  stream->error_position = position;
+  stream->error_length = length;
+  stream->io_stage = io_stage;
 #if defined(_WIN32)
   InterlockedExchange((volatile LONG*)&stream->io_error, 1);
 #else
@@ -53,7 +72,8 @@ static void runtime_swapper_set_output_error(
 
 static hpatch_BOOL runtime_swapper_read_native(
     intptr_t native_handle, hpatch_StreamPos_t position, unsigned char* data,
-    unsigned char* data_end, int* io_error
+    unsigned char* data_end, int* io_error, int* native_error,
+    hpatch_StreamPos_t* error_position, hpatch_StreamPos_t* error_length
 #if defined(_WIN32)
     , CRITICAL_SECTION* lock
 #endif
@@ -69,6 +89,9 @@ static hpatch_BOOL runtime_swapper_read_native(
     offset.QuadPart = (LONGLONG)position;
     if ((position > (hpatch_StreamPos_t)INT64_MAX) ||
         !SetFilePointerEx(handle, offset, 0, FILE_BEGIN)) {
+      *native_error = (int)GetLastError();
+      *error_position = position;
+      *error_length = (hpatch_StreamPos_t)remaining;
       *io_error = 1;
       LeaveCriticalSection(lock);
       return hpatch_FALSE;
@@ -79,6 +102,9 @@ static hpatch_BOOL runtime_swapper_read_native(
                             ? 0x40000000U
                             : (DWORD)remaining;
       if (!ReadFile(handle, data, requested, &count, 0) || count == 0) {
+        *native_error = count == 0 ? ERROR_HANDLE_EOF : (int)GetLastError();
+        *error_position = position;
+        *error_length = (hpatch_StreamPos_t)remaining;
         *io_error = 1;
         LeaveCriticalSection(lock);
         return hpatch_FALSE;
@@ -90,6 +116,9 @@ static hpatch_BOOL runtime_swapper_read_native(
   LeaveCriticalSection(lock);
 #else
   if (position > (hpatch_StreamPos_t)INT64_MAX) {
+    *native_error = EOVERFLOW;
+    *error_position = position;
+    *error_length = (hpatch_StreamPos_t)remaining;
     __atomic_store_n(io_error, 1, __ATOMIC_RELAXED);
     return hpatch_FALSE;
   }
@@ -97,6 +126,9 @@ static hpatch_BOOL runtime_swapper_read_native(
     ssize_t count = pread((int)native_handle, data, remaining, (off_t)position);
     if (count < 0 && errno == EINTR) continue;
     if (count <= 0) {
+      *native_error = count == 0 ? EIO : errno;
+      *error_position = position;
+      *error_length = (hpatch_StreamPos_t)remaining;
       __atomic_store_n(io_error, 1, __ATOMIC_RELAXED);
       return hpatch_FALSE;
     }
@@ -118,11 +150,14 @@ static hpatch_BOOL runtime_swapper_input_read(
   length = (size_t)(data_end - data);
   if ((hpatch_StreamPos_t)length > base->streamSize ||
       position > base->streamSize - (hpatch_StreamPos_t)length) {
-    runtime_swapper_set_input_error(stream);
+    runtime_swapper_set_input_error(stream, EFBIG, position,
+                                    (hpatch_StreamPos_t)length);
     return hpatch_FALSE;
   }
   return runtime_swapper_read_native(stream->handle, position, data, data_end,
-                                     &stream->io_error
+                                     &stream->io_error, &stream->native_error,
+                                     &stream->error_position,
+                                     &stream->error_length
 #if defined(_WIN32)
                                      , &stream->lock
 #endif
@@ -139,11 +174,16 @@ static hpatch_BOOL runtime_swapper_output_read(
   length = (size_t)(data_end - data);
   if ((hpatch_StreamPos_t)length > base->streamSize ||
       position > base->streamSize - (hpatch_StreamPos_t)length) {
-    runtime_swapper_set_output_error(stream);
+    runtime_swapper_set_output_error(
+        stream, EFBIG, position, (hpatch_StreamPos_t)length,
+        runtime_swapper_hpatch_io_output_read);
     return hpatch_FALSE;
   }
+  stream->io_stage = runtime_swapper_hpatch_io_output_read;
   return runtime_swapper_read_native(stream->handle, position, data, data_end,
-                                     &stream->io_error
+                                     &stream->io_error, &stream->native_error,
+                                     &stream->error_position,
+                                     &stream->error_length
 #if defined(_WIN32)
                                      , &stream->lock
 #endif
@@ -160,7 +200,9 @@ static hpatch_BOOL runtime_swapper_output_write(
   remaining = (size_t)(data_end - data);
   if ((hpatch_StreamPos_t)remaining > base->streamSize ||
       position > base->streamSize - (hpatch_StreamPos_t)remaining) {
-    runtime_swapper_set_output_error(stream);
+    runtime_swapper_set_output_error(
+        stream, EFBIG, position, (hpatch_StreamPos_t)remaining,
+        runtime_swapper_hpatch_io_output_write);
     return hpatch_FALSE;
   }
 #if defined(_WIN32)
@@ -171,7 +213,10 @@ static hpatch_BOOL runtime_swapper_output_write(
     offset.QuadPart = (LONGLONG)position;
     if ((position > (hpatch_StreamPos_t)INT64_MAX) ||
         !SetFilePointerEx(handle, offset, 0, FILE_BEGIN)) {
-      stream->io_error = 1;
+      runtime_swapper_set_output_error(
+          stream, (int)GetLastError(), position,
+          (hpatch_StreamPos_t)remaining,
+          runtime_swapper_hpatch_io_output_write);
       LeaveCriticalSection(&stream->lock);
       return hpatch_FALSE;
     }
@@ -181,7 +226,10 @@ static hpatch_BOOL runtime_swapper_output_write(
                             ? 0x40000000U
                             : (DWORD)remaining;
       if (!WriteFile(handle, data, requested, &count, 0) || count == 0) {
-        stream->io_error = 1;
+        runtime_swapper_set_output_error(
+            stream, count == 0 ? ERROR_WRITE_FAULT : (int)GetLastError(),
+            position, (hpatch_StreamPos_t)remaining,
+            runtime_swapper_hpatch_io_output_write);
         LeaveCriticalSection(&stream->lock);
         return hpatch_FALSE;
       }
@@ -192,7 +240,9 @@ static hpatch_BOOL runtime_swapper_output_write(
   LeaveCriticalSection(&stream->lock);
 #else
   if (position > (hpatch_StreamPos_t)INT64_MAX) {
-    runtime_swapper_set_output_error(stream);
+    runtime_swapper_set_output_error(
+        stream, EOVERFLOW, position, (hpatch_StreamPos_t)remaining,
+        runtime_swapper_hpatch_io_output_write);
     return hpatch_FALSE;
   }
   while (remaining != 0) {
@@ -200,7 +250,10 @@ static hpatch_BOOL runtime_swapper_output_write(
                            (off_t)position);
     if (count < 0 && errno == EINTR) continue;
     if (count <= 0) {
-      runtime_swapper_set_output_error(stream);
+      runtime_swapper_set_output_error(
+          stream, count == 0 ? EIO : errno, position,
+          (hpatch_StreamPos_t)remaining,
+          runtime_swapper_hpatch_io_output_write);
       return hpatch_FALSE;
     }
     data += count;
@@ -229,9 +282,10 @@ static hpatch_BOOL runtime_swapper_native_size(intptr_t native_handle,
 }
 
 static hpatch_BOOL runtime_swapper_input_init(
-    runtime_swapper_native_input* stream, intptr_t handle) {
+    runtime_swapper_native_input* stream, intptr_t handle, int io_stage) {
   memset(stream, 0, sizeof(*stream));
   stream->handle = handle;
+  stream->io_stage = io_stage;
   stream->base.streamImport = stream;
   stream->base.read = runtime_swapper_input_read;
 #if defined(_WIN32)
@@ -273,7 +327,9 @@ static void runtime_swapper_output_destroy(
 
 int runtime_swapper_hpatch_handles(intptr_t source_handle,
                                    intptr_t patch_handle,
-                                   intptr_t output_handle) {
+                                   intptr_t output_handle,
+                                   int thread_count,
+                                   runtime_swapper_hpatch_diagnostics* diagnostics) {
   int result = HPATCH_SUCCESS;
   _THDiffInfos diff_infos;
   hpatch_TFileStreamInput diff_view;
@@ -284,10 +340,15 @@ int runtime_swapper_hpatch_handles(intptr_t source_handle,
       0, hpatch_FALSE, hpatch_TRUE, hpatch_TRUE, hpatch_FALSE};
   memset(&diff_infos, 0, sizeof(diff_infos));
   memset(&diff_view, 0, sizeof(diff_view));
+  if (diagnostics != 0) memset(diagnostics, 0, sizeof(*diagnostics));
 
-  if (!runtime_swapper_input_init(&source, source_handle))
+  if (thread_count < 1 || thread_count > 64) return HPATCH_OPTIONS_ERROR;
+
+  if (!runtime_swapper_input_init(
+          &source, source_handle, runtime_swapper_hpatch_io_source_read))
     return HPATCH_OPENREAD_ERROR;
-  if (!runtime_swapper_input_init(&patch, patch_handle)) {
+  if (!runtime_swapper_input_init(
+          &patch, patch_handle, runtime_swapper_hpatch_io_patch_read)) {
     runtime_swapper_input_destroy(&source);
     return HPATCH_OPENREAD_ERROR;
   }
@@ -304,6 +365,8 @@ int runtime_swapper_hpatch_handles(intptr_t source_handle,
 
   runtime_swapper_output_init(&output, output_handle,
                               diff_infos.diffInfo.newDataSize);
+  if (diagnostics != 0)
+    diagnostics->expected_output_size = output.base.streamSize;
   {
     _WinPatchListener_t context;
     struct winpatch_listener_t listener;
@@ -314,12 +377,13 @@ int runtime_swapper_hpatch_handles(intptr_t source_handle,
     context.isLoadOldAll = hpatch_FALSE;
     context.patchCacheSize = 8U * 1024U * 1024U;
     context.checksumSet = &checksum_set;
-    context.threadNum = 5;
+    context.threadNum = thread_count;
     listener.import = &context;
     listener.onDiffInfo = _win_onDiffInfo;
     listener.onPatchFinish = _win_onPatchFinish;
     patch_result = patch_window_diff(&listener, &output.base, &source.base,
-                                     &patch.base, 0, 5);
+                                     &patch.base, 0, thread_count);
+    if (diagnostics != 0) diagnostics->patch_result = (int)patch_result;
     switch (patch_result) {
       case kWindowPatch_ok:
         result = HPATCH_SUCCESS;
@@ -349,11 +413,20 @@ int runtime_swapper_hpatch_handles(intptr_t source_handle,
   }
   if (source.io_error || patch.io_error || output.io_error)
     result = HPATCH_FILEDATA_ERROR;
-  {
-    hpatch_StreamPos_t actual_size = 0;
-    if (!runtime_swapper_native_size(output_handle, &actual_size) ||
-        actual_size != output.base.streamSize)
-      result = HPATCH_FILEDATA_ERROR;
+  if (diagnostics != 0) {
+    const runtime_swapper_native_input* failed_input =
+        source.io_error ? &source : (patch.io_error ? &patch : 0);
+    if (failed_input != 0) {
+      diagnostics->io_stage = failed_input->io_stage;
+      diagnostics->native_error = failed_input->native_error;
+      diagnostics->position = failed_input->error_position;
+      diagnostics->length = failed_input->error_length;
+    } else if (output.io_error) {
+      diagnostics->io_stage = output.io_stage;
+      diagnostics->native_error = output.native_error;
+      diagnostics->position = output.error_position;
+      diagnostics->length = output.error_length;
+    }
   }
   runtime_swapper_output_destroy(&output);
   runtime_swapper_input_destroy(&patch);

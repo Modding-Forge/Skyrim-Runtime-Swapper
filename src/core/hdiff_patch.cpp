@@ -1,5 +1,6 @@
 #include <runtime_swapper/hdiff_patch.hpp>
 
+#include <runtime_swapper/native_hpatch_adapter.h>
 #include <runtime_swapper/sha256.hpp>
 
 #if defined(_WIN32)
@@ -15,12 +16,48 @@
 #include <optional>
 #include <system_error>
 
-extern "C" int runtime_swapper_hpatch_handles(std::intptr_t source,
-                                               std::intptr_t patch,
-                                               std::intptr_t output);
-
 namespace runtime_swapper {
 namespace {
+
+[[nodiscard]] std::wstring io_stage_label(int stage) {
+  switch (stage) {
+    case runtime_swapper_hpatch_io_source_read:
+      return L"source-read";
+    case runtime_swapper_hpatch_io_patch_read:
+      return L"patch-read";
+    case runtime_swapper_hpatch_io_output_read:
+      return L"output-read";
+    case runtime_swapper_hpatch_io_output_write:
+      return L"output-write";
+    case runtime_swapper_hpatch_io_output_size:
+      return L"output-size";
+    case runtime_swapper_hpatch_io_output_flush:
+      return L"output-flush";
+    default:
+      return L"none";
+  }
+}
+
+[[nodiscard]] std::wstring hpatch_diagnostic_detail(
+    const runtime_swapper_hpatch_diagnostics& diagnostics) {
+  auto detail = L"\nHDiffPatch diagnostics: patch-result=" +
+                std::to_wstring(diagnostics.patch_result) +
+                L"; io-stage=" + io_stage_label(diagnostics.io_stage) +
+                L"; native-error=" +
+                std::to_wstring(diagnostics.native_error);
+  if (diagnostics.native_error != 0) {
+    const std::error_code native_error(diagnostics.native_error,
+                                       std::system_category());
+    const auto message = native_error.message();
+    detail += L" (" + std::wstring(message.begin(), message.end()) + L")";
+  }
+  detail += L"; offset=" + std::to_wstring(diagnostics.position) +
+            L"; length=" + std::to_wstring(diagnostics.length) +
+            L"; output-size=" +
+            std::to_wstring(diagnostics.actual_output_size) + L"/" +
+            std::to_wstring(diagnostics.expected_output_size);
+  return detail;
+}
 
 #if defined(_WIN32)
 
@@ -107,8 +144,20 @@ struct FileIdentity {
          *held_identity == *current_identity;
 }
 
-[[nodiscard]] bool flush_output(HANDLE handle) {
-  return FlushFileBuffers(handle) != FALSE;
+[[nodiscard]] bool flush_output(HANDLE handle, int& native_error) {
+  if (FlushFileBuffers(handle) != FALSE) return true;
+  native_error = static_cast<int>(GetLastError());
+  return false;
+}
+
+[[nodiscard]] std::optional<std::uint64_t> output_size(
+    HANDLE handle, int& native_error) {
+  LARGE_INTEGER value{};
+  if (GetFileSizeEx(handle, &value) != FALSE && value.QuadPart >= 0) {
+    return static_cast<std::uint64_t>(value.QuadPart);
+  }
+  native_error = static_cast<int>(GetLastError());
+  return std::nullopt;
 }
 
 void discard_output(NativeFile& output) {
@@ -187,8 +236,25 @@ class NativeFile {
          held_status.st_ino == path_status.st_ino;
 }
 
-[[nodiscard]] bool flush_output(int descriptor) {
-  return ::fsync(descriptor) == 0;
+[[nodiscard]] bool flush_output(int descriptor, int& native_error) {
+  if (::fsync(descriptor) == 0) return true;
+  native_error = errno;
+  return false;
+}
+
+[[nodiscard]] std::optional<std::uint64_t> output_size(
+    int descriptor, int& native_error) {
+  struct stat status {};
+  if (::fstat(descriptor, &status) == 0 && S_ISREG(status.st_mode) &&
+      status.st_size >= 0) {
+    return static_cast<std::uint64_t>(status.st_size);
+  }
+  native_error = errno != 0 ? errno : EIO;
+  return std::nullopt;
+}
+
+[[nodiscard]] bool reset_output(int descriptor) {
+  return ::ftruncate(descriptor, 0) == 0;
 }
 
 void discard_output(NativeFile&) {
@@ -239,15 +305,50 @@ PatchResult apply_hdiff_patch(const std::filesystem::path& source,
     return {false, L"The patch output could not be created safely."};
   }
 
-  const int result = runtime_swapper_hpatch_handles(
-      source_file.native(), patch_file.native(), output_file.native());
+  runtime_swapper_hpatch_diagnostics diagnostics{};
+  int result = runtime_swapper_hpatch_handles(
+      source_file.native(), patch_file.native(), output_file.native(), 5,
+      &diagnostics);
+#if !defined(_WIN32)
+  bool retried_single_threaded = false;
+  if (result == 6 && reset_output(output_file.get())) {
+    retried_single_threaded = true;
+    result = runtime_swapper_hpatch_handles(
+        source_file.native(), patch_file.native(), output_file.native(), 1,
+        &diagnostics);
+  }
+#endif
+  bool output_flushed = false;
+  bool output_size_matches = false;
+  if (result == 0) {
+    // Implementing this because Flourine Mod Manager does sketchy stuff.
+    int native_error = 0;
+    output_flushed = flush_output(output_file.get(), native_error);
+    if (!output_flushed) {
+      diagnostics.io_stage = runtime_swapper_hpatch_io_output_flush;
+      diagnostics.native_error = native_error;
+    } else {
+      const auto actual_size = output_size(output_file.get(), native_error);
+      diagnostics.actual_output_size = actual_size.value_or(0);
+      output_size_matches =
+          actual_size && *actual_size == diagnostics.expected_output_size;
+      if (!output_size_matches) {
+        diagnostics.io_stage = runtime_swapper_hpatch_io_output_size;
+        diagnostics.native_error = actual_size ? 0 : native_error;
+      }
+    }
+  }
   if (result != 0 || !stable_input(source, source_file, source_hash) ||
       !stable_input(patch, patch_file, patch_hash) ||
       !path_matches(output, output_file.get()) ||
-      !flush_output(output_file.get())) {
+      !output_flushed || !output_size_matches) {
     discard_output(output_file);
-    return {false, L"The handle-bound HDiffPatch operation failed with code " +
-                       std::to_wstring(result) + L"."};
+    auto detail = L"The handle-bound HDiffPatch operation failed with code " +
+                  std::to_wstring(result);
+#if !defined(_WIN32)
+    if (retried_single_threaded) detail += L" after a single-threaded retry";
+#endif
+    return {false, detail + L"." + hpatch_diagnostic_detail(diagnostics)};
   }
   return {true, {}};
 }

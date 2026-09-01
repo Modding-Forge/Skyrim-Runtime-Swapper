@@ -4,6 +4,18 @@ All notable changes to Skyrim Runtime Swapper are documented in this file.
 
 ## 1.2.0 - 2026-09-01
 
+- Adds structured failure logging across launch, manual operations, Wine and
+  Proton coordination, recovery lifecycle state, and backend mutations using
+  stable names, native error categories, component-change flags, and technical
+  details already produced by the operation.
+- Reports the exact HDiffPatch I/O phase, native operating-system error,
+  failing byte range, and staged output size when handle-bound patching fails.
+- Retries Linux HDiffPatch file-data failures with the same handle-bound
+  inputs in its deterministic single-threaded mode, fixing a distribution-
+  specific staging failure observed for `Skyrim - Shaders.bsa` on ext4.
+- Reuses the installation's verified transaction storage for ContentCatalog
+  when both paths are on the same stable volume, avoiding an unrelated unsafe
+  XDG state directory without weakening cross-volume recovery checks.
 - Repairs inherited Windows permissions only when an existing SRS vault is
   already owned exclusively by the current user and SYSTEM. Vaults accessible
   by any additional principal remain blocked.
@@ -66,9 +78,9 @@ All notable changes to Skyrim Runtime Swapper are documented in this file.
   adapter fuzzing, adversarial race and fault-injection tests, stable-volume CI,
   filesystem matrices, reproducible native builds, and explicit ELF and PE
   hardening verification.
-- Release packages now include the README, license, complete third-party
-  notices, Proton Experimental instructions, verified archive contents, and a
-  persistent `SHA256SUMS.txt` for all four profiles.
+- Release packages contain only the runtime payload, Proton Experimental
+  instructions, and Vortex metadata. The build verifies every archive and
+  writes a persistent `SHA256SUMS.txt` for all four profiles.
 
 ## 1.1.0 - 2026-08-29
 

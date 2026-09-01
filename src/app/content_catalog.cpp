@@ -4,6 +4,7 @@
 
 #include <runtime_swapper/downgrade.hpp>
 #include <runtime_swapper/file_status.hpp>
+#include <runtime_swapper/prepared_storage.hpp>
 #include <runtime_swapper/recovery_vault.hpp>
 #include <runtime_swapper/sha256.hpp>
 #include <runtime_swapper/transaction_backend.hpp>
@@ -98,10 +99,12 @@ struct CatalogWorkspace {
     } else {
       return std::nullopt;
     }
-    if (index + continuation > text.size()) return std::nullopt;
+    if (index + continuation > text.size())
+      return std::nullopt;
     for (std::size_t count = 0; count < continuation; ++count) {
       const auto next = static_cast<unsigned char>(text[index++]);
-      if ((next & 0xc0U) != 0x80U) return std::nullopt;
+      if ((next & 0xc0U) != 0x80U)
+        return std::nullopt;
       value = (value << 6U) | (next & 0x3fU);
     }
     if (value > 0x10ffffU || (value >= 0xd800U && value <= 0xdfffU)) {
@@ -130,38 +133,45 @@ struct CatalogWorkspace {
          });
 }
 
-[[nodiscard]] bool parse_size(std::string_view text, std::uint64_t& size) {
-  if (text.empty()) return false;
+[[nodiscard]] bool parse_size(std::string_view text, std::uint64_t &size) {
+  if (text.empty())
+    return false;
   const auto [end, error] =
       std::from_chars(text.data(), text.data() + text.size(), size);
   return error == std::errc{} && end == text.data() + text.size();
 }
 
-[[nodiscard]] std::string record_text(const CatalogRecord& record) {
-  return std::string(current_magic) + "hash=" + record.hash + "\nsize=" +
-         std::to_string(record.size) + "\nvolume=" +
-         utf8_text(record.volume_id) + "\n";
+[[nodiscard]] std::string record_text(const CatalogRecord &record) {
+  return std::string(current_magic) + "hash=" + record.hash +
+         "\nsize=" + std::to_string(record.size) +
+         "\nvolume=" + utf8_text(record.volume_id) + "\n";
 }
 
-[[nodiscard]] std::optional<CatalogRecord> parse_keyed_record(
-    std::string_view text, std::string_view magic, bool has_volume) {
-  if (!text.starts_with(magic)) return std::nullopt;
+[[nodiscard]] std::optional<CatalogRecord>
+parse_keyed_record(std::string_view text, std::string_view magic,
+                   bool has_volume) {
+  if (!text.starts_with(magic))
+    return std::nullopt;
   text.remove_prefix(magic.size());
   const auto hash_end = text.find('\n');
-  if (hash_end != 69 || !text.starts_with("hash=")) return std::nullopt;
+  if (hash_end != 69 || !text.starts_with("hash="))
+    return std::nullopt;
   std::string hash(text.substr(5, 64));
-  if (!valid_hash(hash)) return std::nullopt;
+  if (!valid_hash(hash))
+    return std::nullopt;
   std::ranges::transform(hash, hash.begin(), [](char value) {
-    return value >= 'A' && value <= 'F'
-               ? static_cast<char>(value + ('a' - 'A'))
-               : value;
+    return value >= 'A' && value <= 'F' ? static_cast<char>(value + ('a' - 'A'))
+                                        : value;
   });
   text.remove_prefix(hash_end + 1);
-  if (!text.starts_with("size=")) return std::nullopt;
+  if (!text.starts_with("size="))
+    return std::nullopt;
   const auto size_end = text.find('\n');
-  if (size_end == std::string_view::npos) return std::nullopt;
+  if (size_end == std::string_view::npos)
+    return std::nullopt;
   std::uint64_t size{};
-  if (!parse_size(text.substr(5, size_end - 5), size)) return std::nullopt;
+  if (!parse_size(text.substr(5, size_end - 5), size))
+    return std::nullopt;
   text.remove_prefix(size_end + 1);
   std::wstring volume;
   if (has_volume) {
@@ -171,7 +181,8 @@ struct CatalogWorkspace {
     text.remove_prefix(7);
     text.remove_suffix(1);
     const auto decoded = wide_text(text);
-    if (!decoded || decoded->empty()) return std::nullopt;
+    if (!decoded || decoded->empty())
+      return std::nullopt;
     volume = *decoded;
   } else if (!text.empty()) {
     return std::nullopt;
@@ -181,14 +192,15 @@ struct CatalogWorkspace {
 
 [[nodiscard]] std::optional<CatalogRecord> parse_record(
     std::string_view text,
-    const std::optional<std::filesystem::path>& legacy_hold = std::nullopt) {
+    const std::optional<std::filesystem::path> &legacy_hold = std::nullopt) {
   if (auto current = parse_keyed_record(text, current_magic, true)) {
     return current;
   }
   if (auto windows = parse_keyed_record(text, windows_vault_magic, false)) {
     return windows;
   }
-  if (auto posix = parse_keyed_record(text, posix_magic, false)) return posix;
+  if (auto posix = parse_keyed_record(text, posix_magic, false))
+    return posix;
   if (!text.starts_with(windows_journal_magic) || !legacy_hold) {
     return std::nullopt;
   }
@@ -196,31 +208,63 @@ struct CatalogWorkspace {
   while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) {
     text.remove_suffix(1);
   }
-  if (!valid_hash(text)) return std::nullopt;
+  if (!valid_hash(text))
+    return std::nullopt;
   std::error_code error;
   const auto size = std::filesystem::file_size(*legacy_hold, error);
   return error ? std::nullopt
                : std::optional(CatalogRecord{std::string(text), size, {}});
 }
 
-[[nodiscard]] std::optional<std::string> read_text(
-    const std::filesystem::path& path) {
+[[nodiscard]] std::optional<std::string>
+read_text(const std::filesystem::path &path) {
   std::ifstream stream(path, std::ios::binary);
-  if (!stream) return std::nullopt;
+  if (!stream)
+    return std::nullopt;
   std::string text(std::istreambuf_iterator<char>(stream), {});
   return stream.bad() ? std::nullopt : std::optional(std::move(text));
 }
 
-[[nodiscard]] CatalogWorkspace legacy_workspace(
-    const std::filesystem::path& catalog) {
+[[nodiscard]] CatalogWorkspace
+legacy_workspace(const std::filesystem::path &catalog) {
   return {catalog.parent_path() / L".skyrim-runtime-swapper", true};
 }
 
-[[nodiscard]] std::optional<CatalogWorkspace> external_workspace(
-    const std::filesystem::path& catalog, bool prepare = false,
-    std::uint64_t required_bytes = 0) {
-  const auto probe = transaction_backend().probe(catalog.parent_path(),
-                                                  required_bytes, prepare);
+[[nodiscard]] bool
+state_path_only_failure(const BackendProbeResult &probe) noexcept {
+  return probe.technical_reason == L"state-home-not-controlled" ||
+         probe.technical_reason == L"state-home-unavailable";
+}
+
+[[nodiscard]] BackendProbeResult
+catalog_storage_probe(const std::filesystem::path &catalog,
+                      const std::filesystem::path &game_root,
+                      std::uint64_t required_bytes = 0, bool prepare = false) {
+  auto catalog_probe = transaction_backend().probe(catalog.parent_path(),
+                                                   required_bytes, prepare);
+  if (catalog_probe.success() || game_root.empty() ||
+      !state_path_only_failure(catalog_probe) ||
+      catalog_probe.target_volume.stable_id.empty()) {
+    return catalog_probe;
+  }
+
+  auto installation_probe =
+      probe_prepared_storage(game_root, required_bytes, prepare);
+  if (!installation_probe.success() ||
+      installation_probe.transaction_work.value.empty() ||
+      installation_probe.target_volume.stable_id !=
+          catalog_probe.target_volume.stable_id) {
+    return catalog_probe;
+  }
+  return installation_probe;
+}
+
+[[nodiscard]] std::optional<CatalogWorkspace>
+external_workspace(const std::filesystem::path &catalog,
+                   const std::filesystem::path &game_root, bool prepare = false,
+                   std::uint64_t required_bytes = 0) {
+  const auto probe =
+      catalog_storage_probe(catalog, game_root, required_bytes, prepare);
   if (!probe.success() || probe.transaction_work.value.empty()) {
     return std::nullopt;
   }
@@ -228,10 +272,12 @@ struct CatalogWorkspace {
                           false};
 }
 
-[[nodiscard]] CatalogWorkspace active_workspace(
-    const std::filesystem::path& catalog) {
+[[nodiscard]] CatalogWorkspace
+active_workspace(const std::filesystem::path &catalog,
+                 const std::filesystem::path &game_root) {
   const auto legacy_state = legacy_workspace(catalog);
-  const auto external = external_workspace(catalog).value_or(legacy_state);
+  const auto external =
+      external_workspace(catalog, game_root).value_or(legacy_state);
   std::error_code error;
   if (!external.legacy &&
       inspect_regular_file(external.journal(), error) ==
@@ -248,7 +294,8 @@ struct CatalogWorkspace {
   error.clear();
   const auto external_status =
       std::filesystem::symlink_status(external.root, error);
-  if (!error && std::filesystem::exists(external_status)) return external;
+  if (!error && std::filesystem::exists(external_status))
+    return external;
   error.clear();
   const auto legacy_status =
       std::filesystem::symlink_status(legacy_state.root, error);
@@ -256,39 +303,42 @@ struct CatalogWorkspace {
                                                           : external;
 }
 
-[[nodiscard]] bool record_matches(const std::filesystem::path& file,
-                                  const CatalogRecord& record) {
+[[nodiscard]] bool record_matches(const std::filesystem::path &file,
+                                  const CatalogRecord &record) {
   std::error_code error;
   return inspect_regular_file(file, error) == RegularFileStatus::regular &&
          !error && std::filesystem::file_size(file, error) == record.size &&
-         !error && sha256_file(file) ==
-                       std::optional<std::string>(record.hash);
+         !error && sha256_file(file) == std::optional<std::string>(record.hash);
 }
 
-[[nodiscard]] bool records_match(const CatalogRecord& left,
-                                 const CatalogRecord& right) {
+[[nodiscard]] bool records_match(const CatalogRecord &left,
+                                 const CatalogRecord &right) {
   return left.hash == right.hash && left.size == right.size &&
          (left.volume_id.empty() || right.volume_id.empty() ||
           left.volume_id == right.volume_id);
 }
 
-[[nodiscard]] bool volume_matches(const std::filesystem::path& catalog,
-                                  const CatalogRecord& record) {
-  if (record.volume_id.empty()) return true;
-  const auto probe = transaction_backend().probe(catalog.parent_path());
+[[nodiscard]] bool volume_matches(const std::filesystem::path &game_root,
+                                  const std::filesystem::path &catalog,
+                                  const CatalogRecord &record) {
+  if (record.volume_id.empty())
+    return true;
+  const auto probe = catalog_storage_probe(catalog, game_root);
   return probe.success() && probe.target_volume.stable_id == record.volume_id;
 }
 
-[[nodiscard]] bool cleanup_workspace(const CatalogWorkspace& workspace) {
+[[nodiscard]] bool cleanup_workspace(const CatalogWorkspace &workspace) {
   std::error_code error;
   const auto status = std::filesystem::symlink_status(workspace.root, error);
-  if (error == std::errc::no_such_file_or_directory) return true;
+  if (error == std::errc::no_such_file_or_directory)
+    return true;
   if (error || !std::filesystem::is_directory(status) ||
       std::filesystem::is_symlink(status)) {
     return false;
   }
   const bool empty = std::filesystem::is_empty(workspace.root, error);
-  if (error) return false;
+  if (error)
+    return false;
   if (!empty) {
     // The v1 workspace was shared with runtime backups and its lock file.
     // Catalog cleanup owns only ContentCatalog.hold and .journal.
@@ -298,34 +348,36 @@ struct CatalogWorkspace {
       transaction_backend().durable_remove_tree(workspace.root));
 }
 
-[[nodiscard]] std::optional<ContentCatalogResult> recover_legacy_game_backup(
-    const std::filesystem::path& game_root,
-    const std::filesystem::path& catalog) {
-  if (game_root.empty()) return std::nullopt;
+[[nodiscard]] std::optional<ContentCatalogResult>
+recover_legacy_game_backup(const std::filesystem::path &game_root,
+                           const std::filesystem::path &catalog) {
+  if (game_root.empty())
+    return std::nullopt;
   const auto legacy = game_root / L".skyrim-runtime-swapper" / L"backups" /
                       L"1.7.104" / L"ContentCatalog.txt";
   std::error_code error;
   const auto status = inspect_regular_file(legacy, error);
-  if (status == RegularFileStatus::missing && !error) return std::nullopt;
+  if (status == RegularFileStatus::missing && !error)
+    return std::nullopt;
   if (status != RegularFileStatus::regular || error) {
     return ContentCatalogResult{
         false, false, L"A legacy ContentCatalog backup is not a regular file."};
   }
   const auto hash = sha256_file(legacy);
   const auto size = std::filesystem::file_size(legacy, error);
-  if (!hash || error ||
-      !commit_recovery_file(game_root, legacy, *hash, size)) {
-    return ContentCatalogResult{
-        false, false,
-        L"The legacy ContentCatalog backup could not be migrated to the vault."};
+  if (!hash || error || !commit_recovery_file(game_root, legacy, *hash, size)) {
+    return ContentCatalogResult{false, false,
+                                L"The legacy ContentCatalog backup could not "
+                                L"be migrated to the vault."};
   }
   const auto live_status = inspect_regular_file(catalog, error);
   if (error || (live_status != RegularFileStatus::missing &&
                 live_status != RegularFileStatus::regular)) {
     return ContentCatalogResult{
-        false, false, L"ContentCatalog.txt could not be inspected for migration."};
+        false, false,
+        L"ContentCatalog.txt could not be inspected for migration."};
   }
-  auto& backend = transaction_backend();
+  auto &backend = transaction_backend();
   if (live_status == RegularFileStatus::regular &&
       sha256_file(catalog) != hash &&
       (!preserve_recovery_conflict(game_root, catalog,
@@ -339,22 +391,24 @@ struct CatalogWorkspace {
       (!restore_recovery_file(game_root, *hash, size, catalog) ||
        sha256_file(catalog) != hash)) {
     return ContentCatalogResult{
-        false, false, L"The legacy ContentCatalog backup could not be restored."};
+        false, false,
+        L"The legacy ContentCatalog backup could not be restored."};
   }
   if (!backend.durable_remove(legacy)) {
     return ContentCatalogResult{
-        false, true, L"The migrated ContentCatalog backup remains pending cleanup."};
+        false, true,
+        L"The migrated ContentCatalog backup remains pending cleanup."};
   }
   return ContentCatalogResult{true, true, {}};
 }
 
-[[nodiscard]] ContentCatalogResult recover_impl(
-    const std::filesystem::path& game_root,
-    const std::filesystem::path& catalog) {
-  const auto metadata = game_root.empty()
-                            ? RecoveryMetadataReadResult{
-                                  RecoveryMetadataStatus::missing, {}}
-                            : read_recovery_metadata(game_root, metadata_name);
+[[nodiscard]] ContentCatalogResult
+recover_impl(const std::filesystem::path &game_root,
+             const std::filesystem::path &catalog) {
+  const auto metadata =
+      game_root.empty()
+          ? RecoveryMetadataReadResult{RecoveryMetadataStatus::missing, {}}
+          : read_recovery_metadata(game_root, metadata_name);
   if (metadata.failed()) {
     return {false, false,
             L"The ContentCatalog recovery metadata could not be read safely (" +
@@ -362,7 +416,7 @@ struct CatalogWorkspace {
                 L")."};
   }
   const auto legacy_state = legacy_workspace(catalog);
-  const auto external = external_workspace(catalog);
+  const auto external = external_workspace(catalog, game_root);
   std::error_code competing_error;
   if (external && !external->legacy &&
       inspect_regular_file(external->journal(), competing_error) ==
@@ -374,7 +428,7 @@ struct CatalogWorkspace {
     return {false, false,
             L"Both legacy and current ContentCatalog recovery journals exist."};
   }
-  const auto workspace = active_workspace(catalog);
+  const auto workspace = active_workspace(catalog, game_root);
   std::error_code error;
   const auto hold_status = inspect_regular_file(workspace.hold(), error);
   if (error || (hold_status != RegularFileStatus::missing &&
@@ -385,12 +439,12 @@ struct CatalogWorkspace {
   const auto journal_status = inspect_regular_file(workspace.journal(), error);
   if (error || (journal_status != RegularFileStatus::missing &&
                 journal_status != RegularFileStatus::regular)) {
-    return {false, false, L"The ContentCatalog journal could not be inspected."};
+    return {false, false,
+            L"The ContentCatalog journal could not be inspected."};
   }
 
-  const auto vault_record = metadata.present()
-                                ? parse_record(metadata.contents)
-                                : std::optional<CatalogRecord>{};
+  const auto vault_record = metadata.present() ? parse_record(metadata.contents)
+                                               : std::optional<CatalogRecord>{};
   if (metadata.present() && !vault_record) {
     return {false, false,
             L"The ContentCatalog recovery-vault metadata is invalid."};
@@ -398,13 +452,15 @@ struct CatalogWorkspace {
   const auto local_text = journal_status == RegularFileStatus::regular
                               ? read_text(workspace.journal())
                               : std::optional<std::string>{};
-  const auto local_record =
-      local_text ? parse_record(*local_text, workspace.hold())
-                 : std::optional<CatalogRecord>{};
+  const auto local_record = local_text
+                                ? parse_record(*local_text, workspace.hold())
+                                : std::optional<CatalogRecord>{};
   if (journal_status == RegularFileStatus::regular && !local_record) {
-    return {false, false, L"The ContentCatalog transaction journal is invalid."};
+    return {false, false,
+            L"The ContentCatalog transaction journal is invalid."};
   }
-  if (vault_record && local_record && !records_match(*vault_record, *local_record)) {
+  if (vault_record && local_record &&
+      !records_match(*vault_record, *local_record)) {
     return {false, false,
             L"The ContentCatalog vault and transaction records disagree."};
   }
@@ -424,12 +480,12 @@ struct CatalogWorkspace {
                      false, false,
                      L"Stale ContentCatalog transaction metadata remains."};
   }
-  if (!volume_matches(catalog, *record)) {
+  if (!volume_matches(game_root, catalog, *record)) {
     return {false, false,
             L"The ContentCatalog recovery record belongs to another volume."};
   }
 
-  auto& backend = transaction_backend();
+  auto &backend = transaction_backend();
   const auto live_status = inspect_regular_file(catalog, error);
   if (error || (live_status != RegularFileStatus::missing &&
                 live_status != RegularFileStatus::regular)) {
@@ -478,28 +534,33 @@ struct CatalogWorkspace {
             L"ContentCatalog was restored, but workspace cleanup failed."};
   }
   if (!workspace.legacy && !cleanup_workspace(legacy_state)) {
-    return {false, true,
-            L"ContentCatalog was restored, but legacy workspace cleanup failed."};
+    return {
+        false, true,
+        L"ContentCatalog was restored, but legacy workspace cleanup failed."};
   }
   return {true, true, {}};
 }
 
-}  // namespace
+} // namespace
 
-ContentCatalogResult inspect_content_catalog_recovery_state() {
+ContentCatalogResult
+inspect_content_catalog_recovery_state(const std::filesystem::path &game_root) {
   const auto catalog = resolve_content_catalog_path();
   if (!catalog) {
-    return {false, false, L"The ContentCatalog location could not be resolved."};
+    return {false, false,
+            L"The ContentCatalog location could not be resolved."};
   }
-  for (const auto& workspace :
-       {legacy_workspace(*catalog), active_workspace(*catalog)}) {
-    for (const auto& path : {workspace.hold(), workspace.journal()}) {
+  for (const auto &workspace :
+       {legacy_workspace(*catalog), active_workspace(*catalog, game_root)}) {
+    for (const auto &path : {workspace.hold(), workspace.journal()}) {
       std::error_code error;
       const auto status = inspect_regular_file(path, error);
-      if (status == RegularFileStatus::missing && !error) continue;
+      if (status == RegularFileStatus::missing && !error)
+        continue;
       if (error || status != RegularFileStatus::regular) {
-        return {false, false,
-                L"ContentCatalog recovery state could not be inspected safely."};
+        return {
+            false, false,
+            L"ContentCatalog recovery state could not be inspected safely."};
       }
       return {false, false, L"ContentCatalog recovery is still pending."};
     }
@@ -507,8 +568,8 @@ ContentCatalogResult inspect_content_catalog_recovery_state() {
   return {true, false, {}};
 }
 
-ContentCatalogResult recover_content_catalog(
-    const std::filesystem::path& game_root) {
+ContentCatalogResult
+recover_content_catalog(const std::filesystem::path &game_root) {
   const auto catalog = resolve_content_catalog_path();
   return catalog ? recover_impl(game_root, *catalog)
                  : ContentCatalogResult{
@@ -516,29 +577,33 @@ ContentCatalogResult recover_content_catalog(
                        L"The ContentCatalog location could not be resolved."};
 }
 
-ContentCatalogResult remove_incompatible_content_catalog(
-    const std::filesystem::path& game_root, bool persistent) {
+ContentCatalogResult
+remove_incompatible_content_catalog(const std::filesystem::path &game_root,
+                                    bool persistent) {
   (void)persistent;
   const auto recovered = recover_content_catalog(game_root);
-  if (!recovered.success) return recovered;
+  if (!recovered.success)
+    return recovered;
   const auto catalog = resolve_content_catalog_path();
   if (!catalog) {
-    return {false, false, L"The ContentCatalog location could not be resolved."};
+    return {false, false,
+            L"The ContentCatalog location could not be resolved."};
   }
   std::error_code error;
   const auto status = inspect_regular_file(*catalog, error);
-  if (status == RegularFileStatus::missing && !error) return {true, false, {}};
+  if (status == RegularFileStatus::missing && !error)
+    return {true, false, {}};
   if (status != RegularFileStatus::regular || error) {
     return {false, false, L"ContentCatalog.txt is not a regular file."};
   }
-  const auto probe = transaction_backend().probe(catalog->parent_path());
+  const auto probe = catalog_storage_probe(*catalog, game_root);
   const auto hash = sha256_file(*catalog);
   const auto size = std::filesystem::file_size(*catalog, error);
   if (!probe.success() || !hash || error) {
     return {false, false, L"ContentCatalog.txt could not be verified."};
   }
   const CatalogRecord record{*hash, size, probe.target_volume.stable_id};
-  const auto prepared = external_workspace(*catalog, true, size);
+  const auto prepared = external_workspace(*catalog, game_root, true, size);
   if (!prepared ||
       !commit_recovery_file(game_root, *catalog, record.hash, record.size) ||
       !write_recovery_metadata(game_root, metadata_name, record_text(record)) ||
@@ -554,12 +619,13 @@ ContentCatalogResult remove_incompatible_content_catalog(
   return {true, true, {}};
 }
 
-ContentCatalogResult restore_content_catalog(
-    const std::filesystem::path& game_root) {
+ContentCatalogResult
+restore_content_catalog(const std::filesystem::path &game_root) {
   return recover_content_catalog(game_root);
 }
 
-BackendProbeResult probe_content_catalog_storage() {
+BackendProbeResult
+probe_content_catalog_storage(const std::filesystem::path &game_root) {
   const auto catalog = resolve_content_catalog_path();
   if (!catalog) {
     BackendProbeResult result;
@@ -568,11 +634,11 @@ BackendProbeResult probe_content_catalog_storage() {
     result.message = L"The ContentCatalog location is unavailable.";
     return result;
   }
-  return transaction_backend().probe(catalog->parent_path());
+  return catalog_storage_probe(*catalog, game_root);
 }
 
-ContentCatalogResult verify_persistent_content_catalog(
-    const std::filesystem::path& game_root) {
+ContentCatalogResult
+verify_persistent_content_catalog(const std::filesystem::path &game_root) {
   const auto catalog = resolve_content_catalog_path();
   if (!catalog) {
     return {false, false, L"The ContentCatalog location is unavailable."};
@@ -584,24 +650,23 @@ ContentCatalogResult verify_persistent_content_catalog(
                 std::wstring(recovery_metadata_status_name(metadata.status)) +
                 L")."};
   }
-  const auto workspace = active_workspace(*catalog);
+  const auto workspace = active_workspace(*catalog, game_root);
   const auto local_text = read_text(workspace.journal());
-  const auto local_record =
-      local_text ? parse_record(*local_text, workspace.hold())
-                 : std::optional<CatalogRecord>{};
-  const auto vault_record = metadata.present()
-                                ? parse_record(metadata.contents)
+  const auto local_record = local_text
+                                ? parse_record(*local_text, workspace.hold())
                                 : std::optional<CatalogRecord>{};
-  if ((metadata.present() && !vault_record) ||
-      (local_text && !local_record) ||
+  const auto vault_record = metadata.present() ? parse_record(metadata.contents)
+                                               : std::optional<CatalogRecord>{};
+  if ((metadata.present() && !vault_record) || (local_text && !local_record) ||
       (vault_record && local_record &&
        !records_match(*vault_record, *local_record))) {
     return {false, false,
             L"The persistent ContentCatalog recovery record is invalid."};
   }
   const auto record = vault_record ? vault_record : local_record;
-  if (!record) return {true, false, {}};
-  if (!volume_matches(*catalog, *record) ||
+  if (!record)
+    return {true, false, {}};
+  if (!volume_matches(game_root, *catalog, *record) ||
       !recovery_file_available(game_root, record->hash, record->size)) {
     return {false, false,
             L"Persistent ContentCatalog recovery is unavailable."};
@@ -621,4 +686,4 @@ ContentCatalogResult verify_persistent_content_catalog(
   return {true, true, {}};
 }
 
-}  // namespace runtime_swapper::app
+} // namespace runtime_swapper::app
