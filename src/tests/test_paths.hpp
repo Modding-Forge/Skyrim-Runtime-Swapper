@@ -25,6 +25,15 @@ namespace runtime_swapper::tests {
 #if !defined(_WIN32)
   return std::filesystem::current_path();
 #else
+  wchar_t* local_app_data{};
+  std::size_t local_app_data_size{};
+  if (_wdupenv_s(&local_app_data, &local_app_data_size, L"LOCALAPPDATA") == 0 &&
+      local_app_data != nullptr && *local_app_data != L'\0') {
+    const std::filesystem::path result(local_app_data);
+    std::free(local_app_data);
+    return result;
+  }
+  std::free(local_app_data);
   return std::filesystem::temp_directory_path();
 #endif
 }

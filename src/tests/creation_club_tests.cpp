@@ -1,4 +1,5 @@
 #include "creation_club.hpp"
+#include "test_paths.hpp"
 
 #include <runtime_swapper/runtime_version.hpp>
 #include <runtime_swapper/recovery_vault.hpp>
@@ -22,7 +23,7 @@ namespace {
 class TemporaryDirectory {
  public:
   TemporaryDirectory()
-      : path_(std::filesystem::temp_directory_path() /
+      : path_(runtime_swapper::tests::test_root() /
               (L"skyrim-runtime-swapper-creation-club-" +
                std::to_wstring(GetCurrentProcessId()))) {
     std::error_code error;
@@ -101,7 +102,11 @@ int main() {
   const auto ordinary = game_root / L"Data" / L"CommunityContent.esp";
   const auto unrelated_dll = game_root / L"Data" / L"ccExample.dll";
   const auto storage = runtime_swapper::transaction_backend().probe(game_root);
-  if (!storage.success() || storage.transaction_work.value.empty()) return 20;
+  if (!storage.success() || storage.transaction_work.value.empty()) {
+    std::wcerr << L"Creation Club storage probe failed: " << storage.message
+               << L"\nreason=" << storage.technical_reason << L'\n';
+    return 20;
+  }
   const auto quarantine =
       storage.transaction_work.value / L"creation-club";
   const auto legacy_quarantine =
@@ -135,6 +140,8 @@ int main() {
       !std::filesystem::is_regular_file(ordinary) ||
       !std::filesystem::is_regular_file(unrelated_dll) ||
       std::filesystem::exists(legacy_quarantine)) {
+    std::wcerr << L"Creation Club quarantine failed: " << prepared.message
+               << L"\nworkspace=" << quarantine << L'\n';
     return 2;
   }
 

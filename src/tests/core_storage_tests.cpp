@@ -2,6 +2,7 @@
 #include "internal/fault_injection.hpp"
 #include "internal/transaction_journal.hpp"
 #include "internal/transaction_workspace.hpp"
+#include "test_paths.hpp"
 
 #include <runtime_swapper/transaction_backend.hpp>
 #include <runtime_swapper/sha256.hpp>
@@ -17,7 +18,6 @@
 #include <iostream>
 #include <string>
 #include <system_error>
-#include <vector>
 
 namespace {
 
@@ -48,7 +48,7 @@ void exchange_parent_at_resolve(std::string_view point) noexcept {
 class TemporaryDirectory {
  public:
   TemporaryDirectory()
-      : path_(test_base() /
+      : path_(runtime_swapper::tests::test_root() /
               (L"skyrim-runtime-swapper-core-tests-" +
                std::to_wstring(GetCurrentProcessId()))) {
     std::error_code error;
@@ -64,18 +64,6 @@ class TemporaryDirectory {
   [[nodiscard]] const std::filesystem::path& path() const noexcept { return path_; }
 
  private:
-  [[nodiscard]] static std::filesystem::path test_base() {
-    const DWORD required = GetEnvironmentVariableW(L"LOCALAPPDATA", nullptr, 0);
-    if (required > 1) {
-      std::vector<wchar_t> value(required);
-      if (GetEnvironmentVariableW(L"LOCALAPPDATA", value.data(), required) ==
-          required - 1) {
-        return std::filesystem::path(value.data());
-      }
-    }
-    return std::filesystem::temp_directory_path();
-  }
-
   std::filesystem::path path_;
 };
 

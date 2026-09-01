@@ -143,6 +143,13 @@ constexpr std::string_view current_magic = "SRS-CC-INVENTORY-3\n";
          name != L".." && is_creation_club_name(name);
 }
 
+[[nodiscard]] std::filesystem::path resolved_game_root(
+    const std::filesystem::path& game_root) {
+  std::error_code error;
+  const auto resolved = std::filesystem::canonical(game_root, error);
+  return error || !resolved.is_absolute() ? std::filesystem::path{} : resolved;
+}
+
 [[nodiscard]] bool parse_unsigned(std::string_view text,
                                   std::uint64_t& value) {
   if (text.empty()) return false;
@@ -336,7 +343,12 @@ std::optional<CreationClubInventory> parse_creation_club_inventory(
 std::optional<CreationClubInventory> discover_creation_club_inventory(
     const std::filesystem::path& game_root, std::wstring target_volume_id,
     std::wstring& error_message) {
-  const auto data_root = game_root / L"Data";
+  const auto resolved_root = resolved_game_root(game_root);
+  if (resolved_root.empty()) {
+    error_message = L"The Skyrim directory could not be resolved safely.";
+    return std::nullopt;
+  }
+  const auto data_root = resolved_root / L"Data";
   std::error_code error;
   CreationClubInventory inventory{std::move(target_volume_id), {}};
   for (std::filesystem::directory_iterator iterator(data_root, error), end;
@@ -354,7 +366,8 @@ std::optional<CreationClubInventory> discover_creation_club_inventory(
                       present_path(managed->logical);
       return std::nullopt;
     }
-    auto effective_relative = managed->effective.lexically_relative(game_root);
+    auto effective_relative =
+        managed->effective.lexically_relative(resolved_root);
     if (!valid_relative(effective_relative)) {
       error_message = L"A Creation Club file resolved outside Skyrim: " +
                       present_path(managed->logical);
@@ -395,12 +408,15 @@ std::optional<CreationClubInventory> discover_creation_club_inventory(
 
 std::filesystem::path creation_club_logical_path(
     const std::filesystem::path& game_root, const CreationClubFile& file) {
-  return game_root / L"Data" / file.name;
+  const auto root = resolved_game_root(game_root);
+  return root.empty() ? std::filesystem::path{} : root / L"Data" / file.name;
 }
 
 std::filesystem::path creation_club_effective_path(
     const std::filesystem::path& game_root, const CreationClubFile& file) {
-  return game_root / file.effective_relative;
+  const auto root = resolved_game_root(game_root);
+  return root.empty() ? std::filesystem::path{}
+                      : root / file.effective_relative;
 }
 
 bool creation_club_mapping_matches(const std::filesystem::path& game_root,
@@ -408,6 +424,7 @@ bool creation_club_mapping_matches(const std::filesystem::path& game_root,
                                    bool allow_missing_effective) {
   const auto logical = creation_club_logical_path(game_root, file);
   const auto effective = creation_club_effective_path(game_root, file);
+  if (logical.empty() || effective.empty()) return false;
   std::error_code error;
   const auto effective_status = std::filesystem::symlink_status(effective, error);
   const bool effective_missing =
