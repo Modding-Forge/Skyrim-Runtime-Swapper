@@ -92,6 +92,28 @@ bool unprotect_exclusive_dacl(const std::filesystem::path& path) {
   return write_status == ERROR_SUCCESS;
 }
 
+bool copy_protected_dacl(const std::filesystem::path& source,
+                         const std::filesystem::path& destination) {
+  PSID owner{};
+  PACL dacl{};
+  PSECURITY_DESCRIPTOR descriptor{};
+  const DWORD read_status = GetNamedSecurityInfoW(
+      const_cast<wchar_t*>(source.c_str()), SE_FILE_OBJECT,
+      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, nullptr,
+      &dacl, nullptr, &descriptor);
+  if (read_status != ERROR_SUCCESS || owner == nullptr || dacl == nullptr) {
+    if (descriptor != nullptr) LocalFree(descriptor);
+    return false;
+  }
+  const DWORD write_status = SetNamedSecurityInfoW(
+      const_cast<wchar_t*>(destination.c_str()), SE_FILE_OBJECT,
+      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION |
+          PROTECTED_DACL_SECURITY_INFORMATION,
+      owner, nullptr, dacl, nullptr);
+  LocalFree(descriptor);
+  return write_status == ERROR_SUCCESS;
+}
+
 }  // namespace
 
 int run_tests() {
@@ -395,8 +417,8 @@ int run_tests() {
   std::filesystem::create_directories(acl_game, error);
   const auto acl_vault = resolve_vault_layout(acl_game, 8);
   if (error || !acl_vault ||
-      !transaction_backend().prepare_coordination_lock(
-          acl_vault->probe.coordination_lock)) {
+      !copy_protected_dacl(acl_vault->probe.vault_path,
+                           acl_vault->probe.vault_path.parent_path())) {
     return 44;
   }
   if (!unprotect_exclusive_dacl(acl_vault->probe.vault_path)) return 45;
