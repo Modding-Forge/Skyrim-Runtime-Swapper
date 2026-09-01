@@ -4,6 +4,11 @@ All notable changes to Skyrim Runtime Swapper are documented in this file.
 
 ## 1.2.0 - 2026-09-01
 
+- Repairs inherited Windows permissions only when an existing SRS vault is
+  already owned exclusively by the current user and SYSTEM. Vaults accessible
+  by any additional principal remain blocked.
+- Keeps the release archive root limited to the runtime files, Proton
+  instructions, and Vortex metadata.
 - Safely retires verified v1.0.0 and v1.1.0 in-game recovery storage on the
   first v1.2.0 launch, including fallback backups, runtime caches, staging
   directories, completion markers, and stale transaction lock files. Unknown,

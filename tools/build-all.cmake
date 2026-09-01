@@ -169,23 +169,6 @@ foreach(ASSET_MANIFEST IN LISTS ASSET_MANIFESTS)
       "${OUTPUT_ROOT}/vortex_override_instructions.json")
     file(COPY_FILE "${PROTON_INSTRUCTIONS_FILE}"
       "${OUTPUT_ROOT}/PROTON-EXPERIMENTAL-INSTRUCTIONS.txt")
-    file(COPY_FILE "${REPOSITORY_ROOT}/README.md"
-      "${OUTPUT_ROOT}/README.md")
-    file(COPY_FILE "${REPOSITORY_ROOT}/LICENSE"
-      "${OUTPUT_ROOT}/LICENSE")
-    file(COPY_FILE "${REPOSITORY_ROOT}/THIRD_PARTY.md"
-      "${OUTPUT_ROOT}/THIRD_PARTY.md")
-    file(MAKE_DIRECTORY "${OUTPUT_ROOT}/THIRD_PARTY-LICENSES")
-    file(COPY_FILE
-      "${REPOSITORY_ROOT}/third_party/HDiffPatch5/HDiffPatch/LICENSE"
-      "${OUTPUT_ROOT}/THIRD_PARTY-LICENSES/HDiffPatch.txt")
-    file(COPY_FILE
-      "${REPOSITORY_ROOT}/third_party/HDiffPatch5/zstd/LICENSE"
-      "${OUTPUT_ROOT}/THIRD_PARTY-LICENSES/Zstandard.txt")
-    file(COPY_FILE
-      "${REPOSITORY_ROOT}/third_party/HDiffPatch5/xxHash/LICENSE"
-      "${OUTPUT_ROOT}/THIRD_PARTY-LICENSES/xxHash.txt")
-
     set(SELECTED_ENTRIES "")
     set(FOUND_PROFILE_FILES "")
     string(JSON ASSET_FILE_COUNT LENGTH "${ASSET_JSON}" files)
@@ -267,7 +250,6 @@ ${SELECTED_ENTRIES}
       COMMAND "${CMAKE_COMMAND}" -E tar cf "${ARCHIVE_PATH}" --format=zip
         version.dll SkyrimRuntimeSwapper.exe ${PACKAGED_NATIVE_SIDECAR} RuntimeSwap
         vortex_override_instructions.json PROTON-EXPERIMENTAL-INSTRUCTIONS.txt
-        README.md LICENSE THIRD_PARTY.md THIRD_PARTY-LICENSES
       WORKING_DIRECTORY "${OUTPUT_ROOT}"
       RESULT_VARIABLE ARCHIVE_RESULT
     )
@@ -294,14 +276,22 @@ ${SELECTED_ENTRIES}
       RESULT_VARIABLE ARCHIVE_VERIFY_RESULT)
     foreach(REQUIRED_ENTRY
         version.dll SkyrimRuntimeSwapper.exe RuntimeSwap/manifest.json
-        README.md LICENSE THIRD_PARTY.md PROTON-EXPERIMENTAL-INSTRUCTIONS.txt
-        THIRD_PARTY-LICENSES/HDiffPatch.txt
-        THIRD_PARTY-LICENSES/Zstandard.txt
-        THIRD_PARTY-LICENSES/xxHash.txt)
+        PROTON-EXPERIMENTAL-INSTRUCTIONS.txt
+        vortex_override_instructions.json)
       string(FIND "${ARCHIVE_CONTENTS}" "${REQUIRED_ENTRY}" ENTRY_POSITION)
       if(ENTRY_POSITION EQUAL -1)
         message(FATAL_ERROR
           "Archive verification failed; missing ${REQUIRED_ENTRY}: ${ARCHIVE_PATH}")
+      endif()
+    endforeach()
+    foreach(FORBIDDEN_ROOT_ENTRY README.md LICENSE THIRD_PARTY.md
+        THIRD_PARTY-LICENSES licenses)
+      string(REGEX MATCH
+        "(^|[\r\n])${FORBIDDEN_ROOT_ENTRY}/?([\r\n]|$)"
+        FORBIDDEN_MATCH "${ARCHIVE_CONTENTS}")
+      if(NOT FORBIDDEN_MATCH STREQUAL "")
+        message(FATAL_ERROR
+          "Archive verification failed; unexpected root entry ${FORBIDDEN_ROOT_ENTRY}: ${ARCHIVE_PATH}")
       endif()
     endforeach()
     if(NOT ARCHIVE_VERIFY_RESULT EQUAL 0)

@@ -73,6 +73,25 @@ std::string utf8_path(const std::filesystem::path& path) {
   return std::string(reinterpret_cast<const char*>(value.data()), value.size());
 }
 
+bool unprotect_exclusive_dacl(const std::filesystem::path& path) {
+  PACL dacl{};
+  PSECURITY_DESCRIPTOR descriptor{};
+  const DWORD read_status = GetNamedSecurityInfoW(
+      const_cast<wchar_t*>(path.c_str()), SE_FILE_OBJECT,
+      DACL_SECURITY_INFORMATION, nullptr, nullptr, &dacl, nullptr,
+      &descriptor);
+  if (read_status != ERROR_SUCCESS || dacl == nullptr) {
+    if (descriptor != nullptr) LocalFree(descriptor);
+    return false;
+  }
+  const DWORD write_status = SetNamedSecurityInfoW(
+      const_cast<wchar_t*>(path.c_str()), SE_FILE_OBJECT,
+      DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+      nullptr, nullptr, dacl, nullptr);
+  LocalFree(descriptor);
+  return write_status == ERROR_SUCCESS;
+}
+
 }  // namespace
 
 int run_tests() {
@@ -368,6 +387,24 @@ int run_tests() {
           std::string::npos ||
       alias_manifest.find("SkyrimSELauncher.exe|") != std::string::npos) {
     return 37;
+  }
+
+  if (!transaction_backend().prepare_coordination_lock(
+          vault->probe.coordination_lock)) {
+    return 44;
+  }
+  if (!unprotect_exclusive_dacl(vault->probe.vault_path)) return 45;
+  const auto inherited_acl = transaction_backend().probe(temporary.path());
+  if (inherited_acl.mode != SafetyMode::hard_blocked ||
+      inherited_acl.technical_reason != L"vault-owner-or-dacl") {
+    return 46;
+  }
+  const auto repaired_acl =
+      transaction_backend().probe(temporary.path(), 0, true);
+  if (!repaired_acl.success()) {
+    std::wcerr << L"Inherited ACL repair failed: " << repaired_acl.message
+               << L" (" << repaired_acl.technical_reason << L")\n";
+    return 47;
   }
 
   if (SetNamedSecurityInfoW(
