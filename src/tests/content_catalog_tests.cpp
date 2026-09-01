@@ -65,7 +65,8 @@ class TestEnvironment {
     }
 #endif
     std::error_code error;
-    const auto probe = runtime_swapper::transaction_backend().probe(root_ / L"game");
+    const auto probe =
+        runtime_swapper::transaction_backend().probe(game_root());
     if (probe.vault_path.filename().wstring().starts_with(L"skyrimse-") &&
         probe.vault_path.wstring().find(L"Skyrim Runtime Swapper") !=
             std::wstring::npos) {
@@ -83,7 +84,10 @@ class TestEnvironment {
 #endif
   }
 
-  [[nodiscard]] const std::filesystem::path& root() const noexcept { return root_; }
+  [[nodiscard]] std::filesystem::path game_root() const {
+    return root_ / L"SteamLibrary" / L"steamapps" / L"common" /
+           L"Content Catalog Test";
+  }
 
  private:
   std::filesystem::path root_;
@@ -129,7 +133,7 @@ int run_tests() {
   const TestEnvironment environment;
   const auto catalog = environment.catalog();
 
-  const auto game_root = environment.root() / L"game";
+  const auto game_root = environment.game_root();
   const auto legacy = game_root / L".skyrim-runtime-swapper" / L"backups" / L"1.7.104" /
                       L"ContentCatalog.txt";
   write_file(legacy, "catalog-v1");

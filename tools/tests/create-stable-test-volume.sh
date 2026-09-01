@@ -18,15 +18,15 @@ mkfs.ext4 -q -F "$loop_device"
 filesystem_uuid=$(blkid -s UUID -o value "$loop_device")
 uuid_link="/dev/disk/by-uuid/$filesystem_uuid"
 mkdir -p /dev/disk/by-uuid
-if [[ -e "$uuid_link" || -L "$uuid_link" ]]; then
-  if [[ ! -L "$uuid_link" || "$(readlink -f "$uuid_link")" != "$loop_device" ]]; then
-    echo "refusing to replace existing filesystem UUID entry: $uuid_link" >&2
-    exit 1
-  fi
+if [[ -L "$uuid_link" && "$(readlink -f "$uuid_link")" == "$loop_device" ]]; then
+  created_uuid_link=0
+elif ln -s "$loop_device" "$uuid_link" 2>/dev/null; then
+  created_uuid_link=1
+elif [[ -L "$uuid_link" && "$(readlink -f "$uuid_link")" == "$loop_device" ]]; then
   created_uuid_link=0
 else
-  ln -s "$loop_device" "$uuid_link"
-  created_uuid_link=1
+  echo "refusing to replace existing filesystem UUID entry: $uuid_link" >&2
+  exit 1
 fi
 printf '%s\n%s\n%s\n' "$loop_device" "$uuid_link" "$created_uuid_link" \
   >"$state_file"
