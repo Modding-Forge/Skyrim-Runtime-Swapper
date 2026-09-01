@@ -41,7 +41,9 @@ cleanup() {
     mountpoint -q "${mounts[index]}" && umount "${mounts[index]}"
   done
   for ((index=${#loops[@]}-1; index>=0; --index)); do
-    losetup -d "${loops[index]}"
+    if losetup "${loops[index]}" >/dev/null 2>&1; then
+      losetup -d "${loops[index]}"
+    fi
   done
   rm -rf -- "$test_root"
 }
@@ -74,10 +76,23 @@ make_volume() {
     mount "$loop" "$mount_path"
   fi
   mounts+=("$mount_path")
+  created_loop="$loop"
   created_mount="$mount_path"
 }
 
+release_volume() {
+  local mount_path="$1"
+  local loop="$2"
+  if mountpoint -q "$mount_path"; then
+    umount "$mount_path"
+  fi
+  if losetup "$loop" >/dev/null 2>&1; then
+    losetup -d "$loop"
+  fi
+}
+
 created_mount=""
+created_loop=""
 make_volume vault ext4 1024
 vault_mount="$created_mount"
 vault_state="$vault_mount/state"
@@ -87,12 +102,15 @@ chmod 0700 "$vault_state"
 run_case() {
   local filesystem="$1"
   local expected="$2"
+  local keep_volume="${3:-false}"
   local target_mount
+  local target_loop
   local output
   local created
   local actual
   make_volume "target-$filesystem" "$filesystem" 512
   target_mount="$created_mount"
+  target_loop="$created_loop"
   mkdir -p "$target_mount/game"
   output="$(XDG_STATE_HOME="$vault_state" HOME="$test_root/home" \
     "$probe" "$target_mount/game" --prepare)"
@@ -105,6 +123,9 @@ run_case() {
   created="$(sed -n 's/^vault=//p' <<<"$output")"
   [[ "$created" == "$vault_state"/modding-forge/skyrim-runtime-swapper/vaults/skyrimse-* ]]
   [[ -d "$created" && ! -L "$created" && "$(stat -c '%a' "$created")" == 700 ]]
+  if [[ "$keep_volume" != true ]]; then
+    release_volume "$target_mount" "$target_loop"
+  fi
 }
 
 kernel_filesystem_available() {
@@ -120,7 +141,7 @@ if "$allow_missing_filesystems" && ! kernel_filesystem_available exfat; then
   echo "SKIP: this runner kernel does not provide exFAT mounts"
 fi
 
-run_case ext4 automatic
+run_case ext4 automatic true
 run_case xfs automatic
 run_case btrfs automatic
 if "$exfat_available"; then
