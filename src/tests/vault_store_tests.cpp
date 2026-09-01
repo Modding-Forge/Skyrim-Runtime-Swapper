@@ -389,18 +389,23 @@ int run_tests() {
     return 37;
   }
 
-  if (!transaction_backend().prepare_coordination_lock(
-          vault->probe.coordination_lock)) {
+  TemporaryDirectory acl_temporary;
+  const auto acl_game = acl_temporary.path() / L"SteamLibrary" / L"steamapps" /
+                        L"common" / L"Skyrim Special Edition";
+  std::filesystem::create_directories(acl_game, error);
+  const auto acl_vault = resolve_vault_layout(acl_game, 8);
+  if (error || !acl_vault ||
+      !transaction_backend().prepare_coordination_lock(
+          acl_vault->probe.coordination_lock)) {
     return 44;
   }
-  if (!unprotect_exclusive_dacl(vault->probe.vault_path)) return 45;
-  const auto inherited_acl = transaction_backend().probe(temporary.path());
+  if (!unprotect_exclusive_dacl(acl_vault->probe.vault_path)) return 45;
+  const auto inherited_acl = transaction_backend().probe(acl_game);
   if (inherited_acl.mode != SafetyMode::hard_blocked ||
       inherited_acl.technical_reason != L"vault-owner-or-dacl") {
     return 46;
   }
-  const auto repaired_acl =
-      transaction_backend().probe(temporary.path(), 0, true);
+  const auto repaired_acl = transaction_backend().probe(acl_game, 0, true);
   if (!repaired_acl.success()) {
     std::wcerr << L"Inherited ACL repair failed: " << repaired_acl.message
                << L" (" << repaired_acl.technical_reason << L")\n";
