@@ -10,7 +10,6 @@
 #include <windows.h>
 #include <bcrypt.h>
 #include <knownfolders.h>
-#include <shellapi.h>
 #include <shlobj.h>
 
 #include <algorithm>
@@ -333,24 +332,33 @@ struct PermissionRepairResult {
     return {PermissionRepairStatus::launch_failed, ERROR_INVALID_NAME};
   }
 
-  std::wstring parameters =
-      L"0700 " + quote_windows_command_argument(unix_sidecar);
-  std::wstring chmod_path = L"\\\\?\\unix/bin/chmod";
-  SHELLEXECUTEINFOW execution{};
-  execution.cbSize = sizeof(execution);
-  execution.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC |
-                    SEE_MASK_NO_CONSOLE | SEE_MASK_FLAG_NO_UI;
-  execution.lpVerb = L"open";
-  execution.lpFile = chmod_path.c_str();
-  execution.lpParameters = parameters.c_str();
-  execution.lpDirectory = working_directory.c_str();
-  execution.nShow = SW_HIDE;
-  if (!ShellExecuteExW(&execution) || execution.hProcess == nullptr ||
-      execution.hProcess == INVALID_HANDLE_VALUE) {
+  auto chmod_path = wine_windows_path("/bin/chmod");
+  if (!chmod_path) {
+    return {PermissionRepairStatus::launch_failed, ERROR_FILE_NOT_FOUND};
+  }
+  std::error_code canonical_error;
+  const auto canonical_chmod =
+      std::filesystem::weakly_canonical(*chmod_path, canonical_error);
+  if (!canonical_error && canonical_chmod.is_absolute()) {
+    chmod_path = canonical_chmod;
+  }
+
+  auto command = quote_windows_command_argument(chmod_path->wstring()) +
+                 L" 0700 " + quote_windows_command_argument(unix_sidecar);
+  std::vector<wchar_t> mutable_command(command.begin(), command.end());
+  mutable_command.push_back(L'\0');
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION process_info{};
+  if (!CreateProcessW(chmod_path->c_str(), mutable_command.data(), nullptr,
+                      nullptr, FALSE,
+                      CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, nullptr,
+                      working_directory.c_str(), &startup, &process_info)) {
     return {PermissionRepairStatus::launch_failed, GetLastError()};
   }
 
-  UniqueHandle process(execution.hProcess);
+  UniqueHandle process(process_info.hProcess);
+  UniqueHandle thread(process_info.hThread);
   constexpr DWORD permission_timeout_ms = 30'000;
   const DWORD wait = WaitForSingleObject(process.get(), permission_timeout_ms);
   if (wait == WAIT_TIMEOUT) {
