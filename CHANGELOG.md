@@ -4,83 +4,43 @@ All notable changes to Skyrim Runtime Swapper are documented in this file.
 
 ## 1.2.0 - 2026-09-01
 
-- Adds structured failure logging across launch, manual operations, Wine and
-  Proton coordination, recovery lifecycle state, and backend mutations using
-  stable names, native error categories, component-change flags, and technical
-  details already produced by the operation.
-- Reports the exact HDiffPatch I/O phase, native operating-system error,
-  failing byte range, and staged output size when handle-bound patching fails.
-- Retries Linux HDiffPatch file-data failures with the same handle-bound
-  inputs in its deterministic single-threaded mode, fixing a distribution-
-  specific staging failure observed for `Skyrim - Shaders.bsa` on ext4.
-- Reuses the installation's verified transaction storage for ContentCatalog
-  when both paths are on the same stable volume, avoiding an unrelated unsafe
-  XDG state directory without weakening cross-volume recovery checks.
-- Repairs inherited Windows permissions only when an existing SRS vault is
-  already owned exclusively by the current user and SYSTEM. Vaults accessible
-  by any additional principal remain blocked.
-- Keeps the release archive root limited to the runtime files, Proton
-  instructions, and Vortex metadata.
-- Safely retires verified v1.0.0 and v1.1.0 in-game recovery storage on the
-  first v1.2.0 launch, including fallback backups, runtime caches, staging
-  directories, completion markers, and stale transaction lock files. Unknown,
-  linked, active, or unverifiable legacy state is preserved and blocks cleanup.
-- Writes diagnostics beside the other Skyrim mod logs under
-  `Documents\My Games\Skyrim Special Edition\SKSE`. The Copy Logs action can
-  still read the former AppData log when no new-location log exists.
-
-- Added portable storage classification and automatically selected recovery
-  storage for Windows, Linux, Wine, and Proton. Trusted internal NTFS, ext4,
-  XFS, and Btrfs volumes support automatic sessions; external, removable,
-  exFAT, ntfs-3g, and uncertain local filesystems use recoverable persistent
-  downgrades when a durable independent vault is available.
-- Added a shared recovery lifecycle for automatic, persistent, interrupted, and
-  cleanup-pending transactions. Verified recovery data is removed after a
-  complete restore, while incomplete or conflicting states remain recoverable.
-- Separated the recovery vault, reusable target cache, transaction workspace,
-  and coordination lock into typed locations outside the deployed Skyrim tree.
-  Same-volume Steam-library storage is preferred when it is safe.
-- Added content-addressed recovery objects, append-only durable journals,
-  conflict preservation, stable volume identities, idempotent cleanup, and
-  fail-closed recovery after crashes or power loss.
-- Bound Windows and POSIX mutations to opened filesystem objects and verified
-  identities, closing path-exchange races between validation and commit.
-  Temporary names use secure randomness and all size arithmetic is checked.
-- Added support for safe final symlinks, reparse points, hard links, Windows
-  volume mounts, POSIX bind mounts, Bazzite home aliases, and Amethyst
-  `Data_Core` layouts without allowing writes outside the resolved installation.
-- Recognizes a byte-identical `SkyrimSELauncher.exe` copy used as an SKSE entry
-  point, records its runtime layout, and leaves the launcher alias untouched.
-- Keeps disposable patch and rollback staging in the correct rename namespace,
-  including Amethyst VFS and bind-mount layouts, while durable recovery remains
-  outside the mod-manager deployment tree.
-- Stores Creation Club originals and inventory in the Recovery Vault before
-  mutation, keeps temporary holds in the external transaction workspace, and
-  binds hashes, link layout, file identity, and volume identity. Older layouts
-  remain recoverable and migrate through the shared lifecycle.
-- Unified Windows and POSIX ContentCatalog recovery under one versioned state
-  machine while retaining both legacy formats as migration inputs.
-- Added one prepared launch operation with verified-file reuse, batched journal
-  intents, bounded directory synchronization, reflink or copy acceleration, and
-  a disposable verified target-runtime cache.
-- Added structured storage and mutation results plus failure-only diagnostics
-  for hashes, link targets, file identities, storage paths, backend decisions,
-  and recovery phase timings without adding redundant full-file hash passes.
-- Uses the same Core transaction logic through a hash-pinned native ELF sidecar
-  under Wine and Proton. Release sidecars target the Ubuntu 22.04 ABI and are
-  reverified immediately before every launch attempt. Archives preserve the
-  executable mode, while Proton can synchronously repair and verify it when a
-  mod manager strips the permission during extraction.
-- Keeps trusted volume-local Steam storage independent of an unrelated XDG
-  state directory, so a safe internal ext4 installation is not blocked by the
-  ownership or permissions of a state path that is not used by the operation.
-- Added recursive dependency-pin checks, ASan and UBSan coverage, HDiffPatch
-  adapter fuzzing, adversarial race and fault-injection tests, stable-volume CI,
-  filesystem matrices, reproducible native builds, and explicit ELF and PE
-  hardening verification.
+- Added portable storage support for Windows, Linux, Wine, and Proton. Trusted
+  internal NTFS, ext4, XFS, and Btrfs volumes use automatic sessions, while
+  external, removable, exFAT, ntfs-3g, and uncertain local filesystems can use
+  a recoverable persistent downgrade with an independent durable vault.
+- Introduced a shared crash- and power-loss-safe recovery lifecycle with
+  content-addressed backups, durable journals, conflict preservation, stable
+  volume identities, idempotent recovery, and automatic cleanup after a fully
+  verified restore.
+- Separated recovery data, reusable target cache, transaction workspace, and
+  coordination locks from the deployed Skyrim directory. Safe same-volume
+  Steam-library storage is preferred for faster switching.
+- Bound Windows and POSIX mutations to verified filesystem objects, closing
+  path-exchange races and preventing writes through unsafe links, junctions,
+  mount changes, or replaced volumes.
+- Added support for safe symlinks, hard links, reparse points, Windows volume
+  mounts, POSIX bind mounts, Bazzite home aliases, Amethyst `Data_Core` and VFS
+  layouts, and byte-identical renamed SKSE launcher entries.
+- Moved Creation Club and ContentCatalog handling into the shared recovery
+  lifecycle, including migration of older layouts and safe reuse of verified
+  transaction storage instead of unrelated XDG state paths.
+- Added a hash-pinned native Linux sidecar for Wine and Proton, built against
+  the Ubuntu 22.04 ABI and reverified before launch. Executable permissions are
+  preserved or safely repaired when a mod manager strips them.
+- Improved launch performance through verified-file reuse, batched journal and
+  directory synchronization, reflink or copy acceleration, a disposable target
+  cache, and a safe deterministic retry for FUSE-backed HDiffPatch output.
+- Added detailed failure diagnostics for storage decisions, recovery phases,
+  file identities, links, hashes, patch I/O, native errors, and timings. Logs
+  now live under `Documents\My Games\Skyrim Special Edition\SKSE`.
+- Safely retired verified v1.0.0 and v1.1.0 backups, caches, markers, and stale
+  locks on first launch while preserving active, unknown, or unverifiable state.
+- Added filesystem and fault-injection matrices, adversarial race tests,
+  ASan/UBSan coverage, HDiffPatch fuzzing, reproducible builds, dependency-pin
+  checks, and explicit ELF and PE hardening verification.
 - Release packages contain only the runtime payload, Proton Experimental
-  instructions, and Vortex metadata. The build verifies every archive and
-  writes a persistent `SHA256SUMS.txt` for all four profiles.
+  instructions, and Vortex metadata. Every archive is verified and listed in
+  `SHA256SUMS.txt`.
 
 ## 1.1.0 - 2026-08-29
 
