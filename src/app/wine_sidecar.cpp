@@ -307,6 +307,10 @@ struct PermissionRepairResult {
     return status == PermissionRepairStatus::succeeded;
   }
 
+  [[nodiscard]] bool completed() const noexcept {
+    return success() || status == PermissionRepairStatus::exit_failed;
+  }
+
   [[nodiscard]] std::wstring diagnostic() const {
     switch (status) {
       case PermissionRepairStatus::launch_failed:
@@ -344,7 +348,7 @@ struct PermissionRepairResult {
   const auto start_path = std::filesystem::path(system_directory.data()) /
                           L"start.exe";
   auto command = quote_windows_command_argument(start_path.wstring()) +
-                 L" /unix /wait /bin/chmod 0700 " +
+                 L" /wait /unix /bin/chmod 0700 " +
                  quote_windows_command_argument(unix_sidecar);
   std::vector<wchar_t> mutable_command(command.begin(), command.end());
   mutable_command.push_back(L'\0');
@@ -526,7 +530,7 @@ InstallationOperationResult run_wine_sidecar(
   if (!started) {
     permission_repair =
         repair_sidecar_permissions(*wide_sidecar, game_root);
-    if (permission_repair->success()) {
+    if (permission_repair->completed()) {
       if (!verify_sidecar(sidecar, initially_verified->identity)) {
         return error_result(
             L"native-sidecar-hash-mismatch",
