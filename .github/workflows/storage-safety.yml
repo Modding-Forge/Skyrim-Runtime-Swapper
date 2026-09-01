@@ -16,7 +16,7 @@ jobs:
     name: Recursive dependency pins
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
       - name: Verify exact HDiffPatch checkout
@@ -32,7 +32,7 @@ jobs:
         target: [1.6.1170, 1.5.97]
         profile: [bobw, boaw]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
       - name: Install filesystem test tools
@@ -66,6 +66,7 @@ jobs:
         run: >-
           sudo bash tools/tests/remove-stable-test-volume.sh
           "$RUNNER_TEMP/srs-tests" "$RUNNER_TEMP/srs-tests.loop"
+          "$RUNNER_TEMP/srs-tests.img"
 
   native-release:
     name: Ubuntu 22.04 release ${{ matrix.target }} ${{ matrix.profile }}
@@ -77,7 +78,7 @@ jobs:
         target: [1.6.1170, 1.5.97]
         profile: [bobw, boaw]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
       - name: Install pinned build tools
@@ -101,7 +102,7 @@ jobs:
           result=$?
           set -e
           test "$result" -eq 2
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: native-${{ matrix.target }}-${{ matrix.profile }}
           path: build/release/SkyrimRuntimeSwapper.Native
@@ -112,7 +113,7 @@ jobs:
     needs: supply-chain
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
       - name: Create stable ext4 test volume
@@ -180,6 +181,7 @@ jobs:
         run: >-
           sudo bash tools/tests/remove-stable-test-volume.sh
           "$RUNNER_TEMP/srs-tests" "$RUNNER_TEMP/srs-tests.loop"
+          "$RUNNER_TEMP/srs-tests.img"
 
   reproducible-linux:
     name: Reproducible native release
@@ -188,7 +190,7 @@ jobs:
     env:
       SOURCE_DATE_EPOCH: "1788202466"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
       - name: Install pinned build tools
@@ -222,10 +224,10 @@ jobs:
         target: [1.6.1170, 1.5.97]
         profile: [bobw, boaw]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: native-${{ matrix.target }}-${{ matrix.profile }}
           path: native
@@ -247,7 +249,7 @@ jobs:
             'build/windows/Release/SkyrimRuntimeSwapper.exe'
             'build/windows/Release/version.dll'
           )
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: wine-bridge-${{ matrix.target }}-${{ matrix.profile }}
           path: |
@@ -265,7 +267,7 @@ jobs:
         target: [1.6.1170, 1.5.97]
         profile: [bobw, boaw]
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: wine-bridge-${{ matrix.target }}-${{ matrix.profile }}
           path: bridge
