@@ -1,0 +1,74 @@
+= BoAW-Clean: Downgrade and Quick Auto Clean
+
+BoAW-Clean is an alternative package introduced in SRS 1.2.2 for *Skyrim 1.7.104 to 1.6.1170*.
+It combines the normal Best of All Worlds downgrade with pre-generated patches to specific cleaned master files.
+It is not available for 1.5.97 and does not clean arbitrary plugins.
+
+IMPORTANT: Install *only one* SRS package. BoAW-Clean replaces normal BoAW; it is not an add-on to install over it. Collection users should keep the variant selected by their curator.
+
+== Choose it only when your setup requires cleaned masters
+
+Normal BoAW and BoAW-Clean use the same target runtime, so both require SKSE and SKSE plugins for 1.6.1170.
+Their master-file contents differ. Use the variant expected by the mod setup; cleaning is not a universal compatibility improvement.
+
+For a new downgrade, the source files must match the supported original 1.7.104 hashes.
+Already-cleaned or otherwise modified source masters are not interchangeable with those originals.
+An existing target installation is accepted only if it exactly matches this package's target hashes and passes the recovery checks.
+
+== What the package changes
+
+BoAW-Clean manages the same nine files as xref:profiles.adoc#best-of-all-worlds[normal BoAW for 1.6.1170], plus Beafarmer when present.
+These files use cleaned targets:
+
+[cols="2,3",options="header"]
+|===
+|File |Target
+|`Data/Update.esm` |Cleaned 1.6.1170 master
+|`Data/Dawnguard.esm` |Cleaned 1.6.1170 master
+|`Data/HearthFires.esm` |Cleaned 1.6.1170 master
+|`Data/Dragonborn.esm` |Cleaned 1.6.1170 master
+|`Data/ccvsvsse004-beafarmer.esl` |Cleaned supported original, only when present
+|===
+
+`Skyrim.esm` is downgraded as in normal BoAW but is *not cleaned*.
+The other normal BoAW files retain their normal targets. Beafarmer's BSA is not modified.
+
+[#optional-beafarmer]
+== Optional Beafarmer
+
+* If `ccvsvsse004-beafarmer.esl` is absent when the transaction is selected, SRS skips it. It is not downloaded or installed.
+* If present, it must match the supported original or exact target hash. Unknown cleaned variants are rejected.
+* The selection is recorded for recovery. Do not add, remove, clean or redeploy the file while an SRS transaction is active.
+* When SRS switches the original file, restoring the source runtime also restores that exact original content.
+
+The supported original Beafarmer copy was supplied from an installation, not authenticated as a 1.6.1170 Steam depot file.
+Its exact source and target hashes are recorded in the package manifest. A filename or a claim that a file is "cleaned" is not enough to establish compatibility.
+
+== Cleaning method and verification
+
+The target files were generated with *SSEEdit 4.1.5f x64 Quick Auto Clean*, in this order: Update, Dawnguard, HearthFires, Dragonborn, then Beafarmer.
+Two independent cleaning runs produced byte-identical output hashes. No additional manual cleaning is included.
+
+SSEEdit is *not required on the user's machine*. SRS applies pre-generated binary patches, verifies their output and keeps recovery data; it does not run SSEEdit at launch.
+The cleaning provenance, tool identity, source/target hashes and optional-file metadata are included in `RuntimeSwap/manifest.json`.
+The archive contains forward and reverse patches, not complete Bethesda game files.
+
+== Switching from normal BoAW or a test package
+
+. Close Skyrim and let its SRS watcher finish.
+. With the existing package still installed, restore the original 1.7.104 state if SRS has an active automatic or persistent downgrade.
+. Disable or remove the old package through the manager, then install and deploy only BoAW-Clean.
+. Check that all SRS root files come from the same archive and launch through SKSE.
+
+Do not replace the package while it still owns an active recovery transaction: different variants have different patch plans and cannot be mixed.
+If restoration is blocked, preserve the recovery data and follow xref:troubleshooting.adoc#inconsistent-recovery[the recovery-state guidance] before changing anything.
+
+Automatic mode restores the source files after the game closes. Persistent mode keeps the cleaned target active until a manual restore.
+An already-installed verified target that SRS did not switch is not automatically reverted.
+
+== Why is this package larger?
+
+The cleaned targets need different binary differences from the original 1.7.104 files, in both directions.
+Changes to record layout and compressed data can make those differences much larger than normal BoAW patches.
+The patches are already compressed, so wrapping them in 7z only provides a limited further reduction.
+The larger archive does not mean it contains full master files.

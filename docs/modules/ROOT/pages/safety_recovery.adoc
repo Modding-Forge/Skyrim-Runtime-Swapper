@@ -42,6 +42,12 @@ Linux example:
 For an external or uncertain game target, recovery storage is selected on another durable internal volume.
 Windows uses Local AppData when appropriate; Linux uses `$XDG_STATE_HOME` or `$HOME/.local/state` when appropriate.
 
+On Linux, version 1.2.2 also uses validated private user-state storage for fresh installations whose group-writable Steam-library hierarchy cannot safely host SRS state.
+The base is normally `$XDG_STATE_HOME/modding-forge/skyrim-runtime-swapper` or `$HOME/.local/state/modding-forge/skyrim-runtime-swapper`.
+An existing transaction pins its storage choice; SRS does not silently relocate unsafe or conflicting state. See xref:linux.adoc#private-state[Shared-library permissions].
+
+Always use the paths from the current log, not these examples or another user's installation ID.
+
 The user cannot select or override the vault path.
 
 == Before the first live change
@@ -80,6 +86,22 @@ If the unknown content cannot be secured and verified, replacement is refused.
 
 The same rule applies when restoring a source file over content created after the transaction began.
 
+[#conflict-archive]
+=== Conflict archives
+
+From version 1.2.2, preserved conflicts can be copied into `conflict-archive` beside the active vault before that vault is retired:
+
+....
+recovery/<installation-id>/
+|-- active/
+`-- conflict-archive/
+....
+
+SRS verifies and durably preserves the conflict files and associated recovery metadata before removing their active copies.
+Cleanup is blocked if that preservation fails.
+The archive is retained so potentially valuable user content is not lost, even after the managed source files have been restored.
+Use the logged archive location when asking support to inspect these files; do not treat them as disposable cache.
+
 == Interruption and power loss
 
 The append-only journal records durable transaction boundaries with sequence numbers, record lengths, and CRCs.
@@ -102,6 +124,7 @@ A content-only watcher must not be mistaken for a scheduled upgrade to Skyrim 1.
 After the complete source state and layout are verified, SRS:
 
 . records the verified source state;
+. archives preserved conflicts when present;
 . removes active markers and locators;
 . deletes ephemeral recovery data safely;
 . removes empty legacy in-game transaction metadata; and

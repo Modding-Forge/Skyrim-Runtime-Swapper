@@ -39,6 +39,25 @@ Choose Best of All Worlds when regular plugins and SKSE plugins both expect the 
 
 See xref:profiles.adoc[] for the exact managed files.
 
+== What is BoAW-Clean, and do I need SSEEdit?
+
+BoAW-Clean is the alternative 1.6.1170 package for setups requiring the documented cleaned masters.
+It applies pre-generated, verified patches; users do not need to install or run SSEEdit.
+It is not an add-on and must not be installed alongside normal BoAW.
+See xref:boaw_clean.adoc[] for inputs, cleaning method and restoration.
+
+== Is Beafarmer required for BoAW-Clean?
+
+No. If absent when the transaction is selected, `ccvsvsse004-beafarmer.esl` is skipped and is not installed.
+If selected, its exact supported content and recovery records are required; do not remove it during an active transaction.
+A separately cleaned copy is accepted only if it matches the package's exact target hash.
+
+== Can I switch directly between normal BoAW and BoAW-Clean?
+
+Not while SRS has an active downgrade or recovery transaction.
+Restore with the existing package first, then replace it with the other variant and deploy only one package.
+If recovery is blocked, preserve its data and collect logs before changing packages.
+
 == Does SKSE need to match the target runtime?
 
 Yes.
@@ -100,6 +119,7 @@ Ephemeral recovery data is removed after a complete verified automatic restore.
 A persistent vault remains until the complete manual restore is verified.
 
 The disposable target cache can remain to make later starts faster.
+Preserved user conflicts can also remain in a separate xref:safety_recovery.adoc#conflict-archive[conflict archive]; they are not disposable cache.
 
 == What happens after a power loss?
 

@@ -318,6 +318,10 @@ void log_operation_result(const std::wstring& operation,
     log_diagnostic(L"Operation failure detail: operation=" + operation + L"; " +
                    result.technical_detail);
   }
+  if (result.success() && !result.technical_detail.empty()) {
+    log_diagnostic(L"Operation detail: operation=" + operation + L"; " +
+                   result.technical_detail);
+  }
 }
 
 int finish(ExitCode code, const std::wstring& message, UINT icon, bool quiet) {

@@ -279,9 +279,10 @@ struct FileIdentity {
 
 [[nodiscard]] UniqueHandle open_plain_directory(
     const std::filesystem::path& path) {
+  // Renames/deletions use DELETE on the individual file handles. Do not
+  // require FILE_DELETE_CHILD, which normal directory Modify rights omit.
   UniqueHandle handle(CreateFileW(
-      path.c_str(), FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_DELETE_CHILD |
-                        FILE_READ_ATTRIBUTES,
+      path.c_str(), FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_READ_ATTRIBUTES,
       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
       OPEN_EXISTING,
       FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));

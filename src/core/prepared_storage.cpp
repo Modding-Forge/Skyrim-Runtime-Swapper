@@ -317,8 +317,8 @@ BackendProbeResult probe_prepared_storage(
   }
   auto& context = *active_context;
   auto& implementation = *context.implementation_;
-  if (required_vault_bytes <= implementation.reserved_bytes &&
-      (!prepare_vault || implementation.vault_prepared)) {
+  if (implementation.vault_prepared &&
+      required_vault_bytes <= implementation.reserved_bytes) {
     return context.backend;
   }
   auto refreshed = transaction_backend().probe(game_root, required_vault_bytes,
@@ -346,6 +346,23 @@ BackendProbeResult probe_prepared_storage(
         L"storage operation. No further file operation is allowed.";
     return refreshed;
   }
+  if (!implementation.vault_prepared && prepare_vault) {
+    std::vector<std::shared_ptr<NativeHandle>> handles;
+    for (const auto& directory : {normalized(game_root), normalized(refreshed.vault_path)}) {
+      auto handle = open_native(directory, true);
+      if (!handle) {
+        refreshed.code = ExitCode::unsupported_filesystem;
+        refreshed.mode = SafetyMode::hard_blocked;
+        refreshed.allowed_operations = StorageOperation::none;
+        refreshed.technical_reason = L"prepared-storage-reopen-failed";
+        refreshed.message = L"The newly prepared storage directory could not be held safely: " +
+                            directory.wstring();
+        return refreshed;
+      }
+      handles.push_back(std::move(handle));
+    }
+    implementation.directory_handles = std::move(handles);
+  }
   {
     context.backend = refreshed;
     implementation.reserved_bytes =
@@ -353,6 +370,16 @@ BackendProbeResult probe_prepared_storage(
     implementation.vault_prepared = implementation.vault_prepared || prepare_vault;
   }
   return refreshed;
+}
+
+void invalidate_prepared_storage(const std::filesystem::path& game_root) {
+  if (active_context == nullptr || !same_root(active_context->game_root, game_root)) return;
+  auto& implementation = *active_context->implementation_;
+  implementation.vault_prepared = false;
+  implementation.reserved_bytes = 0;
+  implementation.directory_handles.clear();
+  implementation.verified_files.clear();
+  ++implementation.metrics.invalidations;
 }
 
 }  // namespace runtime_swapper

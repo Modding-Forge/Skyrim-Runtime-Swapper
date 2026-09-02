@@ -18,6 +18,7 @@ struct PatchPlanEntry {
   std::string_view reverse_patch;
   std::string_view forward_patch_sha256;
   std::string_view reverse_patch_sha256;
+  bool optional_if_missing{};
 };
 
 inline constexpr std::array patch_plan{

@@ -829,6 +829,7 @@ bool target_runtime_is_active_internal(
     const std::filesystem::path& game_root) noexcept {
   try {
     const auto runtime_layout = detect_runtime_layout(game_root);
+    if (runtime_layout == RuntimeLayout::invalid) return false;
     for (const auto& plan : patch_plan) {
       if (!patch_plan_entry_enabled(runtime_layout, plan)) continue;
       const auto managed = resolve_managed_file(
@@ -849,6 +850,7 @@ bool source_runtime_is_active_internal(
     const std::filesystem::path& game_root) noexcept {
   try {
     const auto runtime_layout = detect_runtime_layout(game_root);
+    if (runtime_layout == RuntimeLayout::invalid) return false;
     for (const auto& plan : patch_plan) {
       if (!patch_plan_entry_enabled(runtime_layout, plan)) continue;
       const auto managed = resolve_managed_file(

@@ -2,6 +2,7 @@
 
 #include <runtime_swapper/recovery_vault.hpp>
 #include <runtime_swapper/sha256.hpp>
+#include <runtime_swapper/release_version.hpp>
 
 #include <windows.h>
 #include <aclapi.h>
@@ -137,7 +138,9 @@ int run_tests() {
       vault->probe.installation_id +
       "\nsource=test-source\ntarget=test-target\ntargetVolume=" +
       utf8_path(vault->probe.target_volume.stable_id) + "\nvaultVolume=" +
-      utf8_path(vault->probe.vault_volume.stable_id) + "\nentries=0\n";
+      utf8_path(vault->probe.vault_volume.stable_id) +
+      "\npatchPlanHash=" + std::string(patch_plan_hash_utf8) +
+      "\noptionalBeafarmer=absent\nentries=0\n";
   write_file(vault->manifest, identity_manifest);
   write_file(locator, "torn-locator");
   const auto recoverable_locator_probe =
@@ -171,7 +174,11 @@ int run_tests() {
   }
   legacy_manifest.erase(metadata_begin, entries_begin - metadata_begin);
   write_file(vault->manifest, legacy_manifest);
-  if (!runtime_manifest_matches(*vault)) return 34;
+  const bool supports_legacy_manifest = vault->runtime_layout == RuntimeLayout::standard;
+  if (runtime_manifest_matches(*vault) != supports_legacy_manifest) return 34;
+  // Optional-file selection did not exist in legacy manifests. Clean profiles
+  // must reject that incomplete state, then continue with the valid fixture.
+  write_file(vault->manifest, compatible_manifest);
   const auto original = temporary.path() / L"original.bin";
   write_file(original, "original");
   const auto hash = sha256_file(original);
@@ -273,6 +280,32 @@ int run_tests() {
                                                               conflict_hash->end()))) {
     return 4;
   }
+
+  // Archiving is retryable, preserves the active copy until finalization, and
+  // must not replace an existing archive whose contents no longer match.
+  auto archive_vault = *vault;
+  archive_vault.probe.vault_path = temporary.path() / L"archive-test" / L"active";
+  std::filesystem::create_directories(archive_vault.probe.vault_path.parent_path());
+  std::filesystem::path archived;
+  if (!archive_conflicts(archive_vault, archived) || archived.empty()) return 41;
+  const auto saved_conflict = archived / L"files" / L"conflict-test" /
+      std::filesystem::path(conflict_hash->begin(), conflict_hash->end());
+  if (read_file(saved_conflict) != "unknown-user-content" ||
+      !archive_conflicts(archive_vault, archived) ||
+      !std::filesystem::exists(vault->conflicts / L"conflict-test" /
+          std::filesystem::path(conflict_hash->begin(), conflict_hash->end()))) {
+    return 42;
+  }
+  write_file(saved_conflict, "keep-this-conflicting-archive");
+  if (archive_conflicts(archive_vault, archived) ||
+      read_file(saved_conflict) != "keep-this-conflicting-archive") return 43;
+  write_file(saved_conflict, "unknown-user-content");
+  const auto unsafe_entry = vault->conflicts / L"unexpected-file";
+  write_file(unsafe_entry, "do-not-discard");
+  if (archive_conflicts(archive_vault, archived) ||
+      read_file(unsafe_entry) != "do-not-discard") return 44;
+  if (!transaction_backend().durable_remove(unsafe_entry) ||
+      !archive_conflicts(archive_vault, archived)) return 45;
 
   std::error_code error;
   const auto object = vault->objects /
@@ -410,15 +443,18 @@ int run_tests() {
   write_file(launcher, "copied-skse-loader");
   write_file(loader, "copied-skse-loader");
   if (commit_verified_runtime_manifest(*vault, temporary.path())) return 35;
+  const auto expected_alias = vault->runtime_layout == RuntimeLayout::without_beafarmer
+      ? RuntimeLayout::skse_launcher_alias_without_beafarmer
+      : RuntimeLayout::skse_launcher_alias;
   const auto alias_vault = resolve_vault_layout(temporary.path());
   if (!alias_vault ||
-      alias_vault->runtime_layout != RuntimeLayout::skse_launcher_alias ||
+      alias_vault->runtime_layout != expected_alias ||
       !commit_verified_runtime_manifest(*alias_vault, temporary.path()) ||
       !runtime_manifest_matches(*alias_vault)) {
     return 36;
   }
   const auto alias_manifest = read_file(alias_vault->manifest);
-  if (alias_manifest.find("runtimeLayout=skse-launcher-alias\n") ==
+  if (alias_manifest.find("runtimeLayout=" + std::string(runtime_layout_name(expected_alias)) + "\n") ==
           std::string::npos ||
       alias_manifest.find("SkyrimSELauncher.exe|") != std::string::npos) {
     return 37;

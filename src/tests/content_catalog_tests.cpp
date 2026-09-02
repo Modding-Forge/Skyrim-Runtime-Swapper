@@ -2,6 +2,7 @@
 #include "test_paths.hpp"
 
 #include <runtime_swapper/sha256.hpp>
+#include <runtime_swapper/runtime_layout.hpp>
 #include <runtime_swapper/transaction_backend.hpp>
 
 #if defined(_WIN32)
@@ -150,6 +151,9 @@ int run_tests() {
   const auto catalog = environment.catalog();
 
   const auto game_root = environment.game_root();
+  // Probe a real installation directory. In particular, the Steam-library
+  // ownership check cannot classify a library that the fixture has not created.
+  std::filesystem::create_directories(game_root);
 #if !defined(_WIN32)
   const auto uncontrolled_state = catalog.parent_path() / "uncontrolled-state";
   std::filesystem::create_directories(uncontrolled_state);
@@ -166,6 +170,9 @@ int run_tests() {
       !installation_probe.success() || !shared_catalog_probe.success() ||
       shared_catalog_probe.transaction_work.value !=
           installation_probe.transaction_work.value) {
+    std::wcerr << L"Storage probes: direct=" << direct_catalog_probe.technical_reason
+               << L", installation=" << installation_probe.technical_reason
+               << L", shared=" << shared_catalog_probe.technical_reason << L'\n';
     return 14;
   }
 #endif
@@ -176,11 +183,13 @@ int run_tests() {
   const auto legacy_recovery = recover_content_catalog(game_root);
   if (!legacy_recovery.success || !legacy_recovery.changed ||
       read_file(catalog) != "catalog-v1" || std::filesystem::exists(legacy)) {
+    std::wstring layout_error;
+    (void)runtime_swapper::detect_runtime_layout(game_root, &layout_error);
     std::wcerr << L"Legacy recovery failed: success=" << legacy_recovery.success
                << L", changed=" << legacy_recovery.changed << L", message="
                << legacy_recovery.message << L", catalog=" << catalog.wstring()
                << L", legacy-exists=" << std::filesystem::exists(legacy)
-               << L'\n';
+               << L", layout-error=" << layout_error << L'\n';
     return 1;
   }
   const auto legacy_conflict_hash =

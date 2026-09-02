@@ -69,26 +69,86 @@ std::wstring session_complete_event_name() { return operation_mutex_name() + L"-
 
 UniqueHandle acquire_transaction_lock(const CoordinationLockPath& resolved_lock) {
   const auto& lock_path = resolved_lock.value;
-  if (lock_path.empty() || !lock_path.is_absolute() ||
-      !managed_path_is_safe(lock_path.parent_path())) {
+  const auto report_failure = [&](std::wstring_view stage, const std::error_code& error,
+                                  std::wstring_view detail) {
+    std::wstring line = L"Transaction lock failure: stage=" + std::wstring(stage) +
+                        L"; path=" + quote_display_path(lock_path) +
+                        L"; process-id=" + std::to_wstring(GetCurrentProcessId());
+    if (error) {
+      const std::string category = error.category().name();
+      line += L"; error-category=" + std::wstring(category.begin(), category.end()) +
+              L"; error-code=" + std::to_wstring(error.value());
+      if (error.category() == std::system_category()) {
+        wchar_t message[2048]{};
+        const DWORD size = FormatMessageW(
+            FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr,
+            static_cast<DWORD>(error.value()), 0, message,
+            static_cast<DWORD>(std::size(message)), nullptr);
+        if (size != 0) {
+          std::wstring description(message, size);
+          while (!description.empty() &&
+                 (description.back() == L'\r' || description.back() == L'\n')) {
+            description.pop_back();
+          }
+          line += L"; error-message=" + description;
+        }
+      }
+    } else {
+      line += L"; native-error=not-reported";
+    }
+    line += L"; detail=" + std::wstring(detail);
+    log_diagnostic(line);
+  };
+  const auto report_windows_failure = [&](std::wstring_view stage, DWORD error) {
+    report_failure(stage, std::error_code(static_cast<int>(error), std::system_category()),
+                   L"Windows API call failed.");
+  };
+  if (lock_path.empty() || !lock_path.is_absolute()) {
+    report_failure(L"validate-path", {}, L"The lock path is empty or not absolute.");
     return {};
   }
-  if (!transaction_backend().prepare_coordination_lock(resolved_lock) ||
-      !managed_path_is_safe(lock_path.parent_path())) {
+  if (!managed_path_is_safe(lock_path.parent_path())) {
+    report_failure(L"validate-parent-before-prepare", {},
+                   L"The lock parent failed the managed-path safety check.");
+    return {};
+  }
+  const auto prepared = transaction_backend().prepare_coordination_lock(resolved_lock);
+  if (!prepared) {
+    report_failure(L"prepare-directory", prepared.error, prepared.detail);
+    return {};
+  }
+  if (!managed_path_is_safe(lock_path.parent_path())) {
+    report_failure(L"validate-parent-after-prepare", {},
+                   L"The lock parent failed the managed-path safety check after preparation.");
     return {};
   }
   UniqueHandle lock(CreateFileW(
       lock_path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_ALWAYS,
       FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_WRITE_THROUGH | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
-  if (!lock) return {};
+  if (!lock) {
+    const DWORD error = GetLastError();
+    report_windows_failure(L"CreateFileW-exclusive-open", error);
+    return {};
+  }
   FILE_ATTRIBUTE_TAG_INFO attributes{};
   FILE_STANDARD_INFO standard{};
   if (!GetFileInformationByHandleEx(lock.get(), FileAttributeTagInfo, &attributes,
-                                    sizeof(attributes)) ||
-      !GetFileInformationByHandleEx(lock.get(), FileStandardInfo, &standard, sizeof(standard)) ||
-      (attributes.FileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) !=
-          0 ||
-      standard.NumberOfLinks != 1) {
+                                    sizeof(attributes))) {
+    const DWORD error = GetLastError();
+    report_windows_failure(L"GetFileInformationByHandleEx-FileAttributeTagInfo", error);
+    return {};
+  }
+  if (!GetFileInformationByHandleEx(lock.get(), FileStandardInfo, &standard, sizeof(standard))) {
+    const DWORD error = GetLastError();
+    report_windows_failure(L"GetFileInformationByHandleEx-FileStandardInfo", error);
+    return {};
+  }
+  if ((attributes.FileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) !=
+          0 || standard.NumberOfLinks != 1) {
+    report_failure(L"validate-lock-file", {},
+                   L"The lock must be a regular, non-redirected file with one hard link; attributes=" +
+                       std::to_wstring(attributes.FileAttributes) + L"; links=" +
+                       std::to_wstring(standard.NumberOfLinks));
     return {};
   }
   return lock;

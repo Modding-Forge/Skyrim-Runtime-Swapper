@@ -1,7 +1,9 @@
 #include <runtime_swapper/file_identity.hpp>
 #include <runtime_swapper/patch_plan.hpp>
 #include <runtime_swapper/runtime_layout.hpp>
+#include "test_paths.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -14,7 +16,7 @@ class TemporaryDirectory {
  public:
   TemporaryDirectory() {
     const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
-    path_ = std::filesystem::temp_directory_path() /
+    path_ = runtime_swapper::tests::test_root() /
             ("srs-runtime-layout-" + std::to_string(unique));
     std::filesystem::create_directories(path_);
   }
@@ -40,11 +42,18 @@ void write_file(const std::filesystem::path& path, std::string_view contents) {
 int main() {
   using namespace runtime_swapper;
 
+  const bool optional = std::ranges::any_of(patch_plan, [](const auto& entry) {
+    return entry.optional_if_missing;
+  });
+  const auto standard = optional ? RuntimeLayout::without_beafarmer : RuntimeLayout::standard;
+  const auto alias = optional ? RuntimeLayout::skse_launcher_alias_without_beafarmer
+                              : RuntimeLayout::skse_launcher_alias;
+
   TemporaryDirectory temporary;
   const auto launcher = temporary.path() / "SkyrimSELauncher.exe";
   const auto loader = temporary.path() / "skse64_loader.exe";
 
-  if (detect_runtime_layout(temporary.path()) != RuntimeLayout::standard) return 1;
+  if (detect_runtime_layout(temporary.path()) != standard) return 1;
 
   write_file(launcher, "bethesda");
   write_file(loader, "not-skse");
@@ -52,18 +61,18 @@ int main() {
   if (is_skse_loader_entry_image(launcher)) return 13;
   if (!is_skse_loader_entry_image(loader)) return 14;
   if (is_skse_loader_entry_image(temporary.path() / "renamed-loader.exe")) return 15;
-  if (detect_runtime_layout(temporary.path()) != RuntimeLayout::standard) return 3;
+  if (detect_runtime_layout(temporary.path()) != standard) return 3;
 
   write_file(launcher, "skse-loader");
   write_file(loader, "skse-loader");
   if (!files_have_identical_content(launcher, loader)) return 4;
   if (!is_skse_loader_entry_image(launcher)) return 16;
   if (detect_runtime_layout(temporary.path()) !=
-      RuntimeLayout::skse_launcher_alias) {
+      alias) {
     return 5;
   }
   if (!runtime_layout_matches(temporary.path(),
-                              RuntimeLayout::skse_launcher_alias)) {
+                              alias)) {
     return 6;
   }
 
@@ -75,15 +84,14 @@ int main() {
     if (patch_plan_entry_enabled(RuntimeLayout::skse_launcher_alias, entry)) return 8;
   }
   if (launcher_entries != 1) return 9;
-  if (active_patch_plan_size(RuntimeLayout::standard) != patch_plan.size()) return 10;
-  if (active_patch_plan_size(RuntimeLayout::skse_launcher_alias) + 1 !=
-      patch_plan.size()) {
+  if (active_patch_plan_size(standard) + (optional ? 1U : 0U) != patch_plan.size()) return 10;
+  if (active_patch_plan_size(alias) + 1 != active_patch_plan_size(standard)) {
     return 11;
   }
 
   write_file(launcher, "changed-loader");
   if (runtime_layout_matches(temporary.path(),
-                             RuntimeLayout::skse_launcher_alias)) {
+                             alias)) {
     return 12;
   }
 
@@ -103,7 +111,7 @@ int main() {
   write_file(launcher, "deployed-skse-loader");
   if (!is_skse_loader_entry_image(launcher) ||
       detect_runtime_layout(temporary.path()) !=
-          RuntimeLayout::skse_launcher_alias) {
+          alias) {
     std::filesystem::remove(deployed_loader, error);
     return 18;
   }

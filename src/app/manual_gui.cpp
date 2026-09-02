@@ -68,6 +68,7 @@ class ManualOperationLock {
 };
 
 [[nodiscard]] std::wstring profile_name() {
+  if (build_profile_label == "boaw-clean") return L"Best of All Worlds + Clean";
   return build_profile_label == "boaw" ? L"Best of All Worlds"
                                        : L"Best of Both Worlds";
 }

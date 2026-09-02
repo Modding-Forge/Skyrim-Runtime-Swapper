@@ -98,21 +98,24 @@ using UniqueHandle = std::unique_ptr<void, HandleCloser>;
 }
 
 [[nodiscard]] bool owner_is_current_user(const std::filesystem::path& directory,
-                                         PSID current_sid) {
+                                         PSID current_sid, DWORD* native_error = nullptr) {
   PSID owner{};
   PSECURITY_DESCRIPTOR descriptor{};
   const DWORD status = GetNamedSecurityInfoW(
       const_cast<wchar_t*>(directory.c_str()), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION,
       &owner, nullptr, nullptr, nullptr, &descriptor);
   std::unique_ptr<void, LocalFreeDeleter> guard(descriptor);
+  if (native_error) *native_error = status;
   return status == ERROR_SUCCESS && owner != nullptr && EqualSid(owner, current_sid) != FALSE;
 }
 
 [[nodiscard]] bool restrict_directory_acl(const std::filesystem::path& directory,
-                                          PSID current_sid) {
+                                          PSID current_sid, DWORD* native_error = nullptr) {
+  if (native_error) *native_error = ERROR_SUCCESS;
   std::array<std::byte, SECURITY_MAX_SID_SIZE> system_storage{};
   DWORD system_size = static_cast<DWORD>(system_storage.size());
   if (!CreateWellKnownSid(WinLocalSystemSid, nullptr, system_storage.data(), &system_size)) {
+    if (native_error) *native_error = GetLastError();
     return false;
   }
 
@@ -127,21 +130,26 @@ using UniqueHandle = std::unique_ptr<void, HandleCloser>;
     access[index].Trustee.ptstrName = static_cast<LPWSTR>(trustees[index]);
   }
   PACL raw_acl{};
-  if (SetEntriesInAclW(static_cast<ULONG>(access.size()), access.data(), nullptr, &raw_acl) !=
-      ERROR_SUCCESS) {
+  const DWORD acl_status =
+      SetEntriesInAclW(static_cast<ULONG>(access.size()), access.data(), nullptr, &raw_acl);
+  if (acl_status != ERROR_SUCCESS) {
+    if (native_error) *native_error = acl_status;
     return false;
   }
   std::unique_ptr<void, LocalFreeDeleter> acl(raw_acl);
-  return SetNamedSecurityInfoW(
+  // Callers verify ownership first. Updating permissions must not request
+  // WRITE_OWNER merely to assign the existing owner again.
+  const DWORD status = SetNamedSecurityInfoW(
              const_cast<wchar_t*>(directory.c_str()), SE_FILE_OBJECT,
-             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION |
-                 PROTECTED_DACL_SECURITY_INFORMATION,
-             current_sid, nullptr, raw_acl, nullptr) == ERROR_SUCCESS;
+             DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+             nullptr, nullptr, raw_acl, nullptr);
+  if (native_error) *native_error = status;
+  return status == ERROR_SUCCESS;
 }
 
 [[nodiscard]] bool directory_dacl_allows_only_user_and_system(
     const std::filesystem::path& directory, PSID current_sid,
-    bool require_protected, bool allow_denied) {
+    bool require_protected, bool allow_denied, DWORD* native_error = nullptr) {
   PSID owner{};
   PACL dacl{};
   PSECURITY_DESCRIPTOR descriptor{};
@@ -150,6 +158,7 @@ using UniqueHandle = std::unique_ptr<void, HandleCloser>;
       OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, nullptr,
       &dacl, nullptr, &descriptor);
   std::unique_ptr<void, LocalFreeDeleter> guard(descriptor);
+  if (native_error) *native_error = status;
   if (status != ERROR_SUCCESS || owner == nullptr || dacl == nullptr ||
       EqualSid(owner, current_sid) == FALSE) {
     return false;
@@ -157,23 +166,28 @@ using UniqueHandle = std::unique_ptr<void, HandleCloser>;
   if (require_protected) {
     SECURITY_DESCRIPTOR_CONTROL control{};
     DWORD revision{};
-    if (!GetSecurityDescriptorControl(descriptor, &control, &revision) ||
-        (control & SE_DACL_PROTECTED) == 0) {
+    if (!GetSecurityDescriptorControl(descriptor, &control, &revision)) {
+      if (native_error) *native_error = GetLastError();
       return false;
     }
+    if ((control & SE_DACL_PROTECTED) == 0) return false;
   }
 
   std::array<std::byte, SECURITY_MAX_SID_SIZE> system_storage{};
   DWORD system_size = static_cast<DWORD>(system_storage.size());
   if (!CreateWellKnownSid(WinLocalSystemSid, nullptr, system_storage.data(),
                           &system_size)) {
+    if (native_error) *native_error = GetLastError();
     return false;
   }
   bool user_allowed = false;
   bool system_allowed = false;
   for (DWORD index = 0; index < dacl->AceCount; ++index) {
     void* raw_ace{};
-    if (!GetAce(dacl, index, &raw_ace)) return false;
+    if (!GetAce(dacl, index, &raw_ace)) {
+      if (native_error) *native_error = GetLastError();
+      return false;
+    }
     const auto* header = static_cast<const ACE_HEADER*>(raw_ace);
     if (allow_denied && header->AceType == ACCESS_DENIED_ACE_TYPE) continue;
     if (header->AceType != ACCESS_ALLOWED_ACE_TYPE) return false;
@@ -191,9 +205,9 @@ using UniqueHandle = std::unique_ptr<void, HandleCloser>;
 }
 
 [[nodiscard]] bool directory_dacl_is_restricted(
-    const std::filesystem::path& directory, PSID current_sid) {
+    const std::filesystem::path& directory, PSID current_sid, DWORD* native_error = nullptr) {
   return directory_dacl_allows_only_user_and_system(directory, current_sid,
-                                                    true, true);
+                                                    true, true, native_error);
 }
 
 [[nodiscard]] bool directory_dacl_is_exclusive(
@@ -621,8 +635,8 @@ BackendProbeResult probe_windows_storage(
                      L"The automatic recovery vault could not be created safely.", *target,
                      {}, vault_path, *id);
     }
-    if (!current_sid || !restrict_directory_acl(vault_path, current_sid) ||
-        !owner_is_current_user(vault_path, current_sid) ||
+    if (!current_sid || !owner_is_current_user(vault_path, current_sid) ||
+        !restrict_directory_acl(vault_path, current_sid) ||
         !directory_dacl_is_restricted(vault_path, current_sid)) {
       return blocked(L"vault-owner-or-dacl",
                      L"The recovery vault is not exclusively controlled by the current "
@@ -691,22 +705,45 @@ MutationResult prepare_windows_coordination_lock(
     }
     std::error_code error;
     std::filesystem::create_directories(lock_directory, error);
+    if (error) {
+      return MutationResult::failure(
+          MutationStep::validate, MutationState::untouched, error,
+          L"Could not create the coordination-lock directory: " + lock_directory.wstring());
+    }
     const auto sid = current_user_sid();
+    const DWORD sid_error = sid ? ERROR_SUCCESS : GetLastError();
     auto* current_sid =
         sid ? static_cast<PSID>(const_cast<std::byte*>(sid->data())) : nullptr;
-    if (error || !current_sid ||
-        !managed_path_is_safe(lock_directory) ||
-        !owner_is_current_user(storage_root, current_sid) ||
-        !owner_is_current_user(lock_directory, current_sid) ||
-        !restrict_directory_acl(storage_root, current_sid) ||
-        !restrict_directory_acl(lock_directory, current_sid) ||
-        !directory_dacl_is_restricted(storage_root, current_sid) ||
-        !directory_dacl_is_restricted(lock_directory, current_sid)) {
+    const auto failed = [](DWORD status, std::wstring detail) {
       return MutationResult::failure(
           MutationStep::validate, MutationState::untouched,
-          std::error_code(static_cast<int>(GetLastError()),
-                          std::system_category()),
-          L"The coordination-lock hierarchy is not private and safe.");
+          std::error_code(static_cast<int>(status), std::system_category()), std::move(detail));
+    };
+    if (!current_sid) {
+      return failed(sid_error, L"Could not determine the current user's SID.");
+    }
+    if (!managed_path_is_safe(lock_directory)) {
+      return failed(ERROR_SUCCESS, L"The coordination-lock directory failed the managed-path "
+                                   L"safety check: " + lock_directory.wstring());
+    }
+    DWORD native_error{};
+    for (const auto& directory : {storage_root, lock_directory}) {
+      if (!owner_is_current_user(directory, current_sid, &native_error)) {
+        return failed(native_error, L"Could not verify current-user ownership: " +
+                                        directory.wstring());
+      }
+    }
+    for (const auto& directory : {storage_root, lock_directory}) {
+      if (!restrict_directory_acl(directory, current_sid, &native_error)) {
+        return failed(native_error, L"Could not restrict directory permissions: " +
+                                        directory.wstring());
+      }
+    }
+    for (const auto& directory : {storage_root, lock_directory}) {
+      if (!directory_dacl_is_restricted(directory, current_sid, &native_error)) {
+        return failed(native_error, L"Directory permissions failed the privacy check: " +
+                                        directory.wstring());
+      }
     }
     return MutationResult::success(MutationState::fully_durable);
   }

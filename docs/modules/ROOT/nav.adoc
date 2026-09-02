@@ -1,6 +1,7 @@
 * xref:index.adoc[]
 * xref:quick_start.adoc[]
 * xref:profiles.adoc[]
+* xref:boaw_clean.adoc[]
 * xref:installation.adoc[]
 * xref:storage_modes.adoc[]
 * xref:manual_control.adoc[]

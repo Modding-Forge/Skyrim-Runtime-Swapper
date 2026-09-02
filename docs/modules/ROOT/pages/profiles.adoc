@@ -1,11 +1,12 @@
-= Choosing Best of Both Worlds or Best of All Worlds
+= Choosing a Package
 
-Every target runtime is available in two profiles.
+Both target runtimes offer Best of Both Worlds and Best of All Worlds.
+SRS 1.2.2 adds an alternative BoAW-Clean package for 1.6.1170, making five packages in total.
 The correct choice depends on which game data your regular plugins expect.
 
 NOTE: In a Collection, this choice is already made by the author and installed by the mod manager. Do not switch profiles independently. The selection advice below is for Collection authors and users assembling their own setup.
 
-.The four package choices on Nexus Mods: two profiles for each supported target runtime. Install only one package.
+.Earlier package-selection example showing the four standard variants; the additional BoAW-Clean variant is described below. Install only one package.
 image::nexus-package-selection.png[Nexus Mods main files showing Best of All Worlds and Best of Both Worlds packages for Skyrim 1.5.97 and 1.6.1170]
 
 == Best of Both Worlds
@@ -33,6 +34,7 @@ Choose it when:
 
 NOTE: The 1.5.97 executable runtime uses the proven 1.6.1170 AE-compatible runtime-facing data baseline where appropriate.
 
+[#best-of-all-worlds]
 == Best of All Worlds
 
 Best of All Worlds switches the executable runtime and important version-dependent game data.
@@ -51,6 +53,14 @@ It manages every Best of Both Worlds file for the selected target and also manag
 For the 1.5.97 Best of All Worlds profile, present Creation Club files matching `cc*.bsa`, `cc*.esl`, `cc*.esm`, or `cc*.esp` are committed to recovery storage before they are removed from the active game layout.
 They are restored after an automatic session or during the complete manual restore.
 
+== BoAW-Clean for 1.6.1170
+
+Choose this alternative only when your setup expects Quick Auto Clean master files.
+It combines the normal 1.6.1170 BoAW downgrade with cleaned Update, Dawnguard, HearthFires and Dragonborn targets, plus the supported Beafarmer plugin if present.
+`Skyrim.esm` is not cleaned. Missing Beafarmer is skipped.
+
+See xref:boaw_clean.adoc[] for exact inputs, cleaning provenance, restoration and package-switching instructions.
+
 == Decision guide
 
 [cols="1,1,1",options="header"]
@@ -66,9 +76,13 @@ They are restored after an automatic session or during the complete manual resto
 |Best of All Worlds
 |Use plugins intended for the selected target game version
 |Use plugins made for the selected target runtime
+
+|BoAW-Clean (1.6.1170 only)
+|Use a setup requiring the documented cleaned 1.6.1170 masters
+|Use plugins made for 1.6.1170
 |===
 
-IMPORTANT: SKSE and every SKSE plugin must match the selected target runtime in both profiles.
+IMPORTANT: SKSE and every SKSE plugin must match the selected target runtime in every variant.
 
 == What is not changed
 

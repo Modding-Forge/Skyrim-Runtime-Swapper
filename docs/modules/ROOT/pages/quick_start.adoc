@@ -18,17 +18,18 @@ IMPORTANT: Do not install more than one Skyrim Runtime Swapper package at the sa
 
 == Building your own mod setup
 
-The current release contains these four packages:
+Version 1.2.2 contains these five packages, distributed as `.7z` archives:
 
-* `SRS-v1.2.1-BoBW-1.7.104-to-1.6.1170.zip`
-* `SRS-v1.2.1-BoAW-1.7.104-to-1.6.1170.zip`
-* `SRS-v1.2.1-BoBW-1.7.104-to-1.5.97.zip`
-* `SRS-v1.2.1-BoAW-1.7.104-to-1.5.97.zip`
+* `SRS-v1.2.2-BoBW-1.7.104-to-1.6.1170.7z`
+* `SRS-v1.2.2-BoAW-1.7.104-to-1.6.1170.7z`
+* `SRS-v1.2.2-BoBW-1.7.104-to-1.5.97.7z`
+* `SRS-v1.2.2-BoAW-1.7.104-to-1.5.97.7z`
+* `SRS-v1.2.2-BoAW-Clean-1.7.104-to-1.6.1170.7z` (alternative to normal BoAW, not an add-on)
 
 === Install and launch
 
 . Decide whether the setup requires Skyrim 1.6.1170 or 1.5.97.
-. Choose Best of Both Worlds or Best of All Worlds as explained in xref:profiles.adoc[].
+. Choose Best of Both Worlds, Best of All Worlds, or the 1.6.1170 BoAW-Clean alternative as explained in xref:profiles.adoc[].
 . Download the matching archive from link:https://www.nexusmods.com/skyrimspecialedition/mods/189855[Nexus Mods].
 . Install it as a root mod through the mod manager, or extract it manually into the Skyrim game directory.
 +

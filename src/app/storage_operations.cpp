@@ -163,6 +163,9 @@ recovered_source(const std::filesystem::path &game_root,
                    L"state.\nPerformance: restore=" +
                    std::to_wstring(restore_duration) + L" ms, cleanup=" +
                    std::to_wstring(cleanup_duration) + L" ms";
+  if (!cleanup.technical_detail.empty())
+    result.message += L"\n" + cleanup.technical_detail;
+  result.technical_detail = cleanup.technical_detail;
   return result;
 }
 
@@ -239,6 +242,9 @@ finish_restore(const std::filesystem::path &game_root,
       L"\nPerformance: restore=" +
       std::to_wstring(restore_duration) + L" ms, cleanup=" +
       std::to_wstring(cleanup_duration) + L" ms";
+  if (!cleanup.technical_detail.empty())
+    result.message += L"\n" + cleanup.technical_detail;
+  result.technical_detail = cleanup.technical_detail;
   return result;
 }
 
@@ -333,6 +339,13 @@ InstallationOperationResult
 probe_installation_storage(const std::filesystem::path &game_root) {
   InstallationOperationResult result;
   result.backend = probe_prepared_storage(game_root);
+  if (!result.backend.success() &&
+      result.backend.technical_reason == L"vault-owner-or-dacl") {
+    // RC5 may have recreated the vault with inherited permissions after
+    // cleanup. The Windows backend repairs only a directory already owned by
+    // this user with an exclusively user/SYSTEM DACL; all other ACLs still fail.
+    result.backend = probe_prepared_storage(game_root, 0, true);
+  }
   if (!result.backend.success() &&
       result.backend.technical_reason.starts_with(L"active-vault")) {
     const auto catalog = inspect_content_catalog_recovery_state(game_root);

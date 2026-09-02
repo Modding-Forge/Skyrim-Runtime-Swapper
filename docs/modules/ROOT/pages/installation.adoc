@@ -5,6 +5,10 @@ Its files must be deployed beside `SkyrimSE.exe`, not only inside `Data`.
 
 These instructions cover standalone installation; Collections install SRS automatically.
 
+From version 1.2.2 onward, release packages use `.7z` instead of ZIP.
+Use a mod manager or extractor that supports 7z, and extract the complete archive without an extra enclosing directory.
+Linux users must preserve the native helper's executable permission; see xref:troubleshooting.adoc#native-helper-permissions[Native helper permission error] if their extractor does not.
+
 == Required game-root layout
 
 After installation and deployment, the Skyrim directory must contain at least:
@@ -28,7 +32,7 @@ CAUTION: Do not place `version.dll`, `SkyrimRuntimeSwapper.exe`, or `RuntimeSwap
 
 == Install standalone through a mod manager
 
-. Add the selected ZIP archive to the mod manager.
+. Add the selected 7z archive to the mod manager.
 . In Vortex, keep the automatically selected *Engine Injector* type. In other managers, use the root-deployment method described in xref:mod_managers.adoc[].
 . Enable and deploy the package.
 . Open the Skyrim game directory and verify the required layout above.
@@ -62,6 +66,9 @@ For a standalone installation:
 . Deploy only the new package.
 . Launch through SKSE.
 
+This also applies when switching between normal BoAW and xref:boaw_clean.adoc[BoAW-Clean].
+Do not combine a new executable with patches or a native helper from another variant or release.
+
 The current release safely retires verified inactive v1.0.0 and v1.1.0 storage on first launch.
 Active, linked, unknown, or unverifiable legacy state is preserved and blocks unsafe cleanup.
 
@@ -71,6 +78,10 @@ Before updating for a support case, save a copy of any logs you still need.
 The current log format replaces old uncorrelated logs as described in xref:troubleshooting.adoc#log-history[Log history and older logs].
 
 WARNING: Never manually delete an active recovery vault merely to complete an update. Restore the source state first or collect diagnostics if recovery is unavailable.
+
+Some 1.2.2 test builds can leave inconsistent recovery markers that the final release deliberately refuses to discard automatically.
+Updating the executable or verifying files through Steam does not itself reset those records.
+See xref:troubleshooting.adoc#inconsistent-recovery[Inconsistent recovery markers after a test build] for the support workflow.
 
 == Uninstall
 

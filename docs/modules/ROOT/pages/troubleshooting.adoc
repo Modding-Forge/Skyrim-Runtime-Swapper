@@ -116,6 +116,12 @@ If the log identifies an unknown or modified source file and no SRS recovery is 
 If Steam reports no problem but SRS still rejects a linked file, include the logged SHA-256, link type, and effective link target.
 The mod manager may be exposing a stale copy from `Data_Core`, a staging directory, or an overwrite layer that Steam did not replace.
 
+For xref:boaw_clean.adoc[BoAW-Clean], a master cleaned separately with SSEEdit is not necessarily a supported input.
+Use the logged hashes to distinguish an exact supported target from a different cleaned or modified file.
+`Actual SHA-256: <unavailable>` means SRS could not obtain a hash at that stage; it is not proof that the file was cleaned or has different contents.
+
+Do not remove Beafarmer just to bypass recovery. It is optional only when the transaction's initial selection excludes it; once selected, its recorded recovery state must be respected.
+
 == A staged runtime file failed verification
 
 The dialog and log identify the live file, staged object, expected source hash, expected target hash, actual hash when available, patch hash, I/O stage, and native error.
@@ -171,6 +177,9 @@ The dialog shows a human-readable message and a stable *Technical reason*.
 |`vault-owner-or-dacl` or `vault-owner-or-mode`
 |The SRS vault is not exclusively controlled by the current user. Do not weaken the check; correct ownership only for the displayed SRS directory.
 
+|`unsafe-native-installation-lock`
+|SRS cannot safely establish the installation lock. Version 1.2.2 can use private user-state storage for fresh installations in group-writable Linux Steam libraries. Existing unsafe or conflicting state can still block startup; preserve it and report the exact logged paths.
+
 |`vault-parent-reparse` or `vault-parent-symlink`
 |The automatically resolved vault hierarchy contains an unsafe redirection. Remove or correct the unexpected redirection without deleting active recovery data.
 
@@ -200,8 +209,11 @@ findmnt -T "/replace/with/the/displayed/path" -o TARGET,SOURCE,FSTYPE,OPTIONS
 
 Replace the quoted placeholder with the actual path from the error.
 SRS uses verified Steam-library transaction storage when safe and does not require an unrelated XDG state directory for that operation.
+For fresh installations where group-writable library parents cannot safely host the lock, version 1.2.2 instead selects validated private user-state storage.
+If both locations contain state, or an existing state location is unsafe, SRS blocks instead of silently starting with a new vault.
 If the error remains, provide the current SRS log and the output above.
 
+[#native-helper-permissions]
 == Native helper permission error
 
 The package should preserve executable mode and SRS attempts safe repair.
@@ -221,6 +233,45 @@ Apply this only to the packaged helper in the Skyrim root.
 . Allow recovery to finish before purging or redeploying the mod manager.
 
 If recovery blocks, copy the logs and preserve the displayed vault path.
+
+[#inconsistent-recovery]
+== Inconsistent recovery markers after a test build
+
+`code=34 (journal-corrupt)` or "The persistent recovery markers are inconsistent" means SRS cannot reconcile its stored transaction records.
+It does not, by itself, prove that the current game files are damaged.
+Some 1.2.2 RC attempts can leave this state; the final release does not automatically discard or repair inconsistent journals.
+
+. Save the complete log and report the exact package version and profile.
+. Close Skyrim, SKSE and SRS, and stop any mod-manager deployment.
+. Keep the recovery vault and transaction workspace intact while support checks whether a restore is still needed.
+. Only after the original source files are confirmed restored, and support has identified the exact installation-specific folders, archive or rename the obsolete state as directed. Keep those backups rather than deleting them.
+
+The relevant paths are `recovery-vault` and `transaction-work` in that installation's log; an older `.skyrim-runtime-swapper` folder inside the game directory may also contain state.
+Do not copy installation IDs or paths from somebody else's report, and do not reset only one linked state folder before launching again.
+Leave game files, `RuntimeSwap`, the target cache and coordination lock untouched unless support specifically identifies a separate problem.
+
+WARNING: Steam verification restores Steam-managed game files, not SRS recovery records or every file exposed by a mod manager. Never treat verification alone as permission to delete recovery data.
+
+A successful reset addresses the obsolete records, not the underlying cause of every recovery failure.
+Confirm a new activation and its matching watcher restore in the log before considering the case resolved.
+
+[#cleanup-pending]
+== Source verified, but recovery cleanup remains pending
+
+This means restoration and cleanup are separate: the source may already be verified while SRS still needs to preserve conflict files or finish removing transaction metadata.
+Version 1.2.2 can archive verified conflicts outside the active vault before retiring it; see xref:safety_recovery.adoc#conflict-archive[Conflict archives].
+
+If the current release still blocks, keep the recovery data, check the logged storage error and provide the complete log.
+Do not remove the vault just because the message says the source is verified.
+
+== Confirm a complete automatic cycle in the log
+
+A successful `prepare-launch` entry with `code=0 (success)` and `lifecycle-state=target_active` confirms activation.
+It does not confirm that restoration has happened yet.
+For a session in which SRS switched the runtime, look for the matching watcher's "The installation is in a verified source state" entry after Skyrim closes.
+Use the shared `session` ID to connect the two.
+
+`target-cache=10/10`, for example, means all ten selected target objects were reused from cache. It is not a count of tests or a replacement for the restore result.
 
 == Amethyst reports a stale snapshot generation
 

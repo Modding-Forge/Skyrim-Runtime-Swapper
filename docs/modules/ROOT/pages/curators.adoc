@@ -8,6 +8,10 @@ Users keep the Collection's existing SKSE launch entry.
 Include one SRS package for the chosen runtime and xref:profiles.adoc[BoBW or BoAW profile], with SKSE and SKSE plugins matching the *target* runtime.
 Regular plugins must match the profile's game data: source data for BoBW, target data for BoAW.
 
+For a 1.6.1170 setup requiring cleaned masters, select xref:boaw_clean.adoc[BoAW-Clean] instead of normal BoAW.
+Pin exactly one SRS archive. Do not add a separate master-cleaning step that modifies SRS-managed files during activation or recovery.
+The optional Beafarmer plugin is patched only when present and matching a supported hash; SRS does not provide missing Creation Club content.
+
 .Example: SRS targeting 1.6.1170 with SKSE 2.2.6, both pinned dependencies.
 image::collection-srs-skse-dependencies.png[Vortex collection editor showing SRS targeting Skyrim 1.6.1170 and a pinned SKSE 2.2.6 dependency]
 
@@ -55,6 +59,10 @@ The relevant cases are:
 * A fresh 1.7.104 install: target launch and, on Automatic storage, restore after exit.
 * Existing users: already-downgraded or persistent states and manual restore.
 * Optional content, where present: Creation Club for 1.5.97 BoAW and `ContentCatalog.txt`.
+* BoAW-Clean: supported original Beafarmer present and Beafarmer absent, with a verified restore in both cases.
+* Switching variants: restore with the old package before replacing it; do not mix old patches, executables or native helpers.
+
+From 1.2.2, test the installer's `.7z` extraction and native-helper executable permissions as well as root deployment.
 
 Restore an SRS-managed persistent state before replacing its package.
 Verified inactive legacy state is cleaned up automatically; ambiguous recovery data is preserved.

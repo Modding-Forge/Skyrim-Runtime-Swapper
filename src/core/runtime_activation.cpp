@@ -105,7 +105,12 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
       recovery_duration = elapsed_milliseconds(recovery_started);
       if (!recovered.success()) return recovered;
     }
-    const auto runtime_layout = detect_runtime_layout(game_root);
+    std::wstring layout_error;
+    const auto runtime_layout = detect_runtime_layout(game_root, &layout_error);
+    if (runtime_layout == RuntimeLayout::invalid) {
+      return {ExitCode::backup_failed, false,
+              L"The runtime layout is unavailable: " + layout_error};
+    }
 
     const auto preflight_started = SteadyClock::now();
     auto& backend = transaction_backend();

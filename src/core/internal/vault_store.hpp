@@ -89,6 +89,11 @@ enum class PersistentMarkerState { inactive, active, invalid };
                                      std::string_view transaction_id,
                                      std::string* saved_sha256 = nullptr);
 
+// Copies conflicts and journal snapshots outside the active vault. Never
+// removes the originals; only verified-source finalization may retire them.
+[[nodiscard]] bool archive_conflicts(const VaultLayout& vault,
+                                     std::filesystem::path& archive_path);
+
 [[nodiscard]] std::filesystem::path runtime_journal_path(const VaultLayout& vault);
 [[nodiscard]] std::filesystem::path recovery_journal_path(const VaultLayout& vault);
 

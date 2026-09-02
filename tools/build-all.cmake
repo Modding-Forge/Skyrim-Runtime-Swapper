@@ -24,6 +24,20 @@ endif()
 
 file(READ "${REPOSITORY_ROOT}/vcpkg.json" RELEASE_MANIFEST_JSON)
 string(JSON RELEASE_VERSION GET "${RELEASE_MANIFEST_JSON}" version-string)
+if(NOT DEFINED SKIP_TESTS)
+  if(RELEASE_VERSION MATCHES "-rc[0-9]+$")
+    set(SKIP_TESTS ON)
+  else()
+    set(SKIP_TESTS OFF)
+  endif()
+endif()
+if(SKIP_TESTS)
+  set(BUILD_TESTING OFF)
+  set(RELEASE_BUILD_TARGETS --target runtime_swapper_helper version_proxy)
+else()
+  set(BUILD_TESTING ON)
+  set(RELEASE_BUILD_TARGETS "")
+endif()
 file(READ "${REPOSITORY_ROOT}/CMakeLists.txt" ROOT_CMAKE_TEXT)
 string(REGEX REPLACE "-.*$" "" RELEASE_NUMERIC_VERSION "${RELEASE_VERSION}")
 string(FIND "${ROOT_CMAKE_TEXT}"
@@ -80,11 +94,19 @@ foreach(ASSET_MANIFEST IN LISTS ASSET_MANIFESTS)
     message(FATAL_ERROR "The native patch library requires HDiffPatch 5.1.3 assets")
   endif()
 
-  foreach(PROFILE bobw boaw)
+  string(JSON CATALOG_VARIANT GET "${ASSET_JSON}" variant)
+  if(CATALOG_VARIANT STREQUAL "boaw-clean")
+    set(CATALOG_PROFILES boaw-clean)
+  else()
+    set(CATALOG_PROFILES bobw boaw)
+  endif()
+  foreach(PROFILE IN LISTS CATALOG_PROFILES)
     runtime_profile_files("${PROFILE}" "${TARGET_VERSION}" PROFILE_FILES)
     runtime_profile_name("${PROFILE}" PROFILE_NAME)
     if(PROFILE STREQUAL "bobw")
       set(PACKAGE_PROFILE "BoBW")
+    elseif(PROFILE STREQUAL "boaw-clean")
+      set(PACKAGE_PROFILE "BoAW-Clean")
     else()
       set(PACKAGE_PROFILE "BoAW")
     endif()
@@ -92,7 +114,7 @@ foreach(ASSET_MANIFEST IN LISTS ASSET_MANIFESTS)
     set(BUILD_ROOT "${REPOSITORY_ROOT}/build/${TARGET_VERSION}/${PROFILE}")
     set(BINARY_ROOT "${BUILD_ROOT}/${CONFIGURATION}")
     set(OUTPUT_ROOT "${RELEASE_ROOT}/SRS-v${RELEASE_VERSION}-${SLUG}")
-    set(ARCHIVE_PATH "${OUTPUT_ROOT}.zip")
+    set(ARCHIVE_PATH "${OUTPUT_ROOT}.7z")
 
     set(CURRENT_NATIVE_SIDECAR "")
     if(DEFINED NATIVE_SIDECAR_ROOT AND NOT NATIVE_SIDECAR_ROOT STREQUAL "")
@@ -108,8 +130,9 @@ foreach(ASSET_MANIFEST IN LISTS ASSET_MANIFESTS)
         "A single NATIVE_SIDECAR cannot safely serve multiple patch profiles. Use NATIVE_SIDECAR_ROOT/<target>/<profile>/SkyrimRuntimeSwapper.Native")
     endif()
 
-    file(REMOVE_RECURSE "${OUTPUT_ROOT}")
-    file(REMOVE "${ARCHIVE_PATH}")
+    if(EXISTS "${OUTPUT_ROOT}" OR EXISTS "${ARCHIVE_PATH}")
+      message(FATAL_ERROR "Release output already exists; refusing to overwrite: ${OUTPUT_ROOT}")
+    endif()
     message(STATUS "Building ${PROFILE_NAME} for Skyrim ${TARGET_VERSION}")
 
     set(CONFIGURE_ARGUMENTS
@@ -118,6 +141,7 @@ foreach(ASSET_MANIFEST IN LISTS ASSET_MANIFESTS)
       -A x64
       "-DSKYRIM_RUNTIME_PATCH_MANIFEST=${ASSET_MANIFEST}"
       "-DSKYRIM_RUNTIME_BUILD_PROFILE=${PROFILE}"
+      "-DBUILD_TESTING=${BUILD_TESTING}"
     )
     if(NOT CURRENT_NATIVE_SIDECAR STREQUAL "")
       list(APPEND CONFIGURE_ARGUMENTS
@@ -132,7 +156,8 @@ foreach(ASSET_MANIFEST IN LISTS ASSET_MANIFESTS)
     endif()
 
     execute_process(
-      COMMAND "${CMAKE_COMMAND}" --build "${BUILD_ROOT}" --config "${CONFIGURATION}" --parallel
+      COMMAND "${CMAKE_COMMAND}" --build "${BUILD_ROOT}" --config "${CONFIGURATION}"
+        ${RELEASE_BUILD_TARGETS} --parallel
       RESULT_VARIABLE BUILD_RESULT
     )
     if(NOT BUILD_RESULT EQUAL 0)
@@ -217,6 +242,12 @@ foreach(ASSET_MANIFEST IN LISTS ASSET_MANIFESTS)
     string(JSON SOURCE_MANIFESTS GET "${ASSET_JSON}" sourceManifests)
     string(JSON TARGET_MANIFESTS GET "${ASSET_JSON}" targetManifests)
     set(DATA_BASELINE_FIELDS "")
+    if(PROFILE STREQUAL "boaw-clean")
+      string(JSON CLEANING_METADATA GET "${ASSET_JSON}" cleaning)
+      string(APPEND DATA_BASELINE_FIELDS "  \"cleaning\": ${CLEANING_METADATA},\n")
+      file(COPY_FILE "${REPOSITORY_ROOT}/assets/BOAW-CLEAN-INSTRUCTIONS.txt"
+        "${OUTPUT_ROOT}/RuntimeSwap/BOAW-CLEAN-INSTRUCTIONS.txt")
+    endif()
     if(TARGET_VERSION STREQUAL "1.5.97")
       string(JSON DATA_BASELINE_VERSION GET "${ASSET_JSON}" dataBaselineVersion)
       string(JSON DATA_BASELINE_MANIFESTS GET "${ASSET_JSON}" dataBaselineManifests)
@@ -248,27 +279,17 @@ ${SELECTED_ENTRIES}
 ")
     file(WRITE "${OUTPUT_ROOT}/RuntimeSwap/manifest.json" "${RELEASE_MANIFEST}")
 
+    set(PACKAGING_ARGUMENTS "")
+    if(DEFINED WSL_DISTRIBUTION AND NOT WSL_DISTRIBUTION STREQUAL "")
+      list(APPEND PACKAGING_ARGUMENTS --wsl-distribution "${WSL_DISTRIBUTION}")
+    endif()
     execute_process(
-      COMMAND "${CMAKE_COMMAND}" -E tar cf "${ARCHIVE_PATH}" --format=zip
-        version.dll SkyrimRuntimeSwapper.exe ${PACKAGED_NATIVE_SIDECAR} RuntimeSwap
-        vortex_override_instructions.json PROTON-EXPERIMENTAL-INSTRUCTIONS.txt
-      WORKING_DIRECTORY "${OUTPUT_ROOT}"
+      COMMAND "${PYTHON_COMMAND}" "${REPOSITORY_ROOT}/tools/package-7z.py"
+        --source "${OUTPUT_ROOT}" --output "${ARCHIVE_PATH}" ${PACKAGING_ARGUMENTS}
       RESULT_VARIABLE ARCHIVE_RESULT
     )
     if(NOT ARCHIVE_RESULT EQUAL 0 OR NOT EXISTS "${ARCHIVE_PATH}")
       message(FATAL_ERROR "Archive creation failed for ${PROFILE_NAME} ${TARGET_VERSION}")
-    endif()
-    if(NOT PACKAGED_NATIVE_SIDECAR STREQUAL "")
-      execute_process(
-        COMMAND "${PYTHON_COMMAND}"
-          "${REPOSITORY_ROOT}/tools/set-zip-sidecar-mode.py"
-          "${ARCHIVE_PATH}"
-        RESULT_VARIABLE SIDECAR_MODE_RESULT
-      )
-      if(NOT SIDECAR_MODE_RESULT EQUAL 0)
-        message(FATAL_ERROR
-          "The packaged native sidecar mode could not be set to 0700: ${ARCHIVE_PATH}")
-      endif()
     endif()
     file(SHA256 "${ARCHIVE_PATH}" ARCHIVE_HASH)
     file(SIZE "${ARCHIVE_PATH}" ARCHIVE_SIZE)
@@ -298,18 +319,6 @@ ${SELECTED_ENTRIES}
     endforeach()
     if(NOT ARCHIVE_VERIFY_RESULT EQUAL 0)
       message(FATAL_ERROR "Archive verification failed: ${ARCHIVE_PATH}")
-    endif()
-    if(NOT PACKAGED_NATIVE_SIDECAR STREQUAL "")
-      execute_process(
-        COMMAND "${PYTHON_COMMAND}"
-          "${REPOSITORY_ROOT}/tools/set-zip-sidecar-mode.py" --check
-          "${ARCHIVE_PATH}"
-        RESULT_VARIABLE SIDECAR_MODE_VERIFY_RESULT
-      )
-      if(NOT SIDECAR_MODE_VERIFY_RESULT EQUAL 0)
-        message(FATAL_ERROR
-          "Archive verification failed; native sidecar is not mode 0700: ${ARCHIVE_PATH}")
-      endif()
     endif()
     get_filename_component(ARCHIVE_NAME "${ARCHIVE_PATH}" NAME)
     file(APPEND "${CHECKSUM_FILE}" "${ARCHIVE_HASH}  ${ARCHIVE_NAME}\n")

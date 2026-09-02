@@ -19,6 +19,20 @@ SRS selects the mode and recovery location automatically, and its dialog explain
 
 For mode details and other filesystems, see xref:storage_modes.adoc[].
 
+[#private-state]
+=== Shared-library permissions
+
+Since 1.2.2, a fresh installation in a group-writable Steam library can use private user-state storage for its lock, recovery vault, cache and transaction workspace.
+This avoids requiring users to change permissions on the entire Steam library.
+The usual base is `$XDG_STATE_HOME/modding-forge/skyrim-runtime-swapper`, or `$HOME/.local/state/modding-forge/skyrim-runtime-swapper` when XDG state home is unset.
+That location must still pass ownership, path and durability checks.
+
+Existing state is not silently migrated. Unsafe state or records in competing locations remain blocked to protect recovery.
+Use the exact paths in the current log, and do not recursively change permissions on `/home` or the Steam library.
+
+Version 1.2.2 packages use 7z and record executable mode `0700` for the native helper.
+If an extractor drops that permission, follow xref:troubleshooting.adoc#native-helper-permissions[the helper permission instructions].
+
 [#zfs]
 === ZFS support status
 

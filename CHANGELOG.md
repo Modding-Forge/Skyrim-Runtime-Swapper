@@ -2,6 +2,88 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.2.2 - 2026-09-02
+
+- Added an alternative BoAW-Clean package for 1.6.1170, combining the downgrade
+  with verified SSEEdit 4.1.5f Quick Auto Clean targets for Update, Dawnguard,
+  HearthFires and Dragonborn. SSEEdit is not required on the user's machine.
+- BoAW-Clean also handles the supported Beafarmer plugin when present and skips
+  it when absent. The original file is restored with the source runtime.
+- Fixed Windows permission failures caused by unnecessary owner-reassignment
+  and directory-delete permissions, while retaining ownership and file checks.
+- Fixed repeated BoAW-Clean activation after recovery-vault cleanup by
+  re-establishing private storage permissions instead of reusing stale state.
+- Improved Linux/Proton support for fresh installations in group-writable
+  Steam libraries by selecting validated private user-state storage.
+- Preserved conflict files no longer prevent cleanup indefinitely when they
+  can be safely verified and archived outside the active recovery vault.
+- Added clearer lock, permission and storage-validation diagnostics.
+- All five packages now use `.7z` instead of ZIP. Packaging verifies extracted
+  file hashes and preserves Linux helper executable permissions.
+- Expanded the documentation for package selection, BoAW-Clean, installation,
+  Linux storage and recovery troubleshooting.
+- Existing inconsistent recovery journals from test builds still fail closed;
+  this release does not automatically discard or repair them. The reported
+  RC5 installation completed two verified round trips after a manual state
+  reset with its original Steam files restored.
+
+## 1.2.2-rc6 - 2026-09-02
+
+- Invalidate prepared storage after successful recovery-vault deletion. The
+  next activation re-establishes private vault permissions and directory
+  handles instead of reusing the removed directory's preparation state.
+  Fixes BoAW-Clean startup failing with original Beafarmer on Windows.
+- On retry, re-protect an inherited vault DACL only through the existing
+  owner and exclusive user/SYSTEM checks, allowing the safe RC5 leftover to
+  recover without deleting recovery data or relaxing access restrictions.
+- Preserve the underlying storage-validation reason when optional-file layout
+  detection fails, and stop activation immediately on an invalid layout.
+
+## 1.2.2-rc5 - 2026-09-02
+
+- On Linux/Proton, new installations in group-writable Steam libraries use
+  private user-state storage for the coordination lock, recovery vault, cache,
+  and transaction workspace. Library permissions are never changed. Existing
+  storage pins the selection; ambiguous or unsafe old recovery state blocks
+  relocation instead of being silently abandoned.
+- Added a separate BoAW-Clean 1.6.1170 package: original 1.7.104 masters are
+  patched directly to SSEEdit 4.1.5f Quick Auto Clean outputs. Optional
+  Beafarmer is skipped only when initially absent; the selection is persisted
+  before mutation and retained during recovery. Both patch directions are
+  reconstructed and hash-verified when generating the catalog.
+
+## 1.2.2-rc4 - 2026-09-02
+
+- After source-runtime verification, archive preserved conflict files and
+  recovery journal snapshots beside the active vault instead of indefinitely
+  blocking cleanup and launch. Copies are hash-verified and flushed before
+  active recovery data is retired; retries never overwrite conflicting archive
+  contents. Archive paths are included in the recovery result.
+
+## 1.2.2-rc3 - 2026-09-02
+
+- Removed the unnecessary FILE_DELETE_CHILD requirement when opening Windows
+  directories for file replacement. Normal Modify permissions now suffice for
+  the directory handle; individual file DELETE access and identity checks remain
+  enforced.
+
+## 1.2.2-rc2 - 2026-09-02
+
+- Removed the unnecessary Windows owner reassignment when restricting SRS
+  directory permissions. Ownership is verified before updating the DACL,
+  without requesting WRITE_OWNER access. Existing security checks and lock
+  failure diagnostics remain in place; Linux behavior is unchanged.
+
+## 1.2.2-rc1 - 2026-09-02
+
+- RC package builds now skip test compilation and execution by default and build
+  only the release binaries. Use `-DSKIP_TESTS=OFF` to opt into tests explicitly.
+- Added transaction-lock failure diagnostics with the failing operation, lock
+  path, process ID, and available native error code and Windows message.
+- Distinguished directory creation, ownership, permission, path-safety, exclusive
+  open, and lock-file validation failures. Directory preparation now preserves
+  native errors instead of reporting a potentially stale Windows error.
+
 ## 1.2.1 - 2026-09-02
 
 - Restored verified target-runtime pass-through for installations that were

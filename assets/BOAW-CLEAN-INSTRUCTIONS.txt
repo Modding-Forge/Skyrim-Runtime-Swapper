@@ -1,0 +1,27 @@
+Skyrim Runtime Swapper - BoAW-Clean (1.7.104 to 1.6.1170)
+
+This is an ALTERNATIVE to the normal BoAW package, not an add-on.
+Enable only one SRS package. Restore the original runtime with your previous
+package before switching variants. Keep the existing recovery storage intact.
+
+Source: supported original Skyrim 1.7.104 files.
+Target: the usual BoAW 1.6.1170 runtime plus these cleaned 1.6.1170 masters:
+Update.esm, Dawnguard.esm, HearthFires.esm, Dragonborn.esm.
+Skyrim.esm is not cleaned.
+
+Cleaning: SSEEdit 4.1.5f x64 Quick Auto Clean, in the order listed above,
+then ccvsvsse004-beafarmer.esl. Two independent runs produced identical hashes.
+No additional manual cleaning is included. SSEEdit is not required by users.
+
+Beafarmer is OPTIONAL. If absent at the start, it is not installed. If present,
+its source hash must match the supported uncleaned copy; it is then cleaned
+and its exact supported original content is restored with the source runtime.
+This source was supplied from an installation and confirmed uncleaned; it is
+not authenticated as a 1.6.1170 Steam depot file. Its BSA is not modified.
+
+Already-cleaned or otherwise modified input masters are not interchangeable
+with the supported originals. Hash mismatches are not bypassed.
+
+Cleaning provenance, source/target SHA-256 hashes, and optional-file metadata
+are recorded in RuntimeSwap/manifest.json. Only bidirectional patches are
+distributed, not complete Bethesda game files.

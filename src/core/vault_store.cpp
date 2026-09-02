@@ -91,6 +91,11 @@ constexpr std::string_view persistent_magic = "SRS-PERSISTENT-2\n";
   text += "formatVersion=2\n";
   text += "producerVersion=" + std::string(release_version_utf8) + "\n";
   text += "patchPlanHash=" + std::string(patch_plan_hash_utf8) + "\n";
+  if (std::ranges::any_of(patch_plan, [](const auto& entry) { return entry.optional_if_missing; })) {
+    const bool selected = vault.runtime_layout != RuntimeLayout::without_beafarmer &&
+        vault.runtime_layout != RuntimeLayout::skse_launcher_alias_without_beafarmer;
+    text += selected ? "optionalBeafarmer=present\n" : "optionalBeafarmer=absent\n";
+  }
   if (vault.runtime_layout != RuntimeLayout::standard) {
     text += "runtimeLayout=" +
             std::string(runtime_layout_name(vault.runtime_layout)) + "\n";
@@ -200,7 +205,13 @@ std::optional<VaultLayout> resolve_vault_layout(
   }
   VaultLayout result;
   result.probe = std::move(probe);
-  result.runtime_layout = detect_runtime_layout(game_root);
+  result.runtime_layout = detect_runtime_layout(game_root, error_message);
+  if (result.runtime_layout == RuntimeLayout::invalid) {
+    if (error_message != nullptr && error_message->empty()) {
+      *error_message = L"The managed runtime layout could not be inspected safely.";
+    }
+    return std::nullopt;
+  }
   result.objects = result.probe.vault_path / L"objects";
   result.transactions = result.probe.vault_path / L"transactions";
   result.conflicts = result.probe.vault_path / L"conflicts";
@@ -452,6 +463,104 @@ bool preserve_conflict(const VaultLayout& vault, const std::filesystem::path& li
 
 std::filesystem::path runtime_journal_path(const VaultLayout& vault) {
   return vault.transactions / L"runtime.journal";
+}
+
+bool archive_conflicts(const VaultLayout& vault,
+                       std::filesystem::path& archive_path) {
+  archive_path.clear();
+  std::error_code error;
+  const auto status = std::filesystem::symlink_status(vault.conflicts, error);
+  if (error == std::errc::no_such_file_or_directory ||
+      (!error && status.type() == std::filesystem::file_type::not_found)) {
+    return true;
+  }
+  if (error || !managed_path_is_safe(vault.conflicts) ||
+      !private_directory(vault.conflicts)) return false;
+  const bool empty = std::filesystem::is_empty(vault.conflicts, error);
+  if (error) return false;
+  if (empty) return true;
+
+  // Sibling of active, not inside it or the disposable transaction workspace.
+  // Existing archives are never overwritten or automatically deleted.
+  const auto parent = vault.probe.vault_path.parent_path();
+  const auto archive = parent / L"conflict-archive";
+  if (!parent.is_absolute() || !private_directory(parent) ||
+      !managed_path_is_safe(archive)) return false;
+  auto& backend = transaction_backend();
+  auto copy_verified = [&](const std::filesystem::path& source,
+                           const std::filesystem::path& destination,
+                           const std::string& hash) {
+    if (!managed_path_is_safe(source) || !private_regular_file(source) ||
+        !managed_path_is_safe(destination)) return false;
+    const auto size = std::filesystem::file_size(source, error);
+    if (error || sha256_file(source) != hash) return false;
+    const auto existing = std::filesystem::symlink_status(destination, error);
+    if (error == std::errc::no_such_file_or_directory ||
+        (!error && existing.type() == std::filesystem::file_type::not_found)) {
+      error.clear();
+      if (!backend.copy_atomic(source, destination)) return false;
+    } else if (error || !private_regular_file(destination)) {
+      return false;
+    }
+    // Also flush an existing matching copy: a previous attempt may have
+    // installed it but failed before completing the durability boundary.
+    if (!private_regular_file(destination) ||
+        std::filesystem::file_size(destination, error) != size || error ||
+        sha256_file(destination) != hash || !backend.flush_file(destination)) {
+      return false;
+    }
+    for (auto directory = destination.parent_path(); directory != parent;
+         directory = directory.parent_path()) {
+      if (directory.empty() || !private_directory(directory) ||
+          !backend.sync_directory(directory)) return false;
+    }
+    return static_cast<bool>(backend.sync_directory(parent));
+  };
+
+  // Preserve the transaction/hash layout. Reject unexpected entries rather
+  // than following links or silently omitting user data during later cleanup.
+  for (std::filesystem::directory_iterator transactions(vault.conflicts, error), end;
+       !error && transactions != end; transactions.increment(error)) {
+    const auto transaction = transactions->path();
+    const auto name = transaction.filename().string();
+    if (name.empty() || name.size() > 128 ||
+        !std::ranges::all_of(name, [](unsigned char c) {
+          return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                 (c >= '0' && c <= '9') || c == '-' || c == '_';
+        }) || !private_directory(transaction) ||
+        !managed_path_is_safe(transaction)) return false;
+    for (std::filesystem::directory_iterator files(transaction, error), files_end;
+         !error && files != files_end; files.increment(error)) {
+      const auto source = files->path();
+      const auto hash = source.filename().string();
+      if (!valid_hash(hash) ||
+          !copy_verified(source, archive / L"files" / transaction.filename() /
+                                     source.filename(), hash)) return false;
+    }
+    if (error) return false;
+  }
+  if (error) return false;
+
+  // Retain provenance before cleanup removes the active journals/manifest.
+  // Content-addressed snapshots make retries and later sessions non-destructive.
+  for (const auto& source : {vault.manifest, runtime_journal_path(vault),
+                             recovery_journal_path(vault)}) {
+    const auto source_status = std::filesystem::symlink_status(source, error);
+    if (error == std::errc::no_such_file_or_directory ||
+        (!error && source_status.type() == std::filesystem::file_type::not_found)) {
+      error.clear();
+      continue;
+    }
+    if (error || !managed_path_is_safe(source) ||
+        !private_regular_file(source)) return false;
+    const auto hash = sha256_file(source);
+    if (!hash || !copy_verified(source, archive / L"metadata" /
+                                   std::filesystem::path(hash->begin(), hash->end()) /
+                                   source.filename(), *hash)) return false;
+  }
+  if (fault_injected("conflict-archive.after-copy")) return false;
+  archive_path = archive;
+  return true;
 }
 
 std::filesystem::path recovery_journal_path(const VaultLayout& vault) {

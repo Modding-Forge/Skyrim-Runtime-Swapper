@@ -54,6 +54,7 @@ class PreparedStorageContext {
       const std::filesystem::path&, std::string_view, std::string*);
   friend BackendProbeResult probe_prepared_storage(
       const std::filesystem::path&, std::uint64_t, bool);
+  friend void invalidate_prepared_storage(const std::filesystem::path&);
 };
 
 [[nodiscard]] std::optional<PreparedStorageContext> prepare_storage_context(
@@ -85,5 +86,8 @@ class PreparedStorageScope {
     const std::filesystem::path& game_root,
     std::uint64_t required_vault_bytes = 0,
     bool prepare_vault = false);
+
+// Retire preparation and held identities after successful vault deletion.
+void invalidate_prepared_storage(const std::filesystem::path& game_root);
 
 }  // namespace runtime_swapper

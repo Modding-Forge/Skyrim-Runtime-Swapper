@@ -7,6 +7,7 @@
 #include "internal/transaction_workspace.hpp"
 
 #include <runtime_swapper/transaction_backend.hpp>
+#include <runtime_swapper/prepared_storage.hpp>
 #include <runtime_swapper/downgrade.hpp>
 #include <runtime_swapper/runtime_version.hpp>
 
@@ -241,21 +242,13 @@ RecoveryLifecycleResult finalize_recovery_storage(
                   L"The recovery-vault path changed before cleanup.");
   }
   std::error_code error;
-  const auto conflicts = vault->conflicts;
-  const auto conflict_status = std::filesystem::symlink_status(conflicts, error);
-  if (error == std::errc::no_such_file_or_directory) {
-    error.clear();
-  } else if (error || std::filesystem::is_symlink(conflict_status) ||
-             !std::filesystem::is_directory(conflict_status)) {
+  std::filesystem::path conflict_archive;
+  if (!core::archive_conflicts(*vault, conflict_archive)) {
     return result(ExitCode::recovery_failed,
                   RecoveryLifecycleState::cleanup_pending,
                   RecoveryLifecyclePhase::verify_source,
-                  L"The recovery-vault conflicts could not be inspected safely.");
-  } else if (!std::filesystem::is_empty(conflicts, error) || error) {
-    return result(ExitCode::recovery_failed,
-                  RecoveryLifecycleState::cleanup_pending,
-                  RecoveryLifecyclePhase::verify_source,
-                  L"Preserved conflict files still require the recovery vault.");
+                  L"Conflict files could not be safely archived and verified. "
+                  L"The recovery vault has been retained.");
   }
 
   if (!transition_recovery_lifecycle(
@@ -307,6 +300,7 @@ RecoveryLifecycleResult finalize_recovery_storage(
                   RecoveryLifecyclePhase::delete_recovery,
                   L"The verified recovery vault could not be removed safely.");
   }
+  invalidate_prepared_storage(game_root);
   auto recovery_parent = probe.vault_path.parent_path();
   for (int depth = 0; depth < 3 && !recovery_parent.empty(); ++depth) {
     const auto name = recovery_parent.filename().wstring();
@@ -364,7 +358,10 @@ RecoveryLifecycleResult finalize_recovery_storage(
                   L"The Skyrim transaction directory could not be inspected.");
   }
   return result(ExitCode::success, RecoveryLifecycleState::clean_source,
-                RecoveryLifecyclePhase::complete, {});
+                RecoveryLifecyclePhase::complete,
+                conflict_archive.empty() ? std::wstring{} :
+                    L"Preserved conflict files were archived at: " +
+                        conflict_archive.wstring());
 }
 
 }  // namespace runtime_swapper

@@ -32,6 +32,7 @@ The original state can later be restored through `SkyrimRuntimeSwapper.exe`.
 * Automatic session switching on trusted internal NTFS, ext4, XFS, and Btrfs storage
 * Recoverable persistent switching on supported external and uncertain storage
 * Best of Both Worlds and Best of All Worlds packages for both target runtimes
+* An alternative xref:boaw_clean.adoc[BoAW-Clean package] for 1.6.1170, with optional Beafarmer
 * Native Windows, Linux, Wine, and Proton storage handling
 * SHA-256 verification of source files, patches, staged output, and restored files
 * Recovery after interrupted operations and unexpected shutdowns

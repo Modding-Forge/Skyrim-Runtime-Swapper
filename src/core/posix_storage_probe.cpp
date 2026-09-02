@@ -418,23 +418,82 @@ BackendProbeResult probe_posix_storage(
                      *target);
     }
     const auto library_root = steam_library_root(absolute);
-    const auto local_base = target->medium == StorageMedium::internal &&
-                                    target->native_durability
-                                ? library_root
-                                : std::nullopt;
-    const auto state = local_base ? std::optional<std::filesystem::path>{}
-                                  : state_home();
+    const auto legacy_target_base =
+        library_root ? *library_root / ".runtime-swapper"
+                     : absolute.parent_path() / ".runtime-swapper";
+    const bool library_controlled = library_root &&
+        posix_directory_controlled_by_user(*library_root);
+    const auto state = state_home();
+    const auto private_base = state
+        ? *state / "modding-forge" / "skyrim-runtime-swapper"
+        : std::filesystem::path{};
+
+    // A persistent lock or recovery entry pins the storage choice across
+    // launches, including after library permissions change. Never bypass an
+    // old transaction or create a second coordination lock for the installation.
+    auto entries_exist = [](const std::filesystem::path& base,
+                            const std::vector<std::filesystem::path>& entries)
+        -> std::optional<bool> {
+      if (base.empty()) return false;
+      if (!managed_path_is_safe(base)) return std::nullopt;
+      bool found = false;
+      for (const auto& entry : entries) {
+        std::error_code inspect_error;
+        const auto status = std::filesystem::symlink_status(base / entry, inspect_error);
+        if (inspect_error == std::errc::no_such_file_or_directory) continue;
+        if (inspect_error) return std::nullopt;
+        found = found || std::filesystem::exists(status);
+      }
+      return found;
+    };
+    const auto lock_entry = std::filesystem::path("locks") / (*id + ".lock");
+    const auto work_entry = std::filesystem::path("work") / *id;
+    const auto legacy_state = entries_exist(legacy_target_base,
+        {lock_entry, std::filesystem::path("recovery") / *id});
+    const auto legacy_work = entries_exist(legacy_target_base, {work_entry});
+    const auto private_state = entries_exist(private_base,
+        {lock_entry, work_entry, std::filesystem::path("vaults") / *id});
+    const auto private_work = entries_exist(private_base, {work_entry});
+    if (!legacy_state || !legacy_work || !private_state || !private_work) {
+      return blocked(L"storage-location-unreadable",
+                     L"Existing installation storage could not be inspected safely. "
+                     L"No alternate recovery location was selected.", *target, {}, {}, *id);
+    }
+    if ((*legacy_state && *private_state) || (*legacy_work && *private_work)) {
+      return blocked(L"ambiguous-installation-storage",
+                     L"Installation state exists in both library and private storage. "
+                     L"Recovery must be resolved before choosing a coordination lock.",
+                     *target, {}, {}, *id);
+    }
+    const auto target_storage_anchor =
+        posix_existing_directory_ancestor(legacy_target_base.parent_path());
+    const bool target_storage_controlled = target_storage_anchor &&
+        posix_directory_controlled_by_user(*target_storage_anchor);
+    if ((*legacy_state || *legacy_work) && !target_storage_controlled) {
+      return blocked(L"existing-storage-anchor-unsafe",
+                     L"Existing installation state remains under a directory writable "
+                     L"by other users. It has been retained; automatic relocation is "
+                     L"not safe.", *target, {}, legacy_target_base, *id);
+    }
+    const auto local_base = library_root && library_controlled &&
+        (*legacy_state || (!*private_state &&
+                           target->medium == StorageMedium::internal &&
+                           target->native_durability))
+        ? library_root : std::nullopt;
     if (!local_base && !state) {
       return blocked(L"state-home-unavailable",
                      L"XDG_STATE_HOME or HOME does not resolve to a safe absolute path.",
                      *target);
     }
-    const auto target_storage_base =
-        library_root ? *library_root / ".runtime-swapper"
-                     : absolute.parent_path() / ".runtime-swapper";
     const auto storage_base =
         local_base ? *local_base / ".runtime-swapper"
-                   : *state / "modding-forge" / "skyrim-runtime-swapper";
+                   : private_base;
+    // Keep an existing target workspace discoverable. Fresh fallback installs
+    // keep their work/cache in private storage too; cross-mount file mutations
+    // already use the mount-local paths in resolve_runtime_transaction_paths.
+    const auto target_storage_base = local_base || *legacy_work ||
+        (target_storage_controlled && target->medium != StorageMedium::internal)
+        ? legacy_target_base : storage_base;
     auto vault_path = local_base
                           ? storage_base / "recovery" / *id / "active"
                           : storage_base / "vaults" / *id;
