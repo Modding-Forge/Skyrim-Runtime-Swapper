@@ -2,7 +2,7 @@
 
 Run Skyrim mod setups for **1.6.1170** or **1.5.97** through the existing `skse64_loader.exe`. SRS switches the required files before SKSE checks the game version.
 
-Current release: **1.2.1** · [Changelog](CHANGELOG.md) · [User documentation](docs/modules/ROOT/pages/index.adoc) · [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/189855)
+Current release: **1.2.1** · [Changelog](CHANGELOG.md) · [User documentation](https://moddingforge.com/docs/skyrim-runtime-swapper) · [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/189855)
 
 A new downgrade starts from Steam's **Skyrim 1.7.104**. An already-downgraded installation also works if its managed files exactly match the selected package.
 
