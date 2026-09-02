@@ -73,6 +73,9 @@ Screenshot TODO: Amethyst root deployment with Symlink, Hardlink, or VFS mode se
 
 Deploy SRS as a root mod and ensure the required files appear beside `SkyrimSE.exe`.
 
+.SRS files under Root in Fluorine's mod file tree.
+image::fluorine-root-layout.png[Fluorine showing RuntimeSwap, SkyrimRuntimeSwapper.exe, SkyrimRuntimeSwapper.Native, and version.dll under Root]
+
 Fluorine can expose files through a FUSE-backed Wine or Proton environment.
 SRS flushes and verifies staged HDiffPatch output before reading its final size and hash, including the deterministic fallback needed for stale FUSE metadata.
 
@@ -83,11 +86,6 @@ The exact target SHA-256 remains mandatory.
 image::fluorine-wine-proton-settings.png[Fluorine settings showing the Proton version, prefix location, wrapper command, and FUSE Wine/Proton backend]
 
 NOTE: The Proton build, prefix path, and wrapper command shown belong to this example setup; they are not SRS requirements. Keep your setup's working configuration rather than changing it to match the screenshot. This view does not confirm that SRS is enabled or deployed to the game root.
-
-[NOTE]
-====
-Screenshot TODO: Fluorine showing SRS enabled and its root-deployment configuration.
-====
 
 == Link rules
 
