@@ -1,0 +1,249 @@
+= Troubleshooting
+
+Skyrim Runtime Swapper fails closed when it cannot prove that a write is recoverable.
+A blocked launch is preferable to starting Skyrim with a mixed or unverifiable runtime.
+
+== Collect diagnostics first
+
+Use *Copy logs* in the error dialog whenever it is available, then paste the result into your support report or save it as a text attachment.
+The copied diagnostics include the SRS log and the newest available SKSE log when readable.
+An SKSE log may belong to an older attempt; check its timestamp rather than assuming it came from the failed SRS launch.
+
+The primary log is stored at:
+
+....
+Documents\My Games\Skyrim Special Edition\SKSE\SkyrimRuntimeSwapper.log
+....
+
+This uses the Windows Documents location, including any configured redirection.
+Under Wine or Proton, it is the Documents location in the prefix that runs SKSE, not necessarily your native Linux `~/Documents` directory.
+
+When reporting a problem, include:
+
+* The complete SRS log, or the affected session's header and all entries carrying the same `session` ID
+* The exact SRS package name
+* Mod manager and deployment mode
+* Operating system and Wine or Proton version
+* Game filesystem and whether the drive is internal, external, or removable
+* The newest `skse64_loader.log` and `skse64.log`
+* What happened immediately before the failure, including a crash or forced shutdown
+
+IMPORTANT: Do not delete the recovery vault, locator, journal, or transaction workspace before collecting the log.
+
+=== Distinguish launches and watchers
+
+Current session headers include `log-format=2`.
+Diagnostic entries carry:
+
+* `run`: the ID of the SRS process that wrote the entry;
+* `session`: the shared ID linking a primary launch and its watcher; and
+* `parent`: the run that started the watcher, or `none` for a primary run.
+
+The watcher has its own `run` ID and `operation=session-watcher`, but shares the launch's `session` ID.
+Opening the manual control panel starts a separate primary run with `operation=manual-gui`.
+Multi-line details belong to the prefixed entry above them.
+
+Use these IDs to group entries even when output from different processes is interleaved.
+Older logs without these IDs cannot be correlated with the same certainty.
+
+[#log-history]
+=== Log history and older logs
+
+SRS keeps one log file, retaining the latest 30 primary starts and the output following those retained starts.
+Watcher headers do not count as additional primary starts; manual control-panel starts do.
+Older history is trimmed when another primary start is logged.
+
+When the new format starts, old contents without `log-format=2` are replaced rather than mixed with correlated entries.
+SRS also removes its legacy log at:
+
+....
+%LOCALAPPDATA%\Skyrim Special Edition\SKSE\SkyrimRuntimeSwapper.log
+....
+
+Save a copy before updating or repeatedly retrying if you need an older failure for a support report.
+This log cleanup does not delete SKSE's own logs, runtime backups, or recovery journals.
+
+== The Collection reports the wrong installed Skyrim version
+
+This warning comes from the manager's Collection compatibility check, before SRS switches the runtime.
+If Skyrim is correctly installed as 1.7.104 but the Collection expects 1.6.1170 or 1.5.97, ask the curator to set the Collection's game-version requirement to the source version.
+The SRS package and SKSE should still target the older runtime.
+
+Do not manually downgrade or replace the Collection's files just to silence this warning.
+Compare the actual installed version and the Collection requirement first; other version mismatches may need a different fix.
+See xref:curators.adoc#collection-game-version[Collection game-version settings].
+
+== SRS does not appear before the SKSE version error
+
+Symptoms include:
+
+* SKSE reports that Skyrim 1.7.104 is newer than the installed SKSE version.
+* No Skyrim Runtime Swapper dialog appears.
+* No new SRS session is written to the log.
+
+Check:
+
+. `version.dll` is beside `SkyrimSE.exe`, not under `Data`.
+. Only one mod supplies the active `version.dll` proxy.
+. The launched executable is the intended `skse64_loader.exe`.
+. The mod manager actually deployed the root files.
+. Proton Experimental receives the override described in xref:proton.adoc[].
+
+== SKSE reports "Couldn't retrieve EXE version information"
+
+This usually means SRS stopped the launch after a failed or incomplete runtime operation.
+The SKSE message is a consequence, not the root cause.
+
+Read the preceding SRS dialog and the latest SRS log entry.
+Resolve that failure before troubleshooting SKSE itself.
+
+== Source file or source hash is not recognized
+
+For patching, SRS expects the exact managed Skyrim 1.7.104 source files recorded by the package.
+Files already matching the package's target hashes are also recognized.
+An already-downgraded executable is not itself an error, but its other managed files must match the selected profile too.
+
+Before replacing files, collect the log and resolve or report any pending SRS recovery state.
+Steam verification changes the installed game files and should not be the first response to an unavailable recovery vault.
+
+If the log identifies an unknown or modified source file and no SRS recovery is pending:
+
+. Restore or purge the mod-manager deployment so vanilla files are no longer replaced by a stale VFS, symlink, hard-link, or overwrite layer.
+. Run Steam's *Verify integrity of game files* action.
+. Redeploy the mod setup once verification completes.
+. Launch through SKSE again.
+
+If Steam reports no problem but SRS still rejects a linked file, include the logged SHA-256, link type, and effective link target.
+The mod manager may be exposing a stale copy from `Data_Core`, a staging directory, or an overwrite layer that Steam did not replace.
+
+== A staged runtime file failed verification
+
+The dialog and log identify the live file, staged object, expected source hash, expected target hash, actual hash when available, patch hash, I/O stage, and native error.
+
+Check:
+
+* Available space on the game and recovery volumes
+* Read-only filesystem or file attributes
+* Device errors or disconnection
+* Whether a VFS or sync process changed the staged object during the operation
+* Whether all SRS files came from the same release archive
+
+SRS includes a deterministic fallback for stale FUSE-backed HDiffPatch output metadata.
+If the failure persists, submit the complete log instead of disabling VFS safety or bypassing hash verification.
+
+== Persistent downgrade is required
+
+This is expected on external, removable, exFAT, or uncertain local storage.
+
+. Read the game-volume and recovery-vault descriptions.
+. Continue only if the displayed vault is available and should remain available.
+. Restore later by opening `SkyrimRuntimeSwapper.exe` and selecting *Restore Skyrim 1.7.104*.
+
+Persistent with warning additionally requires explicit acceptance because the game filesystem could not be fully classified.
+
+== Downgrade is not recoverable
+
+The dialog shows a human-readable message and a stable *Technical reason*.
+
+[cols="2,3",options="header"]
+|===
+|Technical reason
+|Meaning and next step
+
+|`network-target`
+|The game is on a network share. Use supported local storage.
+
+|`target-volume-unrecoverable`
+|The target is unavailable, non-local, or lacks an identity SRS can verify. The combined message does not prove that it is network storage. Check the logged filesystem and mount; native ZFS datasets are currently unsupported. See xref:linux.adoc#zfs[ZFS support status].
+
+|`unstable-target-identity` or `target-installation-identity-unavailable`
+|SRS cannot bind recovery to the physical target. Use a filesystem or device with a stable identity.
+
+|`independent-vault-required`
+|The game target needs recovery on another durable device, but the automatic vault resolves to the same volume. Move Skyrim to trusted internal storage or make a suitable internal recovery volume available.
+
+|`vault-volume-not-durable`
+|The automatic recovery location is not on internal NTFS for Windows or internal ext4, XFS, or Btrfs for Linux.
+
+|`vault-insufficient-space`
+|Free space including the safety reserve is insufficient. Free space on the displayed recovery volume and retry.
+
+|`vault-owner-or-dacl` or `vault-owner-or-mode`
+|The SRS vault is not exclusively controlled by the current user. Do not weaken the check; correct ownership only for the displayed SRS directory.
+
+|`vault-parent-reparse` or `vault-parent-symlink`
+|The automatically resolved vault hierarchy contains an unsafe redirection. Remove or correct the unexpected redirection without deleting active recovery data.
+
+|`active-vault-directory-missing`, `active-vault-manifest-missing`, or `active-vault-unavailable`
+|A recorded active vault is missing or changed. Reconnect the original volume or restore the original vault. SRS intentionally refuses to select a replacement silently.
+
+|`prepared-storage-identity-changed`
+|A file, mount, link, or volume changed after preparation. Stop other deployment or synchronization activity and retry from a stable layout.
+
+|`wine-native-sidecar-required`
+|The verified Linux helper could not be used. Redeploy the complete package and check `SkyrimRuntimeSwapper.Native` permissions.
+
+|`content-catalog:<reason>`
+|The user-specific ContentCatalog state cannot be recovered safely. The suffix identifies the underlying storage failure.
+|===
+
+== Linux state directory is not controlled by the user
+
+Do not recursively change permissions on `/home`, `/var/home`, the Steam library, or the game directory.
+
+Capture:
+
+....
+stat -c '%A %U %G %n' "/replace/with/the/displayed/path"
+findmnt -T "/replace/with/the/displayed/path" -o TARGET,SOURCE,FSTYPE,OPTIONS
+....
+
+Replace the quoted placeholder with the actual path from the error.
+SRS uses verified Steam-library transaction storage when safe and does not require an unrelated XDG state directory for that operation.
+If the error remains, provide the current SRS log and the output above.
+
+== Native helper permission error
+
+The package should preserve executable mode and SRS attempts safe repair.
+If the manager extracted the helper without execute permission and automatic repair fails:
+
+....
+chmod 700 SkyrimRuntimeSwapper.Native
+....
+
+Apply this only to the packaged helper in the Skyrim root.
+
+== Recovery after a crash or forced shutdown
+
+. Reconnect every volume that was present during the transaction.
+. Do not delete SRS state.
+. Start the same installed SRS package through SKSE or open `SkyrimRuntimeSwapper.exe`.
+. Allow recovery to finish before purging or redeploying the mod manager.
+
+If recovery blocks, copy the logs and preserve the displayed vault path.
+
+== Amethyst reports a stale snapshot generation
+
+An error such as:
+
+....
+snapshot generation 4 is stale; current generation is 5
+....
+
+comes from Amethyst's FileGraph changing during deployment planning.
+Wait for its scan or refresh to finish and deploy again.
+Restart Amethyst if it repeats.
+The stale-generation guard runs before SRS deployment.
+
+== A second launch waits or is rejected
+
+SRS holds a per-installation coordination lock through activation and restore.
+A new launch waits for or refuses to overlap an active transaction.
+
+Wait for the prior Skyrim process and watcher to finish.
+Do not remove the lock file while either process is still active.
+
+== Report a bug
+
+Open a link:https://github.com/Modding-Forge/Skyrim-Runtime-Swapper/issues[GitHub Issue] for a reproducible SRS defect.
+Use the link:https://discord.gg/pqEHdWDf8z[Modding Forge Discord] for setup help or initial diagnosis.

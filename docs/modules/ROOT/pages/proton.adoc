@@ -1,0 +1,81 @@
+= Proton
+
+Install and deploy Skyrim Runtime Swapper as a root mod, then launch the unmodified `skse64_loader.exe` through the same Proton environment used by the mod setup.
+
+For a Collection, installation is handled by the mod manager; use the SRS package and SKSE entry supplied by the Collection.
+The Proton version you choose can differ from the author's test environment. The Proton Experimental instructions below apply whenever that version needs the DLL override, regardless of the Collection's stated support policy.
+
+The Windows process translates the game path and starts the verified native Linux helper automatically.
+The helper, not the Windows process, mutates managed files on Linux.
+
+== Normal launch
+
+. Confirm that `version.dll`, `SkyrimRuntimeSwapper.exe`, `SkyrimRuntimeSwapper.Native`, and `RuntimeSwap/patches` are present in the Skyrim root.
+. Confirm that the mod manager launches the intended `skse64_loader.exe` under Proton.
+. Start SKSE normally.
+. Check `SkyrimRuntimeSwapper.log` if no SRS dialog appears.
+
+No command-line argument needs to be passed to `skse64_loader.exe`.
+
+== Proton Experimental only
+
+Proton Experimental can prefer its built-in `version.dll` instead of the native DLL shipped with Skyrim Runtime Swapper.
+
+If SRS does not run before SKSE checks the Skyrim runtime, set:
+
+....
+WINEDLLOVERRIDES="version=n,b"
+....
+
+For a Steam entry that starts Skyrim or the mod manager, use:
+
+....
+WINEDLLOVERRIDES="version=n,b" %command%
+....
+
+If the mod manager does not expose suitable environment settings, you can add its existing launch command to Steam as a non-Steam game and configure the override on that shortcut.
+Preserve the Wine/Proton prefix and launch configuration used by the setup; adding a shortcut alone does not configure them.
+Close the manager completely, then start it through that Steam shortcut and launch SKSE from it.
+Starting the manager separately does not apply the shortcut's override.
+
+.Steam shortcut example with the override in Launch Options.
+image::proton-experimental-steam-shortcut.png[Steam shortcut settings for Vortex with WINEDLLOVERRIDES and the command placeholder highlighted]
+
+NOTE: The Steam screenshot illustrates the field location using a Windows shortcut. Do not copy its Windows paths or apply this command to a native Windows setup. These instructions are for Linux with Proton Experimental.
+
+Some mod managers provide a launch-options field that accepts Steam syntax directly.
+For example, Amethyst exposes separate *Launch arguments* and *Launch Options* fields.
+Place the complete line above in *Launch Options*, not in the arguments passed to the game executable.
+
+.Amethyst example using the Steam-syntax Launch Options field. Other managers may use different field names or formats.
+image::proton-experimental-amethyst-launch-options.png[Amethyst with WINEDLLOVERRIDES and the command placeholder in Launch Options rather than Launch arguments]
+
+For another launcher, add an environment variable to the entry that starts the mod manager or `skse64_loader.exe`:
+
+....
+Name:  WINEDLLOVERRIDES
+Value: version=n,b
+....
+
+The variable must reach the same Proton process that runs `skse64_loader.exe`.
+If the mod manager itself runs through Proton, set the variable when starting the manager so its child processes inherit it.
+
+After changing the setting, close the launcher and mod manager completely, restart them, and launch SKSE again.
+
+IMPORTANT: This override applies only to Proton Experimental. Do not add it for another Proton version unless Skyrim Runtime Swapper support specifically requests it.
+
+== Verify the override
+
+The override is working when a Skyrim Runtime Swapper session header appears before SKSE accepts or rejects the executable runtime.
+
+If SKSE still reports Skyrim 1.7.104 and no SRS dialog or log entry appears, check both root deployment and whether the environment variable reaches the SKSE process.
+
+== Common launch mistakes
+
+* Adding `WINEDLLOVERRIDES` as an SKSE argument instead of an environment variable
+* Setting it on Steam while launching SKSE from an unrelated mod-manager prefix
+* Leaving the mod manager running after changing its environment
+* Deploying `version.dll` under `Data` instead of beside `SkyrimSE.exe`
+* Running `SkyrimRuntimeSwapper.Native` directly
+
+For storage classification and native-helper diagnostics, see xref:linux.adoc[] and xref:troubleshooting.adoc[].

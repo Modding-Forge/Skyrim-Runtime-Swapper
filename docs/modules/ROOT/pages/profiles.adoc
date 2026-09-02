@@ -1,0 +1,79 @@
+= Choosing Best of Both Worlds or Best of All Worlds
+
+Every target runtime is available in two profiles.
+The correct choice depends on which game data your regular plugins expect.
+
+NOTE: In a Collection, this choice is already made by the author and installed by the mod manager. Do not switch profiles independently. The selection advice below is for Collection authors and users assembling their own setup.
+
+.The four package choices on Nexus Mods: two profiles for each supported target runtime. Install only one package.
+image::nexus-package-selection.png[Nexus Mods main files showing Best of All Worlds and Best of Both Worlds packages for Skyrim 1.5.97 and 1.6.1170]
+
+== Best of Both Worlds
+
+Best of Both Worlds combines an older executable runtime with newer game data.
+
+Choose it when:
+
+* regular ESP, ESM, and ESL plugins expect Skyrim 1.7.104 data; and
+* SKSE and SKSE plugins require Skyrim 1.6.1170 or 1.5.97.
+
+=== Managed files for 1.6.1170
+
+* `SkyrimSE.exe`
+* `SkyrimSELauncher.exe`
+* `Data/Skyrim - Shaders.bsa`
+
+=== Managed files for 1.5.97
+
+* `SkyrimSE.exe`
+* `SkyrimSELauncher.exe`
+* `steam_api64.dll`
+* `Data/Skyrim - Shaders.bsa`
+* `binkw64.dll`, which is created only while the 1.5.97 target is active
+
+NOTE: The 1.5.97 executable runtime uses the proven 1.6.1170 AE-compatible runtime-facing data baseline where appropriate.
+
+== Best of All Worlds
+
+Best of All Worlds switches the executable runtime and important version-dependent game data.
+
+Choose it when both regular plugins and SKSE plugins expect the selected older Skyrim version.
+
+It manages every Best of Both Worlds file for the selected target and also manages:
+
+* `Data/Skyrim - Interface.bsa`
+* `Data/Skyrim.esm`
+* `Data/Update.esm`
+* `Data/Dawnguard.esm`
+* `Data/HearthFires.esm`
+* `Data/Dragonborn.esm`
+
+For the 1.5.97 Best of All Worlds profile, present Creation Club files matching `cc*.bsa`, `cc*.esl`, `cc*.esm`, or `cc*.esp` are committed to recovery storage before they are removed from the active game layout.
+They are restored after an automatic session or during the complete manual restore.
+
+== Decision guide
+
+[cols="1,1,1",options="header"]
+|===
+|Profile
+|Regular plugins
+|SKSE plugins
+
+|Best of Both Worlds
+|Use plugins intended for Skyrim 1.7.104 game data
+|Use plugins made for the selected target runtime
+
+|Best of All Worlds
+|Use plugins intended for the selected target game version
+|Use plugins made for the selected target runtime
+|===
+
+IMPORTANT: SKSE and every SKSE plugin must match the selected target runtime in both profiles.
+
+== What is not changed
+
+Best of All Worlds is not a byte-for-byte downgrade of every Bethesda file.
+Files without relevant runtime or mod-compatibility changes are intentionally left untouched.
+This reduces package size, improves switching speed, and avoids unnecessary mutations.
+
+Other source versions, unrecognized files, and unsupported runtime pairs are rejected without starting Skyrim in an unverified state.

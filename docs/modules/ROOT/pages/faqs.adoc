@@ -1,0 +1,160 @@
+= Frequently Asked Questions
+
+== Does SRS permanently downgrade Skyrim?
+
+Automatic mode activates the target only for the game session and restores Skyrim 1.7.104 afterward.
+
+Persistent mode keeps the selected target active until you restore it through `SkyrimRuntimeSwapper.exe`.
+It is still recoverable, but it is not restored automatically when the game closes.
+
+== Which installed Skyrim version do I need?
+
+For a new downgrade, the supported source is the exact Steam version Skyrim 1.7.104.
+An already-downgraded installation can also be used when its managed runtime files exactly match the selected package's target.
+An executable version number alone is not sufficient.
+
+[#already-downgraded]
+== Can I use SRS when Skyrim is already downgraded?
+
+Yes, if all managed runtime files match the target hashes for the installed package and profile.
+SRS verifies the existing target and skips runtime patching; this is called *target-runtime pass-through*.
+Compatible persistent states from older SRS installations are also recognized and verified.
+
+SRS does not automatically restore runtime files it did not switch during that session.
+An explicit persistent target likewise remains active until a manual restore.
+Present Creation Club files and `ContentCatalog.txt` are still handled when required, and session content may still need a watcher to restore it.
+
+Storage and recovery checks remain active.
+Pass-through does not bypass an unsafe volume, inconsistent recovery records, or modified managed files.
+
+== Should I choose Best of Both Worlds or Best of All Worlds?
+
+If you use a Collection, keep the package it installs through your mod manager.
+You do not need to choose or install another variant yourself.
+For your own mod setup:
+
+Choose Best of Both Worlds when regular plugins expect 1.7.104 game data but SKSE plugins need the older runtime.
+
+Choose Best of All Worlds when regular plugins and SKSE plugins both expect the selected older game version.
+
+See xref:profiles.adoc[] for the exact managed files.
+
+== Does SKSE need to match the target runtime?
+
+Yes.
+SKSE and all SKSE plugins must match 1.6.1170 or 1.5.97 according to the selected package.
+
+== Do I replace skse64_loader.exe?
+
+No.
+Launch through the unmodified SKSE loader supplied by the setup.
+SRS loads through `version.dll` before the SKSE runtime check.
+
+== Does a renamed SKSE loader work?
+
+SRS recognizes a byte-identical SKSE loader stored as `SkyrimSELauncher.exe`.
+It verifies the identity by SHA-256 and leaves the alias untouched.
+
+An unrelated renamed executable is not accepted.
+
+== Does SRS work on an external SSD?
+
+Yes, when its filesystem and identity are supported and a durable independent recovery vault is available.
+External storage uses Persistent-only mode and requires a manual GUI restore.
+
+== Does SRS work on exFAT?
+
+Yes under the same persistent-only rule.
+The recovery vault must be on a different durable internal volume.
+
+== Does SRS support ZFS on Linux?
+
+Not currently for native ZFS datasets.
+SRS does not yet resolve their persistent pool/dataset identities and cannot use ZFS as its recovery-vault filesystem.
+The generic `target-volume-unrecoverable` message does not mean ZFS is necessarily network storage or unsafe.
+See xref:linux.adoc#zfs[ZFS support status].
+
+== Why is an external NTFS drive not Automatic?
+
+Automatic restore requires both durable filesystem semantics and a trusted internal physical medium.
+An external or removable device can disappear during activation or restore, so it remains persistent-only regardless of NTFS support.
+
+== Can I choose the recovery-vault path?
+
+No.
+SRS selects and validates it automatically.
+Allowing a free path override would let the game and its only recovery source end up on the same unsafe device or behind an unsafe link.
+
+== Where are backups stored?
+
+The exact location depends on the game volume and selected mode.
+Trusted internal Steam libraries normally use a private `.runtime-swapper` directory at the Steam-library level, outside the Skyrim directory.
+
+Other cases use a validated system state location on another durable volume.
+The active path is shown in the dialog and log.
+
+== Does the recovery vault remain forever?
+
+No.
+Ephemeral recovery data is removed after a complete verified automatic restore.
+A persistent vault remains until the complete manual restore is verified.
+
+The disposable target cache can remain to make later starts faster.
+
+== What happens after a power loss?
+
+Start SRS again with all transaction volumes connected.
+It recovers the interrupted state before allowing Skyrim to launch.
+
+Do not delete the vault or locator first.
+
+== Will SRS overwrite an unknown file?
+
+Not without preserving it first.
+Unknown or conflicting content must be copied, synchronized, and verified in recovery storage before replacement.
+If that cannot be done, SRS blocks the operation.
+
+== What happens to Creation Club files?
+
+The 1.5.97 Best of All Worlds profile stores present `cc*` plugin and archive files in the recovery lifecycle before removing them from the active layout.
+Missing Creation Club files are not installed by SRS.
+
+Automatic sessions restore them after Skyrim closes.
+Persistent mode restores them with the manual full restore.
+
+== What happens to ContentCatalog.txt?
+
+If the file is present, SRS secures it before removing it for the older runtime.
+Its location and any existing recovery state are checked independently.
+If automatic restoration is unsafe, its state is included in the persistent transaction and restored through the GUI.
+Conflicting regenerated content is preserved before restoration.
+
+== Can I run SkyrimRuntimeSwapper.Native directly on Linux?
+
+No.
+The Windows SRS process verifies and coordinates the build-specific helper automatically.
+
+== Is WINEDLLOVERRIDES required for every Proton version?
+
+No.
+The documented `version=n,b` override is only for Proton Experimental when its built-in DLL prevents the SRS proxy from loading.
+
+== Why did SRS hard block instead of offering persistent mode?
+
+Persistent consent can accept uncertainty on the game target, but it cannot replace a missing or unsafe recovery source.
+Network storage, unstable identities, unsafe paths, missing vaults, and invalid source files remain hard blocked.
+
+== Where is the log?
+
+....
+Documents\My Games\Skyrim Special Edition\SKSE\SkyrimRuntimeSwapper.log
+....
+
+Use *Copy logs* in an SRS error dialog when available.
+Under Wine or Proton, use the Documents folder resolved by the prefix that runs SKSE.
+The file retains the latest 30 primary SRS starts; see xref:troubleshooting.adoc#log-history[Log history and older logs].
+
+== Where can I get help?
+
+Ask setup questions on the link:https://discord.gg/pqEHdWDf8z[Modding Forge Discord].
+Report reproducible defects through link:https://github.com/Modding-Forge/Skyrim-Runtime-Swapper/issues[GitHub Issues].

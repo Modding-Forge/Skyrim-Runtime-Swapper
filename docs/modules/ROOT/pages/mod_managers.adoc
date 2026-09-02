@@ -1,0 +1,104 @@
+= Mod Manager Compatibility
+
+Skyrim Runtime Swapper must be deployed as a root mod.
+The required files live beside `SkyrimSE.exe`, while patch assets remain under `RuntimeSwap/patches`.
+
+For a Collection, let the manager install the packages and apply the deployment rules supplied by its author.
+The individual archive-installation steps below are for standalone setups; Collection users can use the screenshots to check deployment without replacing their selected packages.
+
+The transaction system supports validated final symlinks, hard links, reparse points, VFS views, Windows volume mounts, and POSIX bind mounts.
+It still blocks links or mount changes that could redirect a write outside the verified installation.
+
+== Vortex
+
+The included `vortex_override_instructions.json` automatically sets the Vortex mod type to *Engine Injector*.
+If you leave that setting unchanged, root deployment is already configured correctly; no manual mod-type change is needed.
+
+For a Collection, use Vortex's Collection installation workflow.
+To install SRS independently:
+
+. Install the selected archive.
+. Keep the automatically selected *Engine Injector* mod type.
+. Enable and deploy the mod.
+. Confirm that the SRS files are in the Skyrim root.
+. Launch the existing SKSE entry.
+
+If Vortex reports a deployment conflict, ensure that only one SRS package supplies `version.dll`, `SkyrimRuntimeSwapper.exe`, and `RuntimeSwap`.
+
+.SRS configured in Vortex: (1) the selected package is enabled; (2) its Mod Type is Engine Injector.
+image::vortex-engine-injector.png[Vortex showing an enabled Skyrim Runtime Swapper package and the Engine Injector mod type highlighted]
+
+The highlighted mod type is a check of the default setting, not an extra setup step.
+
+Compare the deployed files with the game-root example in xref:installation.adoc[].
+
+== Mod Organizer 2
+
+With MO2, either:
+
+* Extract the SRS package directly into the Skyrim game folder, beside `SkyrimSE.exe`, preserving its folder structure.
+* Use *Root Builder* to deploy the package to that game folder.
+
+A normal Data-only MO2 installation is not sufficient.
+See xref:installation.adoc[] for the expected layout, then launch through your existing SKSE entry in MO2.
+
+== Amethyst
+
+SRS supports validated Amethyst deployments using symlinks, hard links, and VFS.
+It understands vanilla files exposed from `Data_Core` and keeps durable recovery and normal transaction staging outside the deployed Skyrim tree.
+
+Follow these rules:
+
+* Deploy the SRS package as a root mod.
+* Do not manually remove `Data_Core` while the profile is deployed.
+* Restore or purge through Amethyst before manually deleting its staging directory.
+* Keep SRS recovery storage out of Amethyst's root overwrite content.
+
+If Amethyst reports a stale FileGraph generation, for example:
+
+....
+snapshot generation 4 is stale; current generation is 5
+....
+
+wait for its profile scan or refresh to finish and deploy again.
+If it repeats, restart Amethyst and retry.
+This guard occurs inside Amethyst before deployment and does not indicate an SRS transaction failure.
+
+[NOTE]
+====
+Screenshot TODO: Amethyst root deployment with Symlink, Hardlink, or VFS mode selected.
+====
+
+== Fluorine
+
+Deploy SRS as a root mod and ensure the required files appear beside `SkyrimSE.exe`.
+
+Fluorine can expose files through a FUSE-backed Wine or Proton environment.
+SRS flushes and verifies staged HDiffPatch output before reading its final size and hash, including the deterministic fallback needed for stale FUSE metadata.
+
+No safety option should be disabled to make a failed patch pass.
+The exact target SHA-256 remains mandatory.
+
+.Fluorine's Wine/Proton settings with the FUSE (default) backend selected.
+image::fluorine-wine-proton-settings.png[Fluorine settings showing the Proton version, prefix location, wrapper command, and FUSE Wine/Proton backend]
+
+NOTE: The Proton build, prefix path, and wrapper command shown belong to this example setup; they are not SRS requirements. Keep your setup's working configuration rather than changing it to match the screenshot. This view does not confirm that SRS is enabled or deployed to the game root.
+
+[NOTE]
+====
+Screenshot TODO: Fluorine showing SRS enabled and its root-deployment configuration.
+====
+
+== Link rules
+
+Safe final file links are supported when their effective targets remain inside the verified installation and on the expected volume.
+
+SRS blocks:
+
+* A managed output link that would redirect a replacement
+* A link target outside the Skyrim installation
+* A cross-volume replacement
+* A parent link, junction, or reparse layout that cannot be held safely
+* A link or target identity that changes during the transaction
+
+Read the technical reason in the dialog and collect the log before changing a deployed layout.

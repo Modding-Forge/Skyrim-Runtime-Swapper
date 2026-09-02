@@ -1,0 +1,50 @@
+= Introduction
+
+Skyrim Runtime Swapper lets a Skyrim mod setup built for an older runtime start through the unmodified `skse64_loader.exe` without requiring the Steam installation to remain permanently downgraded.
+
+The current release supports these target runtimes:
+
+* Skyrim 1.6.1170
+* Skyrim 1.5.97
+
+The supported source version for a new downgrade is *Skyrim 1.7.104* from Steam.
+An already-downgraded installation can also launch when all managed runtime files match the selected package's target state.
+See xref:faqs.adoc#already-downgraded[Already-downgraded installations].
+
+[.text-center]
+link:https://www.nexusmods.com/skyrimspecialedition/mods/189855[Download on Nexus Mods] | link:https://github.com/Modding-Forge/Skyrim-Runtime-Swapper[View source on GitHub] | link:https://discord.gg/pqEHdWDf8z[Get help on the Modding Forge Discord]
+
+== What it does
+
+Skyrim Runtime Swapper runs before SKSE checks `SkyrimSE.exe`.
+It verifies the managed files, prepares the selected target runtime if needed, and starts Skyrim only after the complete target state has been verified.
+
+When SRS switches a source installation on trusted internal storage, the target is active only for the game session.
+A detached watcher restores Skyrim 1.7.104 after the game closes.
+An existing verified target is not automatically upgraded to 1.7.104 merely because the game closes.
+
+On external, removable, exFAT, or otherwise uncertain local storage, automatic restoration is not considered safe.
+When a durable independent recovery location is available, Skyrim Runtime Swapper offers a persistent downgrade instead.
+The original state can later be restored through `SkyrimRuntimeSwapper.exe`.
+
+== Main features
+
+* Automatic session switching on trusted internal NTFS, ext4, XFS, and Btrfs storage
+* Recoverable persistent switching on supported external and uncertain storage
+* Best of Both Worlds and Best of All Worlds packages for both target runtimes
+* Native Windows, Linux, Wine, and Proton storage handling
+* SHA-256 verification of source files, patches, staged output, and restored files
+* Recovery after interrupted operations and unexpected shutdowns
+* Support for validated symlink, hard-link, VFS, volume-mount, and bind-mount layouts
+* Automatic handling of version-dependent ContentCatalog and Creation Club files
+* A manual control panel for persistent downgrade and full restore
+
+== Start here
+
+* Follow xref:quick_start.adoc[] for the Collection or standalone installation route.
+* Read xref:profiles.adoc[] when selecting a package for your own setup or authoring a Collection. Collection users keep the profile their manager installs.
+* Read xref:storage_modes.adoc[] if Skyrim is installed on an external drive or an unusual filesystem.
+* Collection authors should read xref:curators.adoc[].
+* If something fails, start with xref:troubleshooting.adoc[].
+
+TIP: General support is available on the link:https://discord.gg/pqEHdWDf8z[Modding Forge Discord]. Reproducible software defects should be reported through link:https://github.com/Modding-Forge/Skyrim-Runtime-Swapper/issues[GitHub Issues].

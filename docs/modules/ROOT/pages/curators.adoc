@@ -1,0 +1,61 @@
+= Collection Curator Guide
+
+SRS fits into the Collection's automated installation through Vortex or a community installer such as Amethyst.
+Users keep the Collection's existing SKSE launch entry.
+
+== Package and dependencies
+
+Include one SRS package for the chosen runtime and xref:profiles.adoc[BoBW or BoAW profile], with SKSE and SKSE plugins matching the *target* runtime.
+Regular plugins must match the profile's game data: source data for BoBW, target data for BoAW.
+
+.Example: SRS targeting 1.6.1170 with SKSE 2.2.6, both pinned dependencies.
+image::collection-srs-skse-dependencies.png[Vortex collection editor showing SRS targeting Skyrim 1.6.1170 and a pinned SKSE 2.2.6 dependency]
+
+[#collection-game-version]
+== Collection game version
+
+Set the Collection's Skyrim version requirement to the supported Steam *source: 1.7.104*, even when targeting 1.6.1170 or 1.5.97.
+The manager checks the installed game before SRS runs; declaring the target here causes a misleading wrong-version prompt on a correct source installation.
+
+SRS also accepts xref:faqs.adoc#already-downgraded[verified already-downgraded installations]; it leaves their runtime active after exit.
+
+== Deployment
+
+The included `vortex_override_instructions.json` automatically selects *Engine Injector* in Vortex.
+With that default unchanged, root deployment is already configured correctly.
+For other installers, use their root-deployment mechanism; the expected layout is shown in xref:installation.adoc[].
+
+SRS uses the existing `skse64_loader.exe` without replacing it.
+
+== Collection notes
+
+State the target runtime and profile, and link xref:proton.adoc[the Proton Experimental instructions] for users choosing that version.
+The override belongs on the launch path that starts SKSE, regardless of the curator's test environment.
+
+Storage mode, warnings, vault location, and manual restore instructions are shown by SRS itself and need not be repeated in the Collection description.
+Automatic restoration depends on the user's storage; some setups require persistent mode.
+
+== Curator workflow
+
+Using the Collection's SRS package for your own setup is recommended, so development and testing follow the same downgrade path users receive.
+Downgrading your own game with another tool and shipping SRS only for users can work when the managed files match, but is not the recommended workflow: it leaves the users' downgrade path untested in your setup.
+
+If a tool temporarily needs the older runtime to remain installed, open `SkyrimRuntimeSwapper.exe` in the game directory and select the persistent downgrade.
+When finished, restore Skyrim 1.7.104 through the same window; see xref:manual_control.adoc[Manual Control Panel].
+
+== Validation and updates
+
+Keep the Collection's SRS dependency up to date with stable releases.
+Unusual setups, especially on Linux, can expose edge cases that newer versions may already fix.
+Test updates with the Collection before publishing them.
+
+Validate the automated Collection install and update path with the shipped SKSE entry and deployment modes.
+The relevant cases are:
+
+* A fresh 1.7.104 install: target launch and, on Automatic storage, restore after exit.
+* Existing users: already-downgraded or persistent states and manual restore.
+* Optional content, where present: Creation Club for 1.5.97 BoAW and `ContentCatalog.txt`.
+
+Restore an SRS-managed persistent state before replacing its package.
+Verified inactive legacy state is cleaned up automatically; ambiguous recovery data is preserved.
+For failures, xref:troubleshooting.adoc[Copy logs] provides the diagnostic report.

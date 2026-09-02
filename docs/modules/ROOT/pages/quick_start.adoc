@@ -1,0 +1,86 @@
+= Quick Start
+
+These steps cover a standalone setup.
+If SRS is included in your Collection, it is installed automatically; use the Collection's existing SKSE entry.
+For Proton Experimental, see xref:proton.adoc[].
+
+== Before you begin
+
+You need:
+
+* A legitimate Steam installation of Skyrim Special Edition or Anniversary Edition
+* Skyrim 1.7.104 for a new downgrade, or an existing target installation that exactly matches the selected package
+* SKSE matching the target runtime
+* SKSE plugins matching the target runtime
+* One Skyrim Runtime Swapper package matching the target and profile required by the mod setup
+
+IMPORTANT: Do not install more than one Skyrim Runtime Swapper package at the same time.
+
+== Building your own mod setup
+
+The current release contains these four packages:
+
+* `SRS-v1.2.1-BoBW-1.7.104-to-1.6.1170.zip`
+* `SRS-v1.2.1-BoAW-1.7.104-to-1.6.1170.zip`
+* `SRS-v1.2.1-BoBW-1.7.104-to-1.5.97.zip`
+* `SRS-v1.2.1-BoAW-1.7.104-to-1.5.97.zip`
+
+=== Install and launch
+
+. Decide whether the setup requires Skyrim 1.6.1170 or 1.5.97.
+. Choose Best of Both Worlds or Best of All Worlds as explained in xref:profiles.adoc[].
+. Download the matching archive from link:https://www.nexusmods.com/skyrimspecialedition/mods/189855[Nexus Mods].
+. Install it as a root mod through the mod manager, or extract it manually into the Skyrim game directory.
++
+NOTE: Vortex selects *Engine Injector* automatically from the included JSON. Leave that mod type unchanged; no manual root-deployment adjustment is needed.
+
+. Deploy the mod and verify that these entries exist beside `SkyrimSE.exe`:
++
+....
+RuntimeSwap/
+SkyrimRuntimeSwapper.exe
+SkyrimRuntimeSwapper.Native
+version.dll
+....
++
+NOTE: `SkyrimRuntimeSwapper.Native` is used automatically on Linux, Wine, and Proton. Do not launch it yourself.
+
+. Install the SKSE version for the selected target runtime.
+. Launch the unmodified `skse64_loader.exe` entry used by the mod setup.
+. Read the Skyrim Runtime Swapper dialog if one appears.
+
+[#what-happens-next]
+== What happens next
+
+For a Skyrim 1.7.104 installation on a trusted internal filesystem, with no persistent target active, Skyrim Runtime Swapper uses *Automatic* mode:
+
+. The source files are verified.
+. The target runtime is staged and verified.
+. Skyrim starts with the requested runtime.
+. The watcher waits for the exact Skyrim process to exit.
+. Skyrim 1.7.104 is restored and verified.
+
+On external or uncertain storage, a *Persistent downgrade required* dialog may appear.
+Read the displayed game-volume and recovery-vault information before continuing.
+The target remains active until you restore Skyrim through the manual control panel.
+
+See xref:storage_modes.adoc#_persistent_only[Persistent only] for an example of this dialog and the manual restore instructions.
+
+If the installation already matches the selected target, SRS verifies it and skips runtime patching.
+It does not schedule a runtime restore for files it did not switch.
+Present Creation Club files and `ContentCatalog.txt` are still handled when required; a watcher may therefore run to restore session content without changing the pre-existing runtime.
+
+An SRS persistent target remains active until a manual restore, even on storage that supports Automatic mode.
+
+== Confirm that it worked
+
+The SKSE loader should no longer report the newer 1.7.104 runtime when the selected package targets an older version.
+The diagnostic log begins with the selected profile, source and target versions, environment, game root, storage mode, and resolved storage locations.
+
+The log is stored at:
+
+....
+Documents\My Games\Skyrim Special Edition\SKSE\SkyrimRuntimeSwapper.log
+....
+
+TIP: If Skyrim does not start or SKSE still reports 1.7.104, follow xref:troubleshooting.adoc[].

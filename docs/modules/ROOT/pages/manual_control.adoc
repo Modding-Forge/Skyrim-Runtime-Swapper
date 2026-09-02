@@ -1,0 +1,67 @@
+= Manual Control Panel
+
+Open `SkyrimRuntimeSwapper.exe` from the Skyrim game directory to inspect the current runtime or manage a persistent target.
+
+The manual control panel uses the same verified transaction and recovery logic as an SKSE launch.
+
+.Manual control panel with Skyrim 1.7.104 installed and no persistent target active.
+image::manual-control-source-windows.png[Manual runtime control showing installed executable 1.7.104 and persistent target disabled]
+
+== Keep the target runtime active
+
+Select *Downgrade persistently to Skyrim <target>* when an external tool or application must see the selected older runtime outside a normal Skyrim session.
+
+When starting from Skyrim 1.7.104, the operation:
+
+. verifies and recovers any pending transaction;
+. verifies the automatically selected recovery vault;
+. commits the original managed files to recovery storage;
+. stages and verifies the target state;
+. activates the target runtime and related persistent content; and
+. records the persistent state.
+
+.Confirmation that the persistent downgrade completed with verified recovery available.
+image::manual-persistent-success-windows.png[Confirmation that Skyrim 1.6.1170 is active persistently with verified recovery in the automatically selected vault]
+
+.The control panel after a successful persistent downgrade.
+image::manual-control-persistent-windows.png[Manual runtime control showing installed executable 1.6.1170 and persistent target enabled and verified]
+
+IMPORTANT: Closing Skyrim does not trigger an automatic restore while a persistent target is active.
+
+The *Storage mode* field describes the drive's capabilities.
+It may still show *Automatic* while *Persistent target* is enabled; this does not schedule an automatic restore.
+
+Later SKSE launches verify and use the fixed target state.
+They do not repeatedly downgrade and restore the same files.
+
+== Restore Skyrim 1.7.104
+
+Select *Restore Skyrim 1.7.104* to restore the complete managed source state.
+
+The restore includes:
+
+* Runtime executables and data managed by the selected profile
+* Creation Club files previously handled persistently, if any
+* `ContentCatalog.txt` previously handled persistently, if any
+* Safe recovery and transaction metadata cleanup after verification
+
+The recovery vault is deleted only after the source hashes, file layout, link layout, and relevant volume identities have been verified.
+Reusable target-cache data may remain because it is not a recovery dependency.
+
+Absent optional content is not downloaded or created merely to perform a restore.
+
+.Confirmation that Skyrim 1.7.104 and all persistently managed content were restored. Timings vary by installation.
+image::manual-restore-success-windows.png[Successful restore confirmation for Skyrim 1.7.104 and all persistently managed content]
+
+== If the restore is interrupted
+
+Run `SkyrimRuntimeSwapper.exe` or launch through SKSE again.
+Recovery is resumed before another game start is allowed.
+
+Do not delete the displayed recovery vault or transaction files while recovery is pending.
+
+== Cancel
+
+Cancelling the persistent-downgrade prompt does not mutate game files or create a persistent target.
+
+TIP: If the control panel reports an invalid or unavailable recovery state, use *Copy logs* and follow xref:troubleshooting.adoc[].

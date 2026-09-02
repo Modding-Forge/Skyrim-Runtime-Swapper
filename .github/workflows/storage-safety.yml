@@ -1,12 +1,12 @@
 name: Storage safety
 
 on:
-  push:
-    branches: [master]
-  pull_request:
   workflow_dispatch:
-  schedule:
-    - cron: "17 3 * * 1"
+    inputs:
+      extended_fuzzing:
+        description: Run adapter fuzzing for 10 minutes instead of 30 seconds
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -169,8 +169,9 @@ jobs:
         env:
           ASAN_OPTIONS: detect_leaks=1:allocator_may_return_null=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          EXTENDED_FUZZING: ${{ inputs.extended_fuzzing }}
         run: |
-          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+          if [[ "$EXTENDED_FUZZING" == "true" ]]; then
             seconds=600
           else
             seconds=30

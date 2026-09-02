@@ -1,0 +1,120 @@
+= Safety and Recovery
+
+Skyrim Runtime Swapper treats every runtime change as a recoverable transaction.
+It does not overwrite a managed live file merely because a patch operation returned success.
+
+== Storage roles
+
+Recovery Vault:: Stores verified original objects, manifests, journals, conflicts, and persistent-state metadata. It is required for recovery.
+
+Target Cache:: Stores verified target objects that can accelerate later starts. It is disposable and never the only recovery source.
+
+Transaction Workspace:: Stores deterministic staging and temporary transaction data. It is normally placed on the target volume so final replacement remains fast and atomic.
+
+Coordination Lock:: Prevents two SRS processes from mutating the same installation concurrently.
+
+These roles use separate resolved locations and are not interchangeable.
+
+== Typical storage locations
+
+For a trusted internal Steam library, private volume-local storage is preferred outside the Skyrim directory.
+
+Windows example:
+
+....
+D:\SteamLibrary\.runtime-swapper\
+|-- recovery\<installation-id>\active\
+|-- cache\<patch-plan-hash>\
+|-- locks\<installation-id>.lock
+`-- work\<installation-id>\<transaction-id>\
+....
+
+Linux example:
+
+....
+/mnt/games/SteamLibrary/.runtime-swapper/
+|-- recovery/<installation-id>/active/
+|-- cache/<patch-plan-hash>/
+|-- locks/<installation-id>.lock
+`-- work/<installation-id>/<transaction-id>/
+....
+
+For an external or uncertain game target, recovery storage is selected on another durable internal volume.
+Windows uses Local AppData when appropriate; Linux uses `$XDG_STATE_HOME` or `$HOME/.local/state` when appropriate.
+
+The user cannot select or override the vault path.
+
+== Before the first live change
+
+SRS:
+
+. locks the installation;
+. recovers or validates any prior transaction;
+. resolves and verifies game, vault, workspace, and volume identities;
+. verifies source hashes and patch hashes;
+. commits required originals to content-addressed vault objects;
+. synchronizes the vault intent and required directories; and
+. stages and verifies every target result.
+
+Only then can a managed live file be replaced.
+
+== Object and hash verification
+
+Original objects are stored by SHA-256 under:
+
+....
+objects/<sha256>
+....
+
+The manifest binds the installation, source version, target version, profile, patch plan, file layout, link layout, and relevant volume identities.
+
+After each live replacement, SRS reads and hashes the live result again.
+The exact target hash is mandatory.
+
+== Unknown or conflicting files
+
+An unknown live file is not silently discarded.
+SRS first preserves it as a verified conflict object.
+
+If the unknown content cannot be secured and verified, replacement is refused.
+
+The same rule applies when restoring a source file over content created after the transaction began.
+
+== Interruption and power loss
+
+The append-only journal records durable transaction boundaries with sequence numbers, record lengths, and CRCs.
+
+After a process crash, forced shutdown, or interrupted restore, the next SRS operation reads the journal and reconciles the live installation with the verified recovery state.
+
+Recovery is idempotent: repeating it must lead to the same verified result.
+
+IMPORTANT: A power loss can leave the game directory requiring recovery. The safety guarantee is that SRS does not knowingly launch Skyrim in an unverified mixed state and does not discard the verified recovery source.
+
+== Automatic restore and cleanup
+
+The watcher waits on the exact `SkyrimSE.exe` process handle.
+When that process exits, it recovers the runtime and optional content handled for the session through the shared recovery lifecycle.
+Present Creation Club files and `ContentCatalog.txt` are handled only when required; absent files are not downloaded or created for restoration.
+
+For a pre-existing verified target that SRS did not switch, content recovery leaves that runtime active.
+A content-only watcher must not be mistaken for a scheduled upgrade to Skyrim 1.7.104.
+
+After the complete source state and layout are verified, SRS:
+
+. records the verified source state;
+. removes active markers and locators;
+. deletes ephemeral recovery data safely;
+. removes empty legacy in-game transaction metadata; and
+. releases the coordination lock.
+
+If only cleanup fails, the installation remains in a verified source state with cleanup pending.
+The next launch can finish cleanup idempotently.
+
+== Persistent restore
+
+Persistent mode retains the vault and target state after Skyrim exits.
+The same cleanup sequence runs only after the user selects *Restore Skyrim 1.7.104* and the complete source state has been verified.
+
+WARNING: Do not manually delete recovery data during an active persistent or failed transaction.
+
+For user-facing modes and solutions, see xref:storage_modes.adoc[].

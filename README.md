@@ -1,99 +1,78 @@
 # Skyrim Runtime Swapper
 
-Skyrim Runtime Swapper lets a Skyrim mod collection built for an older runtime start through the unmodified `skse64_loader.exe`. On trusted internal filesystems it restores the original Steam runtime automatically after every game session. On external, removable, exFAT, or otherwise uncertain local storage it offers a recoverable persistent downgrade instead.
+Run Skyrim mod setups for **1.6.1170** or **1.5.97** through the existing `skse64_loader.exe`. SRS switches the required files before SKSE checks the game version.
 
-Current release: `1.2.0`.
+Current release: **1.2.1** · [Changelog](CHANGELOG.md) · [User documentation](docs/modules/ROOT/pages/index.adoc) · [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/189855)
 
-Release archives include `SHA256SUMS.txt` beside the four packages. Windows
-binaries are currently not Authenticode-signed; release integrity is provided
-through those checksums and reproducible native builds. The native x86-64 Linux
-helper targets Ubuntu 22.04 or newer (glibc 2.35).
+A new downgrade starts from Steam's **Skyrim 1.7.104**. An already-downgraded installation also works if its managed files exactly match the selected package.
 
-## Profiles
+## Choose a package
 
-Both profiles are available for Skyrim `1.6.1170` and `1.5.97`. They switch an installed `1.7.104` runtime before launch. Automatic mode restores `1.7.104` after the game exits; persistent mode keeps the target active until the user restores it through the GUI.
+**Using a Collection?** Let Vortex or your Collection installer install its selected SRS package and dependencies. Use the Collection's SKSE entry; do not add another variant manually. The steps below are for your own mod setup.
 
-| Patcher type | Target game version: `1.6.1170` | Target game version: `1.5.97` |
-| --- | --- | --- |
-| **Best of Both Worlds** | Binary-patches `SkyrimSE.exe`, `SkyrimSELauncher.exe`, and `Data\Skyrim - Shaders.bsa` to their 1.6.1170 versions. | Binary-patches `SkyrimSE.exe`, `SkyrimSELauncher.exe`, `steam_api64.dll`, and `Data\Skyrim - Shaders.bsa`. Creates the target-only `binkw64.dll`. The executable runtime is 1.5.97, while runtime-facing data uses the proven 1.6.1170 AE-compatible baseline. |
-| **Best of All Worlds** | Applies all Best of Both Worlds changes. Also binary-patches `Data\Skyrim - Interface.bsa`, `Skyrim.esm`, `Update.esm`, `Dawnguard.esm`, `HearthFires.esm`, and `Dragonborn.esm`. | Applies all Best of Both Worlds changes and the additional interface and master-file patches. Before launch, every present `cc*.bsa`, `cc*.esl`, `cc*.esm`, and `cc*.esp` in the root of `Data` is committed to the Recovery Vault and moved into the external transaction workspace. These files are restored after the game session. |
+Both target runtimes have two profiles:
 
-Other source files, stores, and runtimes are rejected without modification.
+- **Best of Both Worlds:** older runtime with newer 1.7.104 game data.
+- **Best of All Worlds:** also switches selected game data and official masters. For 1.5.97, present Creation Club files are kept out of the active game until restoration.
+
+SKSE and its plugins must match the **target runtime**. Regular plugins must match the chosen data profile. Install only one SRS package.
+
+See [profile differences and managed files](docs/modules/ROOT/pages/profiles.adoc).
 
 ## Installation
 
-1. Choose the archive matching the runtime required by the collection.
-2. Install it as a normal root mod through the mod manager and deploy it.
-3. Verify that `version.dll`, `SkyrimRuntimeSwapper.exe`, and `RuntimeSwap\patches` exist in the Skyrim game directory. Wine and Proton packages must also contain the build-specific, hash-pinned `SkyrimRuntimeSwapper.Native` ELF helper.
-4. Launch the unmodified `skse64_loader.exe` selected by the collection.
+1. Download the target and profile required by your setup.
+2. Install and deploy it as a **root mod**, not a Data-only mod. In Vortex, the included JSON selects **Engine Injector** automatically; leave that setting unchanged.
+3. Check that `version.dll`, `SkyrimRuntimeSwapper.exe`, `SkyrimRuntimeSwapper.Native`, and `RuntimeSwap/patches` are beside `SkyrimSE.exe`.
+4. Install matching SKSE and launch `skse64_loader.exe` normally.
 
-Do not combine multiple target archives in one installation.
+On Linux, the Windows application starts the native helper automatically; do not run `.Native` yourself. It requires x86-64 Linux with glibc 2.35 or newer.
 
-`SkyrimRuntimeSwapper.exe` can also be opened directly from the Skyrim game directory. Its manual control panel uses the same persistent transaction as the SKSE start dialog. It can keep the packaged target active for external tools or restore Skyrim 1.7.104 together with all persistently handled Creation Club and ContentCatalog files. The recovery vault is always selected by the program. There is no path field, browse button, configuration value, or command-line override.
+**Proton Experimental:** if SRS does not load, follow [the included launch instructions](assets/PROTON-EXPERIMENTAL-INSTRUCTIONS.txt).
+
+## Automatic or persistent
+
+On supported internal NTFS, ext4, XFS, or Btrfs storage, SRS normally restores 1.7.104 after Skyrim closes. External, removable, exFAT, and some other local storage require a persistent downgrade with a separate durable recovery vault. Unsupported or unverifiable storage is blocked.
+
+Open `SkyrimRuntimeSwapper.exe` to keep the target active or restore 1.7.104. **Persistent mode does not restore automatically.** An already-installed verified target is not upgraded merely because a game session ends.
+
+[Storage modes](docs/modules/ROOT/pages/storage_modes.adoc) · [Manual control panel](docs/modules/ROOT/pages/manual_control.adoc)
 
 ## How it works
 
-The native `version.dll` proxy is loaded by `skse64_loader.exe` before SKSE checks `SkyrimSE.exe`. It forwards all 17 exports provided by the Windows system DLL and starts `SkyrimRuntimeSwapper.exe` only for the Skyrim runtime check.
+`version.dll` starts SRS before SKSE's version check. SRS verifies files and patches with SHA-256, backs up originals, and checks patched output before replacing game files. On Linux, the native helper performs those operations.
 
-The helper validates the runtime, patch assets, and game files with SHA-256. HDiffPatch 5.1.3, Zstandard, and XXH128 support are linked statically into the helper. It applies HDIFFW26 patches to staged files and commits the transaction only after every result is verified. A flushed append-only journal with sequence numbers, record lengths, and CRCs records every staging, replacement, commit, and recovery boundary. Torn tails are repaired before the next append, damaged committed records fail closed, and recovery is idempotent.
+A watcher restores files changed for an automatic session. Interrupted transactions are recovered before another launch. Present Creation Club and ContentCatalog files are handled when required, including when the runtime is already downgraded.
 
-Every SKSE launch checks the current user's `ContentCatalog.txt`, including launches where Skyrim already uses the target runtime. Its own volume is classified independently. A catalog on storage without automatic durability is committed to the recovery vault and remains persistent until the GUI restore. Conflicting regenerated catalogs are preserved before the original is restored.
+[Recovery and backup locations](docs/modules/ROOT/pages/safety_recovery.adoc)
 
-For the 1.5.97 Best of All Worlds profile, official Creation Club files with the `cc` filename prefix and a `.bsa`, `.esl`, `.esm`, or `.esp` extension are handled separately. Before any move, every original and the checksummed inventory are committed to the independent vault. The same-volume transaction workspace stays outside Skyrim and remains an optimization, not the only recovery source. Unicode names are stored portably, Windows case collisions are rejected, and conflicting live files are preserved before recovery.
+## Troubleshooting
 
-Visible Runtime Swapper errors include buttons to copy the Runtime Swapper and newest SKSE logs or open Steam's file verification action.
+Use **Copy logs** in the error dialog. The SRS log is stored alongside SKSE's logs:
 
-A detached watcher locates the exact `SkyrimSE.exe` process and waits on its process handle without polling during gameplay. When the process exits, it applies the verified reverse patches and restores the source runtime. If the target runtime was already installed, game binaries remain untouched and only a temporarily removed `ContentCatalog.txt` is restored.
+```text
+Documents/My Games/Skyrim Special Edition/SKSE/SkyrimRuntimeSwapper.log
+```
 
-A session barrier remains active until restoration is complete. If SKSE is launched again immediately after Skyrim exits, the new launch waits for the previous watcher before it inspects or swaps any runtime files.
+Under Wine or Proton, use the Documents location in the prefix running SKSE. Keep recovery data intact while troubleshooting.
 
-Originals are content-addressed under `objects/<sha256>` in an automatically selected per-installation vault. Trusted internal Steam libraries use a private volume-local `.runtime-swapper` store outside the Skyrim directory. Disposable staging normally lives under `.runtime-swapper/work/<installation-id>/<transaction-id>`, so it remains fast and same-volume without being captured by game-root VFS or overwrite managers. If a safe final file link resolves into a separate bind mount, only deterministic disposable files are staged beside that effective target; the journal and vault remain outside the deployed game tree. Other recovery vaults use Local AppData on Windows and `$XDG_STATE_HOME`, or `$HOME/.local/state`, on Linux and Proton. The vault must be local, owned by the current user, free of symlink or reparse traversal, permission-restricted, large enough for the objects plus reserve, and on a storage backend with native file and directory synchronization.
-
-Internal NTFS on Windows and internal ext4, XFS, or Btrfs on Linux use automatic per-session restoration. External or removable volumes and exFAT use persistent-only mode with a vault on another durable volume. Unknown but stable local storage requires an explicit warning confirmation. Network storage, unsafe paths, missing recovery storage, missing native helpers, and unrecognized source files are hard blocked. A hard block exposes no downgrade action.
-
-Under Wine and Proton the Windows process translates paths and coordinates a native ELF sidecar through a one-shot, nonce-bound, length-prefixed exchange in a randomly named private directory. The native helper restricts and validates the directory, rejects links and pre-existing responses, and publishes its response atomically. The ELF SHA-256 is embedded into the Windows binary and verified immediately before every launch attempt. Only the native helper mutates managed files, so Linux filesystem synchronization and rename semantics are used directly.
-
-The vault intent is synchronized before the game volume changes. Each live result is hashed again after replacement. Persistent markers are committed in the vault first and then in the private target-volume workspace outside Skyrim. If the active vault disappears or another device appears at a reused path, the transaction remains pending and launch is blocked instead of silently selecting a replacement vault.
-
-The bootstrap does not use CommonLibSSE, Address Library, or the SKSE plugin API. It runs before regular SKSE plugins and before the Engine Fixes preloader.
+[Troubleshooting guide](docs/modules/ROOT/pages/troubleshooting.adoc) · [Discord help](https://discord.gg/pqEHdWDf8z) · [Report a bug](https://github.com/Modding-Forge/Skyrim-Runtime-Swapper/issues)
 
 ## Building
 
-Requirements:
-
-- Windows x64 with Visual Studio and the Desktop development with C++ workload for the proxy and GUI
-- A Linux C++20 toolchain for the native ELF sidecar
-- CMake 3.25 or newer
-- Python 3 for the sidecar protocol test
-- Git with recursive submodule support
-
-The pipeline consumes verified format 3 asset catalogs. Each catalog is a profile superset. CMake selects the exact files, validates both patch directions, builds and tests separate binaries, and creates four complete archives under `dist/builds/<version>/<build-id>/`.
-
-Without an explicit asset path, the build discovers every catalog under `assets/runtime/*/manifest.json`. The 1.5.97 hybrid catalog can be regenerated from verified local Steam depots with `uv run python tools/create-1.5.97-assets.py`. HDiffPatch5 is pinned as a recursive Git submodule under `third_party/HDiffPatch5`.
-
-Explicit asset paths can be supplied when needed:
+Requires Visual Studio's C++ desktop workload on Windows x64, CMake 3.25+, Python 3, and recursive Git submodules. The Linux helper needs a C++20 toolchain; release helpers target the Ubuntu 22.04 ABI.
 
 ```text
-build.bat Release D:\Assets\manifest.json
+git submodule update --init --recursive
+build.bat Release
 ```
 
-The build fails if the asset format, algorithm, HDiffPatch version, runtime pair, required profile files, or patch hashes do not match. Bethesda game files are never included.
+The build uses the catalogs in `assets/runtime`, tests each profile, and writes four packages to `dist/builds/<version>/<build-id>/`. For Linux-enabled bundles, supply matching helpers through `NATIVE_SIDECAR_ROOT/<target>/<profile>/SkyrimRuntimeSwapper.Native`. See [the build script](tools/build-all.cmake).
 
-The normal CTest suite covers journal migration, torn records, risk acceptance, vault corruption, unknown-file preservation, Unicode names, ContentCatalog conflicts, and transaction cut points. CI also verifies every recursive HDiffPatch pin, runs the adapter under ASan/UBSan and libFuzzer, and compares two clean native release builds. Additional guarded release-gate runners live under `tools/tests` for Windows VHDX classification and detach recovery, Linux loop filesystems, persistent exFAT and ntfs-3g activation plus restore, `dm-log-writes` replay, `dm-flakey` failures, WSL shutdowns, sidecar protocol rejection, and full runtime crash recovery with a locally supplied clean Skyrim fixture. The destructive storage runners create and validate isolated temporary images only, require explicit administrator or root execution, and never select a physical disk.
+The full **Storage safety** workflow runs manually through GitHub Actions. It covers the platform matrices, sanitizers, fuzzing, dependency pins, and reproducibility checks. Additional storage fault-injection runners are in [tools/tests](tools/tests).
 
-## Source layout
-
-- `src/app` owns user-facing diagnostics, the shared session and persistent operations, ContentCatalog and Creation Club handling, and the game-session watcher.
-- `src/core` owns hashing, automatic vault resolution, storage classification, journals, patch application, validation, and recoverable runtime transactions.
-- `src/sidecar` contains the native Linux and Proton transaction entry point.
-- `src/proxy` contains the minimal Windows `version.dll` proxy and bootstrap.
-- `src/include/runtime_swapper` contains the core interfaces shared by executables and tests.
-- `src/tools` and `src/tests` contain build-time validation and focused native tests.
-
-The proxy only starts the application layer. The application coordinates sessions through the core interfaces, while the core remains independent of dialogs and process-launch behavior.
+`SHA256SUMS.txt` accompanies the release packages. Windows binaries are not Authenticode-signed. Packages contain binary patches, not Bethesda game files.
 
 ## License
 
-Copyright (c) 2026 Dennis Unger, Modding Forge.
-
-Skyrim Runtime Swapper is licensed under the [GNU General Public License version 3](LICENSE).
+Copyright (c) 2026 Dennis Unger, Modding Forge. Licensed under [GPLv3](LICENSE).

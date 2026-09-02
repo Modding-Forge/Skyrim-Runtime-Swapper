@@ -1,0 +1,82 @@
+= Installation
+
+Skyrim Runtime Swapper is a root mod.
+Its files must be deployed beside `SkyrimSE.exe`, not only inside `Data`.
+
+These instructions cover standalone installation; Collections install SRS automatically.
+
+== Required game-root layout
+
+After installation and deployment, the Skyrim directory must contain at least:
+
+....
+Skyrim Special Edition/
+|-- Data/
+|-- RuntimeSwap/
+|   `-- patches/
+|-- SkyrimRuntimeSwapper.exe
+|-- SkyrimRuntimeSwapper.Native
+|-- SkyrimSE.exe
+|-- skse64_loader.exe
+`-- version.dll
+....
+
+The package also contains `PROTON-EXPERIMENTAL-INSTRUCTIONS.txt` and `vortex_override_instructions.json`.
+In Vortex, the JSON automatically selects *Engine Injector*, so root deployment is correct without changing the default mod type.
+
+CAUTION: Do not place `version.dll`, `SkyrimRuntimeSwapper.exe`, or `RuntimeSwap` under `Data`.
+
+== Install standalone through a mod manager
+
+. Add the selected ZIP archive to the mod manager.
+. In Vortex, keep the automatically selected *Engine Injector* type. In other managers, use the root-deployment method described in xref:mod_managers.adoc[].
+. Enable and deploy the package.
+. Open the Skyrim game directory and verify the required layout above.
+. Install the matching SKSE version separately.
+. Launch through the configured `skse64_loader.exe` entry.
+
+Manager-specific guidance is available in xref:mod_managers.adoc[].
+
+.Skyrim Runtime Swapper files deployed in the Skyrim game directory (highlighted in red).
+image::installation-game-root-windows.png[Windows Explorer showing the SRS files beside SkyrimSE.exe]
+
+== Install standalone manually
+
+. Close Skyrim, SKSE, Steam launch dialogs, and the mod manager.
+. Open the selected release archive.
+. Extract its complete contents directly into the directory containing `SkyrimSE.exe`.
+. Preserve the directory structure under `RuntimeSwap`.
+. Launch through `skse64_loader.exe`.
+
+IMPORTANT: Manual installation does not exempt the package from mod-manager deployment rules. A later purge, restore, or redeploy can remove or replace manually extracted root files.
+
+== Update from an older version
+
+For a Collection, use the update supplied through the manager and follow the Collection's instructions, including any required restore before updating.
+Do not replace its selected SRS package independently.
+For a standalone installation:
+
+. First allow an active automatic session to restore Skyrim 1.7.104.
+. If a persistent downgrade is active, use `SkyrimRuntimeSwapper.exe` to restore Skyrim 1.7.104.
+. Replace the old package with the new package.
+. Deploy only the new package.
+. Launch through SKSE.
+
+The current release safely retires verified inactive v1.0.0 and v1.1.0 storage on first launch.
+Active, linked, unknown, or unverifiable legacy state is preserved and blocks unsafe cleanup.
+
+NOTE: Restoring first is the recommended update workflow, not a requirement to upgrade an independently downgraded game with Steam. Existing verified target installations and compatible legacy persistent states are supported. See xref:faqs.adoc#already-downgraded[Already-downgraded installations].
+
+Before updating for a support case, save a copy of any logs you still need.
+The current log format replaces old uncorrelated logs as described in xref:troubleshooting.adoc#log-history[Log history and older logs].
+
+WARNING: Never manually delete an active recovery vault merely to complete an update. Restore the source state first or collect diagnostics if recovery is unavailable.
+
+== Uninstall
+
+. Restore Skyrim 1.7.104 through the manual control panel if a persistent downgrade is active.
+. Close Skyrim and wait for any automatic restore to finish.
+. Disable or remove the package through the mod manager.
+. Purge or redeploy according to the manager's normal root-mod workflow.
+
+TIP: If the source state cannot be verified before uninstalling, use the *Copy logs* action and follow xref:troubleshooting.adoc[].

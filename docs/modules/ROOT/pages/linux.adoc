@@ -1,0 +1,32 @@
+= Linux
+
+Use the same SRS package as on Windows and launch through your mod manager's `skse64_loader.exe` entry under Wine or Proton.
+The included `SkyrimRuntimeSwapper.Native` helper runs automatically; no separate installation or manual launch is needed.
+
+== Requirements
+
+* x86-64 Linux with glibc 2.35 or newer
+* Wine or Proton configured for your mod setup
+
+For deployment, see xref:mod_managers.adoc[].
+Proton Experimental users may need the launch setting described in xref:proton.adoc[].
+
+== Storage
+
+Internal ext4, XFS, and Btrfs normally support automatic swapping and restoration.
+External drives and exFAT generally require a persistent downgrade with suitable recovery storage available.
+SRS selects the mode and recovery location automatically, and its dialog explains any required action.
+
+For mode details and other filesystems, see xref:storage_modes.adoc[].
+
+[#zfs]
+=== ZFS support status
+
+ZFS is not currently supported for the game or recovery storage.
+This is an SRS compatibility limitation, not a claim that ZFS itself is unsafe.
+Support is tracked in link:https://github.com/Modding-Forge/Skyrim-Runtime-Swapper/issues/3[GitHub issue #3].
+
+== If something goes wrong
+
+Use *Copy logs* in the error dialog and see xref:troubleshooting.adoc[].
+If SRS never starts, check root deployment and the Proton instructions above.

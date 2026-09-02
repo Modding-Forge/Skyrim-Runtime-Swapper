@@ -1,0 +1,19 @@
+= Glossary
+
+Runtime:: The Skyrim executable version that SKSE and SKSE plugins must match.
+
+Source:: Skyrim 1.7.104, the supported starting version for a new downgrade and the version restored afterwards.
+
+Target:: The older runtime selected by the SRS package: 1.6.1170 or 1.5.97.
+
+Best of Both Worlds (BoBW):: An older runtime combined with Skyrim 1.7.104 game data.
+
+Best of All Worlds (BoAW):: An older runtime with the important version-dependent game data and official master files switched as well.
+
+Persistent:: The selected runtime stays active until you restore it through `SkyrimRuntimeSwapper.exe`.
+
+Recovery Vault:: The automatically chosen location where SRS keeps verified backups and recovery information.
+
+VFS (Virtual File System):: A mod manager's virtual view of the game files, which can differ from what you see in the game folder.
+
+See xref:profiles.adoc[] for profile differences and xref:storage_modes.adoc[] for storage modes.

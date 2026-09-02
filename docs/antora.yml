@@ -1,0 +1,5 @@
+name: skyrim-runtime-swapper
+title: Skyrim Runtime Swapper
+version: ~
+nav:
+  - modules/ROOT/nav.adoc
