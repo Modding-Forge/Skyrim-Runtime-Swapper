@@ -178,7 +178,7 @@ The dialog shows a human-readable message and a stable *Technical reason*.
 |The SRS vault is not exclusively controlled by the current user. Do not weaken the check; correct ownership only for the displayed SRS directory.
 
 |`unsafe-native-installation-lock`
-|SRS cannot safely establish the installation lock. Version 1.2.2 can use private user-state storage for fresh installations in group-writable Linux Steam libraries. Existing unsafe or conflicting state can still block startup; preserve it and report the exact logged paths.
+|SRS cannot safely establish the installation lock. Since version 1.2.2, SRS can use private user-state storage for fresh installations in group-writable Linux Steam libraries. Existing unsafe or conflicting state can still block startup; preserve it and report the exact logged paths.
 
 |`vault-parent-reparse` or `vault-parent-symlink`
 |The automatically resolved vault hierarchy contains an unsafe redirection. Remove or correct the unexpected redirection without deleting active recovery data.
@@ -209,7 +209,7 @@ findmnt -T "/replace/with/the/displayed/path" -o TARGET,SOURCE,FSTYPE,OPTIONS
 
 Replace the quoted placeholder with the actual path from the error.
 SRS uses verified Steam-library transaction storage when safe and does not require an unrelated XDG state directory for that operation.
-For fresh installations where group-writable library parents cannot safely host the lock, version 1.2.2 instead selects validated private user-state storage.
+Since version 1.2.2, SRS instead selects validated private user-state storage for fresh installations where group-writable library parents cannot safely host the lock.
 If both locations contain state, or an existing state location is unsafe, SRS blocks instead of silently starting with a new vault.
 If the error remains, provide the current SRS log and the output above.
 
@@ -235,11 +235,12 @@ Apply this only to the packaged helper in the Skyrim root.
 If recovery blocks, copy the logs and preserve the displayed vault path.
 
 [#inconsistent-recovery]
-== Inconsistent recovery markers after a test build
+== Inconsistent recovery markers
 
 `code=34 (journal-corrupt)` or "The persistent recovery markers are inconsistent" means SRS cannot reconcile its stored transaction records.
 It does not, by itself, prove that the current game files are damaged.
-Some 1.2.2 RC attempts can leave this state; the final release does not automatically discard or repair inconsistent journals.
+Some 1.2.2 RC attempts and a mixed-state BoAW-Clean recovery in 1.2.2 can leave this state.
+Version 1.2.3 prevents the latter by saving the optional-file selection before creating the recovery journal; it does not automatically discard or repair already-inconsistent journals.
 
 . Save the complete log and report the exact package version and profile.
 . Close Skyrim, SKSE and SRS, and stop any mod-manager deployment.
@@ -259,7 +260,7 @@ Confirm a new activation and its matching watcher restore in the log before cons
 == Source verified, but recovery cleanup remains pending
 
 This means restoration and cleanup are separate: the source may already be verified while SRS still needs to preserve conflict files or finish removing transaction metadata.
-Version 1.2.2 can archive verified conflicts outside the active vault before retiring it; see xref:safety_recovery.adoc#conflict-archive[Conflict archives].
+Since version 1.2.2, SRS can archive verified conflicts outside the active vault before retiring it; see xref:safety_recovery.adoc#conflict-archive[Conflict archives].
 
 If the current release still blocks, keep the recovery data, check the logged storage error and provide the complete log.
 Do not remove the vault just because the message says the source is verified.

@@ -42,7 +42,7 @@ Linux example:
 For an external or uncertain game target, recovery storage is selected on another durable internal volume.
 Windows uses Local AppData when appropriate; Linux uses `$XDG_STATE_HOME` or `$HOME/.local/state` when appropriate.
 
-On Linux, version 1.2.2 also uses validated private user-state storage for fresh installations whose group-writable Steam-library hierarchy cannot safely host SRS state.
+Since version 1.2.2, SRS on Linux also uses validated private user-state storage for fresh installations whose group-writable Steam-library hierarchy cannot safely host SRS state.
 The base is normally `$XDG_STATE_HOME/modding-forge/skyrim-runtime-swapper` or `$HOME/.local/state/modding-forge/skyrim-runtime-swapper`.
 An existing transaction pins its storage choice; SRS does not silently relocate unsafe or conflicting state. See xref:linux.adoc#private-state[Shared-library permissions].
 

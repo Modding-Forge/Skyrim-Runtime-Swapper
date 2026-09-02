@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(SkyrimRuntimeSwapper VERSION 1.2.2 LANGUAGES C CXX)
+project(SkyrimRuntimeSwapper VERSION 1.2.3 LANGUAGES C CXX)
 
 option(SKYRIM_RUNTIME_BUILD_FUZZER
   "Build the Linux libFuzzer target for the handle-bound HDiffPatch adapter" OFF)
 
-set(SKYRIM_RUNTIME_RELEASE_VERSION "1.2.2")
+set(SKYRIM_RUNTIME_RELEASE_VERSION "1.2.3")
 if(SKYRIM_RUNTIME_RELEASE_VERSION MATCHES "-")
   set(SKYRIM_RUNTIME_VERSION_FLAGS "VS_FF_PRERELEASE")
 else()
@@ -317,6 +317,7 @@ add_library(runtime_swapper_core STATIC
   src/core/vault_store.cpp
   ${RUNTIME_SWAPPER_PLATFORM_SOURCES}
 )
+
 target_include_directories(runtime_swapper_core BEFORE
   PUBLIC "${GENERATED_INCLUDE}" src/include
   PRIVATE src/core
@@ -335,6 +336,19 @@ endif()
 include(CTest)
 
 if(BUILD_TESTING)
+  # Real-depot regression probe; never included in release packages.
+  if(SKYRIM_RUNTIME_BUILD_PROFILE STREQUAL "boaw-clean")
+    add_executable(optional_recovery_probe src/tests/optional_recovery_probe.cpp)
+    target_include_directories(optional_recovery_probe PRIVATE src/core)
+    target_link_libraries(optional_recovery_probe PRIVATE runtime_swapper_core)
+  endif()
+
+  add_executable(recovery_selection_tests src/tests/recovery_selection_tests.cpp)
+  target_include_directories(recovery_selection_tests PRIVATE src/core)
+  target_link_libraries(recovery_selection_tests PRIVATE runtime_swapper_core)
+  srs_harden_compile(recovery_selection_tests)
+  add_test(NAME recovery_selection_tests COMMAND recovery_selection_tests)
+
   add_executable(prepared_storage_tests src/tests/prepared_storage_tests.cpp)
   target_include_directories(prepared_storage_tests BEFORE PRIVATE
     "${GENERATED_INCLUDE}" src/include src/core src/tests)

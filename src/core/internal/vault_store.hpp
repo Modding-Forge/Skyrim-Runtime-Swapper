@@ -82,6 +82,11 @@ enum class PersistentMarkerState { inactive, active, invalid };
                                            const std::filesystem::path& game_root);
 [[nodiscard]] bool commit_verified_runtime_manifest(
     const VaultLayout& vault, const std::filesystem::path& game_root);
+// After recovery preflight, persist a fresh optional-file selection before any
+// journal is written. Existing selections are validated, never replaced. This
+// records the plan, not a claim that every source object exists in the vault.
+[[nodiscard]] bool ensure_recovery_selection_manifest(
+    const VaultLayout& vault, const std::filesystem::path& game_root);
 [[nodiscard]] bool runtime_manifest_matches(const VaultLayout& vault);
 
 [[nodiscard]] bool preserve_conflict(const VaultLayout& vault,

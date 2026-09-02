@@ -2,6 +2,16 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.2.3 - 2026-09-03
+
+- Fixed fresh BoAW-Clean recovery blocking itself when supported original files
+  coexist with an already-cleaned Beafarmer plugin. The optional-file selection
+  is now saved durably before the recovery journal is created.
+- Added regression coverage for the reproduced mixed state, interrupted metadata
+  writes and fresh-process retries. Missing, corrupt or foreign selections in
+  existing transactions still fail closed; old inconsistent journals are not
+  automatically discarded or repaired.
+
 ## 1.2.2 - 2026-09-02
 
 - Added an alternative BoAW-Clean package for 1.6.1170, combining the downgrade

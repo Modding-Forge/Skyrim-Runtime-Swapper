@@ -79,9 +79,10 @@ The current log format replaces old uncorrelated logs as described in xref:troub
 
 WARNING: Never manually delete an active recovery vault merely to complete an update. Restore the source state first or collect diagnostics if recovery is unavailable.
 
-Some 1.2.2 test builds can leave inconsistent recovery markers that the final release deliberately refuses to discard automatically.
+Some 1.2.2 test builds and a mixed-state BoAW-Clean recovery in 1.2.2 can leave inconsistent recovery markers.
+Version 1.2.3 prevents the latter issue but deliberately refuses to discard or repair already-inconsistent records automatically.
 Updating the executable or verifying files through Steam does not itself reset those records.
-See xref:troubleshooting.adoc#inconsistent-recovery[Inconsistent recovery markers after a test build] for the support workflow.
+See xref:troubleshooting.adoc#inconsistent-recovery[Inconsistent recovery markers] for the support workflow.
 
 == Uninstall
 

@@ -7,7 +7,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$BaselineGameRoot,
     [Parameter(Mandatory = $true)]
-    [string]$PatchRoot
+    [string]$PatchRoot,
+    [switch]$KeepFixtures
 )
 
 $ErrorActionPreference = 'Stop'
@@ -50,6 +51,7 @@ function Assert-Baseline {
 
 try {
     foreach ($phase in 1..10) {
+        Write-Host "Testing journal phase $phase"
         $gameRoot = Join-Path $resolvedRoot "phase-$phase"
         New-Item -ItemType Directory -Path $gameRoot | Out-Null
         Get-ChildItem -LiteralPath $baseline -Force |
@@ -79,16 +81,20 @@ try {
 }
 finally {
     Remove-Item Env:SKYRIM_RUNTIME_SWAPPER_FAULT_AFTER_PHASE -ErrorAction SilentlyContinue
-    foreach ($vault in $testVaults) {
-        if ($vault -and (Split-Path -Leaf $vault).StartsWith('skyrimse-') -and
-            $vault.Contains('Skyrim Runtime Swapper')) {
-            Remove-Item -LiteralPath $vault -Recurse -Force -ErrorAction SilentlyContinue
+    if (-not $KeepFixtures) {
+        foreach ($vault in $testVaults) {
+            if ($vault -and (Split-Path -Leaf $vault).StartsWith('skyrimse-') -and
+                $vault.Contains('Skyrim Runtime Swapper')) {
+                Remove-Item -LiteralPath $vault -Recurse -Force -ErrorAction SilentlyContinue
+            }
         }
-    }
-    $checkedRoot = [System.IO.Path]::GetFullPath($resolvedRoot)
-    if ($checkedRoot.StartsWith($resolvedTemp, [System.StringComparison]::OrdinalIgnoreCase) -and
-        (Split-Path -Leaf $checkedRoot).StartsWith('srs-fault-matrix-')) {
-        Remove-Item -LiteralPath $checkedRoot -Recurse -Force -ErrorAction SilentlyContinue
+        $checkedRoot = [System.IO.Path]::GetFullPath($resolvedRoot)
+        if ($checkedRoot.StartsWith($resolvedTemp, [System.StringComparison]::OrdinalIgnoreCase) -and
+            (Split-Path -Leaf $checkedRoot).StartsWith('srs-fault-matrix-')) {
+            Remove-Item -LiteralPath $checkedRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    } else {
+        Write-Host "Fault matrix fixtures retained: $resolvedRoot"
     }
 }
 

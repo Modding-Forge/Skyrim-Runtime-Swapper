@@ -407,14 +407,34 @@ bool commit_verified_runtime_manifest(const VaultLayout& vault,
                                       const std::filesystem::path& game_root) {
   if (!runtime_layout_matches(game_root, vault.runtime_layout)) return false;
   const auto manifest = manifest_contents(vault);
-  if (!transaction_backend().write_atomic(vault.manifest, manifest) ||
-      read_all(vault.manifest) != manifest) {
+  if (fault_injected("vault.before-manifest-write") ||
+      !transaction_backend().write_atomic(vault.manifest, manifest) ||
+      read_all(vault.manifest) != manifest ||
+      fault_injected("vault.after-manifest-write")) {
     return false;
   }
   const auto locator = locator_contents(vault);
   const auto target = workspace_locator(vault.probe);
   return transaction_backend().write_atomic(target, locator) &&
          read_all(target) == locator;
+}
+
+bool ensure_recovery_selection_manifest(
+    const VaultLayout& vault, const std::filesystem::path& game_root) {
+  if (!std::ranges::any_of(patch_plan, [](const auto& entry) {
+        return entry.optional_if_missing;
+      })) return true;
+
+  // This also rejects existing journals without a selection manifest. Never
+  // infer a new selection from file presence in an interrupted transaction.
+  if (!runtime_layout_matches(game_root, vault.runtime_layout)) return false;
+  std::error_code error;
+  const auto status = std::filesystem::symlink_status(vault.manifest, error);
+  if (error == std::errc::no_such_file_or_directory ||
+      (!error && status.type() == std::filesystem::file_type::not_found)) {
+    return commit_verified_runtime_manifest(vault, game_root);
+  }
+  return !error && status.type() == std::filesystem::file_type::regular;
 }
 
 bool runtime_manifest_matches(const VaultLayout& vault) {

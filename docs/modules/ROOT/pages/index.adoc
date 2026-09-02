@@ -1,5 +1,7 @@
 = Introduction
 
+Current SRS release: *1.2.3*.
+
 Skyrim Runtime Swapper lets a Skyrim mod setup built for an older runtime start through the unmodified `skse64_loader.exe` without requiring the Steam installation to remain permanently downgraded.
 
 The current release supports these target runtimes:

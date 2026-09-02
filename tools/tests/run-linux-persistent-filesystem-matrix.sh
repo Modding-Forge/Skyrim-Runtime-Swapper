@@ -54,6 +54,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Keep IPC in the matrix's private directory, not beside a sidecar that may
+# live on a Windows/DrvFS build volume with different ownership semantics.
+export SRS_TEST_ROOT="${SRS_TEST_ROOT:-$test_root}"
+
 attach_loop() {
   local image="$1"
   attached_loop="$(losetup --find --show "$image")"

@@ -74,7 +74,11 @@ cleanup() {
   for ((index=${#loops[@]}-1; index>=0; --index)); do
     losetup -d "${loops[index]}" 2>/dev/null
   done
-  rm -rf -- "$test_root"
+  if [[ ${SRS_KEEP_TEST_FIXTURES:-0} == 1 ]]; then
+    echo "Block matrix images retained: $test_root"
+  else
+    rm -rf -- "$test_root"
+  fi
 }
 trap cleanup EXIT
 
@@ -160,8 +164,13 @@ repair_ext4() {
 baseline_bytes="$(du -sb --apparent-size "$baseline" | cut -f1)"
 target_mib=$(( (baseline_bytes * 4 + 1073741823) / 1048576 + 1024 ))
 (( target_mib < 2048 )) && target_mib=2048
-vault_mib=$(( (baseline_bytes * 3 + 1073741823) / 1048576 + 1024 ))
-(( vault_mib < 2048 )) && vault_mib=2048
+# Every case retains its own source objects and target cache on this shared
+# volume. Reserve space for the whole matrix, not only the first transaction.
+case_count=3
+[[ "$mode" == all ]] && case_count=13
+[[ "$mode" == corruption ]] && case_count=1
+vault_mib=$(( (baseline_bytes * case_count * 3 + 1073741823) / 1048576 + 2048 ))
+(( vault_mib < 4096 )) && vault_mib=4096
 log_mib=$(( target_mib * 2 ))
 
 base_image="$test_root/baseline.ext4"
@@ -172,7 +181,9 @@ base_loop="$attached_loop"
 base_mount="$test_root/base"
 mount_device "$base_loop" "$base_mount"
 mkdir -p "$base_mount/game"
-cp -a -- "$baseline"/. "$base_mount/game/"
+# The matrix runs as root; depot fixtures may belong to an unprivileged user.
+# Preserve their bytes, not the foreign owner that SRS correctly rejects.
+cp -a --no-preserve=ownership -- "$baseline"/. "$base_mount/game/"
 sync -f "$base_mount/game"
 unmount_device "$base_mount"
 detach_loop "$base_loop"
@@ -253,6 +264,7 @@ if [[ "$mode" == corruption ]]; then
 fi
 for feature_spec in "${feature_specs[@]}"; do
   IFS='|' read -r slug feature_count feature <<<"$feature_spec"
+  echo "Testing block fault: $slug"
   target_image="$test_root/flakey-$slug.ext4"
   cp --reflink=auto --sparse=always "$base_image" "$target_image"
   attach_loop "$target_image"
@@ -281,6 +293,7 @@ for feature_spec in "${feature_specs[@]}"; do
   XDG_STATE_HOME="$state" HOME="$test_root/home" \
     timeout 300 "$probe" "$recovery_mount/game" "$patches" >/dev/null
   verify_baseline "$recovery_mount/game"
+  echo "Block fault $slug recovered with every baseline byte verified"
   unmount_device "$recovery_mount"
   detach_loop "$target_loop"
 done

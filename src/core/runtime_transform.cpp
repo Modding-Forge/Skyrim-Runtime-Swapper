@@ -562,6 +562,15 @@ struct SourceCandidateRestore {
             preflight_message + L"\n\nUse Steam's Verify integrity of game files action."};
   }
 
+  // Fresh mixed-runtime recovery can rely on reverse patches without a prior
+  // activation or vault manifest. Pin optional-file selection first: creating
+  // a journal without it would make the next layout check reject our own state.
+  if (!ensure_recovery_selection_manifest(*vault, game_root)) {
+    return {ExitCode::recovery_failed, false,
+            L"The optional-file selection could not be saved before recovery. "
+            L"No managed file was changed."};
+  }
+
   std::filesystem::create_directories(active / L"recovery", error);
   if (error) {
     return {ExitCode::recovery_failed, false,

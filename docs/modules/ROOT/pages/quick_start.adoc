@@ -18,13 +18,13 @@ IMPORTANT: Do not install more than one Skyrim Runtime Swapper package at the sa
 
 == Building your own mod setup
 
-Version 1.2.2 contains these five packages, distributed as `.7z` archives:
+Version 1.2.3 contains these five packages, distributed as `.7z` archives:
 
-* `SRS-v1.2.2-BoBW-1.7.104-to-1.6.1170.7z`
-* `SRS-v1.2.2-BoAW-1.7.104-to-1.6.1170.7z`
-* `SRS-v1.2.2-BoBW-1.7.104-to-1.5.97.7z`
-* `SRS-v1.2.2-BoAW-1.7.104-to-1.5.97.7z`
-* `SRS-v1.2.2-BoAW-Clean-1.7.104-to-1.6.1170.7z` (alternative to normal BoAW, not an add-on)
+* `SRS-v1.2.3-BoBW-1.7.104-to-1.6.1170.7z`
+* `SRS-v1.2.3-BoAW-1.7.104-to-1.6.1170.7z`
+* `SRS-v1.2.3-BoBW-1.7.104-to-1.5.97.7z`
+* `SRS-v1.2.3-BoAW-1.7.104-to-1.5.97.7z`
+* `SRS-v1.2.3-BoAW-Clean-1.7.104-to-1.6.1170.7z` (alternative to normal BoAW, not an add-on)
 
 === Install and launch
 

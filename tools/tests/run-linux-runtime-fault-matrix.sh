@@ -30,7 +30,11 @@ if [[ "$test_root" != "$test_base"/srs-runtime-faults.* ]]; then
   exit 2
 fi
 cleanup() {
-  rm -rf -- "$test_root"
+  if [[ ${SRS_KEEP_TEST_FIXTURES:-0} == 1 ]]; then
+    echo "Fault matrix fixtures retained: $test_root"
+  else
+    rm -rf -- "$test_root"
+  fi
 }
 trap cleanup EXIT
 
