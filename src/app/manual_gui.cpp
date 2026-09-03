@@ -256,7 +256,8 @@ class ManualOperationLock {
     TASKDIALOGCONFIG configuration{};
     configuration.cbSize = sizeof(configuration);
     configuration.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
-    configuration.pszWindowTitle = L"Skyrim Runtime Swapper";
+    const auto title = application_title();
+    configuration.pszWindowTitle = title.c_str();
     configuration.pszMainIcon = TD_INFORMATION_ICON;
     configuration.pszMainInstruction = L"Manual runtime control";
     configuration.pszContent = status.text.c_str();
@@ -277,7 +278,7 @@ class ManualOperationLock {
     const auto result = selected == switch_button_id
                             ? switch_to_fixed_target(game_root)
                             : restore_source_runtime(game_root);
-    MessageBoxW(nullptr, result.message.c_str(), L"Skyrim Runtime Swapper",
+    MessageBoxW(nullptr, result.message.c_str(), title.c_str(),
                 MB_OK | (result.success ? MB_ICONINFORMATION : MB_ICONERROR) |
                     MB_SETFOREGROUND);
     if (result.success) return 0;

@@ -283,7 +283,7 @@ int run(int argc, wchar_t** argv) {
     MessageBoxW(
         nullptr,
         (prepared.message + L"\n\nSKSE will now continue with the matching runtime.").c_str(),
-        L"Skyrim Runtime Swapper", MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
+        application_title().c_str(), MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
   }
   return static_cast<int>(ExitCode::success);
 }
