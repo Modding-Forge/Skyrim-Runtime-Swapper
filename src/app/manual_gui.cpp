@@ -183,10 +183,10 @@ class ManualOperationLock {
                                             const BackendProbeResult& backend) {
   std::wstring status = L"Game directory:\n" + display_path(game_root) +
                         L"\n\nProfile: " +
-                        profile_name() + L"\nAvailable switch: 1.7.104 <-> " +
+                        profile_name() + L"\nSupported switch: 1.7.104 <-> " +
                         std::wstring(target_version_label) + L"\n";
   auto executable = executable_status(game_root / L"SkyrimSE.exe");
-  status += L"Executable: " + executable.text;
+  status += L"Detected game version: " + executable.text;
   status += L"\nPersistent target: ";
   switch (fixed_state) {
     case FixedRuntimeState::inactive:

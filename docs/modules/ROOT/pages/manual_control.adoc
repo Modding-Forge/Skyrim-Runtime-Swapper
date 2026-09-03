@@ -3,7 +3,7 @@
 Open `SkyrimRuntimeSwapper.exe` from the Skyrim game directory to inspect the current runtime or manage a persistent target.
 
 The manual control panel uses the same verified transaction and recovery logic as an SKSE launch.
-The *Executable* line includes both the version embedded in `SkyrimSE.exe` and a SHA-256 verification against the selected profile's supported source and target files.
+The *Detected game version* line includes both the version embedded in `SkyrimSE.exe` and a SHA-256 verification against the selected profile's supported source and target files.
 
 .Manual control panel with Skyrim 1.7.104 installed and no persistent target active.
 image::manual-control-source-windows.png[Manual runtime control showing installed executable 1.7.104 and persistent target disabled]
