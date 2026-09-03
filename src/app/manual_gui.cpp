@@ -213,7 +213,9 @@ class ManualOperationLock {
     }
   }
   if (!executable.recognized) {
-    status += L"\n\nManual runtime actions are unavailable until Steam verifies SkyrimSE.exe.";
+    status += L"\n\nManual runtime actions are unavailable until Steam verifies SkyrimSE.exe. "
+              L"Modified, unofficial, or unlicensed game files, including pirated copies, "
+              L"are not supported and cannot be made compatible.";
   }
   executable.text = std::move(status);
   return executable;

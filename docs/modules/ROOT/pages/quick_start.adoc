@@ -14,6 +14,8 @@ You need:
 * SKSE plugins matching the target runtime
 * One Skyrim Runtime Swapper package matching the target and profile required by the mod setup
 
+Modified, unofficial, unlicensed, or pirated game files are not supported and cannot be made compatible with SRS.
+
 IMPORTANT: Do not install more than one Skyrim Runtime Swapper package at the same time.
 
 == Building your own mod setup

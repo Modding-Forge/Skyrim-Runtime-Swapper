@@ -164,6 +164,9 @@ int run(int argc, wchar_t** argv) {
     mutex_lock.unlock();
     return finish(ExitCode::unsupported_runtime,
                   L"Unsupported Skyrim version: " + version->to_string() +
+                      L"\n\nSRS supports only the exact Steam source or package target files. "
+                      L"Modified, unofficial, or unlicensed game files, including pirated copies, "
+                      L"cannot be made compatible." +
                       L"\n\nNo files were changed.",
                   MB_ICONERROR, options.quiet);
   }

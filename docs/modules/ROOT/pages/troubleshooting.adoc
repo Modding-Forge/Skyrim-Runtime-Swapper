@@ -102,6 +102,7 @@ Resolve that failure before troubleshooting SKSE itself.
 For patching, SRS expects the exact managed Skyrim 1.7.104 source files recorded by the package.
 Files already matching the package's target hashes are also recognized.
 An already-downgraded executable is not itself an error, but its other managed files must match the selected profile too.
+Modified, unofficial, unlicensed, or pirated game files are not supported and cannot be made compatible with SRS.
 
 Before replacing files, collect the log and resolve or report any pending SRS recovery state.
 Steam verification changes the installed game files and should not be the first response to an unavailable recovery vault.
