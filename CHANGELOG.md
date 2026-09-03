@@ -2,6 +2,16 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.2.4 - 2026-09-04
+
+- Manual runtime control now verifies the actual `SkyrimSE.exe` hash before
+  offering an action. A file that only reports a familiar embedded version but
+  is modified or unsupported is identified clearly and cannot be switched.
+- Every SRS dialog now shows the current SRS version in its title bar.
+- Clarified in the application and documentation that modified, unofficial,
+  unlicensed, or pirated game files are unsupported and cannot be made
+  compatible with hash-verified runtime packages.
+
 ## 1.2.3 - 2026-09-03
 
 - Fixed fresh BoAW-Clean recovery blocking itself when supported original files

@@ -1,6 +1,6 @@
 {
   "name": "skyrim-runtime-swapper",
-  "version-string": "1.2.3",
+  "version-string": "1.2.4",
   "description": "Pre-SKSE transactional Skyrim runtime swapper",
   "license": "GPL-3.0-only",
   "dependencies": [],

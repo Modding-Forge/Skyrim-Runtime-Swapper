@@ -1,7 +1,7 @@
 = Choosing a Package
 
 Both target runtimes offer Best of Both Worlds and Best of All Worlds.
-SRS 1.2.3 includes the alternative BoAW-Clean package for 1.6.1170, making five packages in total.
+SRS 1.2.4 includes the alternative BoAW-Clean package for 1.6.1170, making five packages in total.
 The correct choice depends on which game data your regular plugins expect.
 
 NOTE: In a Collection, this choice is already made by the author and installed by the mod manager. Do not switch profiles independently. The selection advice below is for Collection authors and users assembling their own setup.
