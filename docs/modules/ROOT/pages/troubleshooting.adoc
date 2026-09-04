@@ -104,6 +104,12 @@ Files already matching the package's target hashes are also recognized.
 An already-downgraded executable is not itself an error, but its other managed files must match the selected profile too.
 Modified, unofficial, unlicensed, or pirated game files are not supported and cannot be made compatible with SRS.
 
+The manual control panel can report `1.7.104 (modified or unsupported; verify game files with Steam)` even though the embedded version number looks correct.
+That status means the actual executable hash does not match the supported Steam source or selected target; it does not by itself establish what changed the file.
+
+.Modified or unsupported executable status in the manual control panel.
+image::manual-control-modified-executable-windows.png[Manual runtime control showing detected game version 1.7.104 marked modified or unsupported, with manual actions unavailable]
+
 Before replacing files, collect the log and resolve or report any pending SRS recovery state.
 Steam verification changes the installed game files and should not be the first response to an unavailable recovery vault.
 
