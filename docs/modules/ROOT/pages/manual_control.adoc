@@ -3,9 +3,24 @@
 Open `SkyrimRuntimeSwapper.exe` from the Skyrim game directory to inspect the current runtime or manage a persistent target.
 
 The manual control panel uses the same verified transaction and recovery logic as an SKSE launch.
+The *Detected game version* line includes both the version embedded in `SkyrimSE.exe` and a SHA-256 verification against the selected profile's supported source and target files.
 
 .Manual control panel with Skyrim 1.7.104 installed and no persistent target active.
 image::manual-control-source-windows.png[Manual runtime control showing installed executable 1.7.104 and persistent target disabled]
+
+== Executable verification
+
+`verified` means the exact executable hash matches either the supported Steam source runtime or the selected target runtime.
+If the version resource says `1.7.104` but the bytes do not match the supported Steam file, the panel shows `1.7.104 (modified or unsupported; verify game files with Steam)`.
+Manual downgrade and restore actions remain unavailable in that state; use Steam's *Verify integrity of game files* action first.
+
+.A game executable can report version 1.7.104 while failing SRS's exact Steam-file verification.
+image::manual-control-modified-executable-windows.png[Manual runtime control showing detected game version 1.7.104 marked modified or unsupported, with manual actions unavailable]
+
+This is a hash-verification result, not a claim about why the file differs.
+An antivirus product, a modding tool, or another deployment layer can also change a file.
+If there is no pending SRS recovery state, restore the original Steam files before retrying.
+Modified, unofficial, unlicensed, and pirated files are unsupported and cannot be made compatible with SRS.
 
 == Keep the target runtime active
 

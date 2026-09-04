@@ -2,6 +2,7 @@
 
 #include "diagnostics.hpp"
 #include "path_display.hpp"
+#include "runtime_labels.hpp"
 
 #include <runtime_swapper/runtime_version.hpp>
 
@@ -50,7 +51,8 @@ PersistentDialogChoice show_persistent_downgrade_dialog(
   TASKDIALOGCONFIG configuration{};
   configuration.cbSize = sizeof(configuration);
   configuration.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
-  configuration.pszWindowTitle = L"Skyrim Runtime Swapper";
+  const auto title = application_title();
+  configuration.pszWindowTitle = title.c_str();
   configuration.pszMainIcon = TD_WARNING_ICON;
   configuration.pszMainInstruction = L"Persistent downgrade required";
   configuration.pszContent = content.c_str();
@@ -77,7 +79,8 @@ void show_hard_blocked_dialog(const BackendProbeResult& probe) {
   TASKDIALOGCONFIG configuration{};
   configuration.cbSize = sizeof(configuration);
   configuration.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
-  configuration.pszWindowTitle = L"Skyrim Runtime Swapper";
+  const auto title = application_title();
+  configuration.pszWindowTitle = title.c_str();
   configuration.pszMainIcon = TD_ERROR_ICON;
   configuration.pszMainInstruction = L"Downgrade is not recoverable";
   configuration.pszContent = content.c_str();
@@ -88,7 +91,7 @@ void show_hard_blocked_dialog(const BackendProbeResult& probe) {
   if (SUCCEEDED(TaskDialogIndirect(&configuration, &selected, nullptr, nullptr)) &&
       selected == copy_logs_button_id && !copy_diagnostic_logs()) {
     MessageBoxW(nullptr, L"The diagnostic logs could not be found or copied.",
-                L"Skyrim Runtime Swapper", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+                application_title().c_str(), MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
   }
 }
 

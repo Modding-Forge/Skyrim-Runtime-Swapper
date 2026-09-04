@@ -164,6 +164,9 @@ int run(int argc, wchar_t** argv) {
     mutex_lock.unlock();
     return finish(ExitCode::unsupported_runtime,
                   L"Unsupported Skyrim version: " + version->to_string() +
+                      L"\n\nSRS supports only the exact Steam source or package target files. "
+                      L"Modified, unofficial, or unlicensed game files, including pirated copies, "
+                      L"cannot be made compatible." +
                       L"\n\nNo files were changed.",
                   MB_ICONERROR, options.quiet);
   }
@@ -280,7 +283,7 @@ int run(int argc, wchar_t** argv) {
     MessageBoxW(
         nullptr,
         (prepared.message + L"\n\nSKSE will now continue with the matching runtime.").c_str(),
-        L"Skyrim Runtime Swapper", MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
+        application_title().c_str(), MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
   }
   return static_cast<int>(ExitCode::success);
 }

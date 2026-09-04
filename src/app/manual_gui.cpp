@@ -9,17 +9,21 @@
 #include "storage_operations.hpp"
 #include "persistent_dialog.hpp"
 #include "path_display.hpp"
+#include "runtime_labels.hpp"
 #include "unique_handle.hpp"
 #include "wine_sidecar.hpp"
 
 #include <runtime_swapper/downgrade.hpp>
+#include <runtime_swapper/patch_plan.hpp>
 #include <runtime_swapper/runtime_version.hpp>
+#include <runtime_swapper/sha256.hpp>
 #include <runtime_swapper/session_gate.hpp>
 #include <runtime_swapper/transaction_backend.hpp>
 
 #include <windows.h>
 #include <commctrl.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <iterator>
 #include <optional>
@@ -37,6 +41,11 @@ constexpr int refresh_button_id = 1003;
 struct ManualOperationResult {
   bool success{};
   std::wstring message;
+};
+
+struct ExecutableStatus {
+  std::wstring text;
+  bool recognized{};
 };
 
 class ManualOperationLock {
@@ -71,6 +80,28 @@ class ManualOperationLock {
   if (build_profile_label == "boaw-clean") return L"Best of All Worlds + Clean";
   return build_profile_label == "boaw" ? L"Best of All Worlds"
                                        : L"Best of Both Worlds";
+}
+
+[[nodiscard]] ExecutableStatus executable_status(
+    const std::filesystem::path& executable) {
+  const auto plan = std::find_if(
+      patch_plan.begin(), patch_plan.end(), [](const PatchPlanEntry& entry) {
+        return entry.relative_file == "SkyrimSE.exe";
+      });
+  const auto version = read_runtime_version(executable);
+  const auto reported_version = version ? version->to_string() : L"not detected";
+  const auto actual_hash = sha256_file(executable);
+  if (plan == patch_plan.end() || !actual_hash) {
+    return {reported_version + L" (unverified; verify game files with Steam)", false};
+  }
+  if (*actual_hash == plan->source_sha256) {
+    return {source_version() + L" (verified)", true};
+  }
+  if (*actual_hash == plan->target_sha256) {
+    return {target_version() + L" (verified)", true};
+  }
+  return {reported_version + L" (modified or unsupported; verify game files with Steam)",
+          false};
 }
 
 [[nodiscard]] std::filesystem::path resolve_game_root(
@@ -146,17 +177,16 @@ class ManualOperationLock {
   return {result.success(), result.message};
 }
 
-[[nodiscard]] std::wstring status_text(const std::filesystem::path& game_root,
-                                       FixedRuntimeState fixed_state,
-                                       bool fixed_target_verified,
-                                       const BackendProbeResult& backend) {
+[[nodiscard]] ExecutableStatus status_text(const std::filesystem::path& game_root,
+                                            FixedRuntimeState fixed_state,
+                                            bool fixed_target_verified,
+                                            const BackendProbeResult& backend) {
   std::wstring status = L"Game directory:\n" + display_path(game_root) +
                         L"\n\nProfile: " +
-                        profile_name() + L"\nAvailable switch: 1.7.104 <-> " +
+                        profile_name() + L"\nSupported switch: 1.7.104 <-> " +
                         std::wstring(target_version_label) + L"\n";
-  const auto version = read_runtime_version(game_root / L"SkyrimSE.exe");
-  status += L"Installed executable: ";
-  status += version ? version->to_string() : L"not detected";
+  auto executable = executable_status(game_root / L"SkyrimSE.exe");
+  status += L"Detected game version: " + executable.text;
   status += L"\nPersistent target: ";
   switch (fixed_state) {
     case FixedRuntimeState::inactive:
@@ -182,7 +212,13 @@ class ManualOperationLock {
       status += L"\nTechnical reason: " + backend.technical_reason;
     }
   }
-  return status;
+  if (!executable.recognized) {
+    status += L"\n\nManual runtime actions are unavailable until Steam verifies SkyrimSE.exe. "
+              L"Modified, unofficial, or unlicensed game files, including pirated copies, "
+              L"are not supported and cannot be made compatible.";
+  }
+  executable.text = std::move(status);
+  return executable;
 }
 
 [[nodiscard]] int show_control_panel(const std::filesystem::path& game_root) {
@@ -204,26 +240,27 @@ class ManualOperationLock {
     const bool fixed_target_verified =
         fixed_state == FixedRuntimeState::active &&
         target_runtime_is_active(game_root);
-    const auto content = status_text(game_root, fixed_state,
-                                     fixed_target_verified, probed.backend);
+    const auto status = status_text(game_root, fixed_state,
+                                    fixed_target_verified, probed.backend);
     const auto& backend = probed.backend;
     const std::wstring switch_label =
         L"Downgrade persistently to Skyrim " + std::wstring(target_version_label);
     const std::wstring restore_label = L"Restore Skyrim 1.7.104";
     std::vector<TASKDIALOG_BUTTON> buttons;
-    if (!fixed_target_verified && backend.success() &&
+    if (status.recognized && !fixed_target_verified && backend.success() &&
         backend.allows(StorageOperation::activate_persistent)) {
       buttons.push_back({switch_button_id, switch_label.c_str()});
     }
-    buttons.push_back({restore_button_id, restore_label.c_str()});
+    if (status.recognized) buttons.push_back({restore_button_id, restore_label.c_str()});
     buttons.push_back({refresh_button_id, L"Refresh"});
     TASKDIALOGCONFIG configuration{};
     configuration.cbSize = sizeof(configuration);
     configuration.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
-    configuration.pszWindowTitle = L"Skyrim Runtime Swapper";
+    const auto title = application_title();
+    configuration.pszWindowTitle = title.c_str();
     configuration.pszMainIcon = TD_INFORMATION_ICON;
     configuration.pszMainInstruction = L"Manual runtime control";
-    configuration.pszContent = content.c_str();
+    configuration.pszContent = status.text.c_str();
     configuration.cButtons = static_cast<UINT>(buttons.size());
     configuration.pButtons = buttons.data();
     configuration.nDefaultButton =
@@ -241,7 +278,7 @@ class ManualOperationLock {
     const auto result = selected == switch_button_id
                             ? switch_to_fixed_target(game_root)
                             : restore_source_runtime(game_root);
-    MessageBoxW(nullptr, result.message.c_str(), L"Skyrim Runtime Swapper",
+    MessageBoxW(nullptr, result.message.c_str(), title.c_str(),
                 MB_OK | (result.success ? MB_ICONINFORMATION : MB_ICONERROR) |
                     MB_SETFOREGROUND);
     if (result.success) return 0;

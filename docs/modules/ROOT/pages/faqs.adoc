@@ -12,6 +12,7 @@ It is still recoverable, but it is not restored automatically when the game clos
 For a new downgrade, the supported source is the exact Steam version Skyrim 1.7.104.
 An already-downgraded installation can also be used when its managed runtime files exactly match the selected package's target.
 An executable version number alone is not sufficient.
+Modified, unofficial, unlicensed, or pirated game files are not supported and cannot be made compatible with SRS.
 
 [#already-downgraded]
 == Can I use SRS when Skyrim is already downgraded?

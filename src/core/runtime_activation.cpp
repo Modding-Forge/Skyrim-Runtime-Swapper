@@ -163,6 +163,8 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
         return {ExitCode::source_hash_mismatch, false,
                 L"Unknown, modified, or unexpected game file: " +
                     quote_path(managed->logical) +
+                    L"\nModified, unofficial, or unlicensed game files, including pirated copies, "
+                    L"are not supported and cannot be made compatible." +
                     runtime_hash_verification_detail(
                         plan, inspection.actual_sha256) +
                     managed_link_verification_detail(*managed)};

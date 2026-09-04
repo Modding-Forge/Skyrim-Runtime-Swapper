@@ -3,6 +3,7 @@
 #include "diagnostic_log_store.hpp"
 #include "diagnostic_run.hpp"
 #include "path_display.hpp"
+#include "runtime_labels.hpp"
 #include "storage_operations.hpp"
 
 #include <commctrl.h>
@@ -196,7 +197,8 @@ void show_error_dialog(const std::wstring& message) {
   configuration.cbSize = sizeof(configuration);
   configuration.hInstance = GetModuleHandleW(nullptr);
   configuration.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
-  configuration.pszWindowTitle = L"Skyrim Runtime Swapper";
+  const auto title = application_title();
+  configuration.pszWindowTitle = title.c_str();
   configuration.pszMainIcon = TD_ERROR_ICON;
   configuration.pszMainInstruction = L"Skyrim Runtime Swapper encountered an error.";
   configuration.pszContent = message.c_str();
@@ -208,14 +210,14 @@ void show_error_dialog(const std::wstring& message) {
   if (SUCCEEDED(TaskDialogIndirect(&configuration, &selected_button, nullptr, nullptr))) {
     if (selected_button == copy_skse_log_button_id && !copy_latest_skse_log()) {
       MessageBoxW(nullptr, L"The latest SKSE log could not be found or copied.",
-                  L"Skyrim Runtime Swapper", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+                  application_title().c_str(), MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
     }
     if (selected_button == verify_game_files_button_id) {
       ShellExecuteW(nullptr, L"open", L"steam://validate/489830", nullptr, nullptr, SW_SHOWNORMAL);
     }
     return;
   }
-  MessageBoxW(nullptr, message.c_str(), L"Skyrim Runtime Swapper",
+  MessageBoxW(nullptr, message.c_str(), application_title().c_str(),
               MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
 }
 
@@ -331,7 +333,7 @@ int finish(ExitCode code, const std::wstring& message, UINT icon, bool quiet) {
     if ((icon & MB_ICONMASK) == MB_ICONERROR) {
       show_error_dialog(message);
     } else {
-      MessageBoxW(nullptr, message.c_str(), L"Skyrim Runtime Swapper",
+      MessageBoxW(nullptr, message.c_str(), application_title().c_str(),
                   MB_OK | icon | MB_SETFOREGROUND);
     }
   }

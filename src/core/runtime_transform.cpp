@@ -465,6 +465,8 @@ struct SourceCandidateRestore {
       preflight_failed = true;
       preflight_message = L"A game file is neither supported nor recoverable: " +
                           quote_path(managed->logical) +
+                          L"\nModified, unofficial, or unlicensed game files, including pirated copies, "
+                          L"are not supported and cannot be made compatible." +
                           runtime_hash_verification_detail(
                               plan, inspection.actual_sha256) +
                           managed_link_verification_detail(*managed);

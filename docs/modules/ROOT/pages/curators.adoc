@@ -67,3 +67,14 @@ From 1.2.2, test the installer's `.7z` extraction and native-helper executable p
 Restore an SRS-managed persistent state before replacing its package.
 Verified inactive legacy state is cleaned up automatically; ambiguous recovery data is preserved.
 For failures, xref:troubleshooting.adoc[Copy logs] provides the diagnostic report.
+
+== Reports of a modified or unsupported executable
+
+Users may open the manual control panel and report a detected version such as `1.7.104 (modified or unsupported; verify game files with Steam)`.
+The displayed version comes from the executable's version resource, while SRS independently verifies its exact SHA-256 against the supported Steam source and target files.
+Therefore, a familiar version number does not make the file supported.
+
+Ask the user to preserve any active SRS recovery state, collect the SRS log, close their mod manager and related tools, then use Steam's *Verify integrity of game files* action before redeploying.
+Do not describe the status as proof of piracy: antivirus activity, external tools, stale deployment layers, or other local changes can also cause it.
+If the user cannot restore a legitimate Steam installation, modified, unofficial, unlicensed, or pirated files remain outside SRS support and cannot be made compatible.
+See xref:manual_control.adoc#executable-verification[Executable verification] and xref:troubleshooting.adoc#source-file-or-source-hash-is-not-recognized[the troubleshooting steps].
