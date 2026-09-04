@@ -62,8 +62,6 @@ The relevant cases are:
 * BoAW-Clean: supported original Beafarmer present and Beafarmer absent, with a verified restore in both cases.
 * Switching variants: restore with the old package before replacing it; do not mix old patches, executables or native helpers.
 
-From 1.2.2, test the installer's `.7z` extraction and native-helper executable permissions as well as root deployment.
-
 Restore an SRS-managed persistent state before replacing its package.
 Verified inactive legacy state is cleaned up automatically; ambiguous recovery data is preserved.
 For failures, xref:troubleshooting.adoc[Copy logs] provides the diagnostic report.
