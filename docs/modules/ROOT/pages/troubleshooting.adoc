@@ -184,8 +184,11 @@ The dialog shows a human-readable message and a stable *Technical reason*.
 |`vault-owner-or-dacl` or `vault-owner-or-mode`
 |The SRS vault is not exclusively controlled by the current user. Do not weaken the check; correct ownership only for the displayed SRS directory.
 
+|`native-storage-ownership`
+|An SRS lock directory on Linux belongs to another user, normally because SRS, Steam, or a mod manager was previously run with `sudo` or as root. Use *Repair SRS folder access* in the dialog. SRS asks Linux for administrator authentication and changes ownership only inside its own detected storage directory. If the desktop authentication service is unavailable, the dialog supplies the exact terminal command.
+
 |`unsafe-native-installation-lock`
-|SRS cannot safely establish the installation lock. Since version 1.2.2, SRS can use private user-state storage for fresh installations in group-writable Linux Steam libraries. Existing unsafe or conflicting state can still block startup; preserve it and report the exact logged paths.
+|SRS cannot safely establish the installation lock for a reason other than a verified foreign owner. It will not offer automatic permission repair for symbolic links, unsafe paths, active locks, or ambiguous state. Since version 1.2.2, SRS can use private user-state storage for fresh installations in group-writable Linux Steam libraries. Existing unsafe or conflicting state can still block startup; preserve it and report the exact logged paths.
 
 |`vault-parent-reparse` or `vault-parent-symlink`
 |The automatically resolved vault hierarchy contains an unsafe redirection. Remove or correct the unexpected redirection without deleting active recovery data.
@@ -218,6 +221,14 @@ Replace the quoted placeholder with the actual path from the error.
 SRS uses verified Steam-library transaction storage when safe and does not require an unrelated XDG state directory for that operation.
 Since version 1.2.2, SRS instead selects validated private user-state storage for fresh installations where group-writable library parents cannot safely host the lock.
 If both locations contain state, or an existing state location is unsafe, SRS blocks instead of silently starting with a new vault.
+
+== SRS folder access needs repair
+
+SRS offers this repair only after it verifies that an existing SRS lock or recovery directory has a different owner. It never appears for a generic failed lock, a symlink, a non-local filesystem, or a game-file problem.
+
+On Windows, select *Repair SRS folder access* and approve the one-time UAC prompt. The repair changes the owner and private access control only for the detected SRS directories; it does not alter Steam or Skyrim files.
+
+On Linux under Wine or Proton, select the same button and approve the `pkexec` prompt. If `pkexec` cannot run, copy the exact displayed command into a native terminal after closing Skyrim, Steam, and the mod manager. Do not run SRS itself with `sudo`.
 If the error remains, provide the current SRS log and the output above.
 
 [#native-helper-permissions]

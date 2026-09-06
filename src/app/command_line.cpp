@@ -54,6 +54,7 @@ CommandLineOptions parse_command_line(int argc, wchar_t** argv) {
     options.diagnostic_parent_run_id = value;
   }
   options.quiet = has_argument(argc, argv, L"--quiet");
+  options.repair_storage_access = has_argument(argc, argv, L"--repair-storage-access");
   options.from_skse_loader = has_argument(argc, argv, L"--from-skse-loader");
   options.watch = has_argument(argc, argv, L"--watch");
   options.restore_runtime_after_session = has_argument(argc, argv, L"--restore-runtime");

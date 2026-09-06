@@ -13,7 +13,7 @@ import tempfile
 
 
 MAGIC = 0x50535253
-VERSION = 6
+VERSION = 7
 HEADER = struct.Struct("<IHHI32s")
 MAXIMUM_PAYLOAD = 1024 * 1024
 

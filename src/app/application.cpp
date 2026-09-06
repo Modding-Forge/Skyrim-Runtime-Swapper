@@ -10,6 +10,7 @@
 #include "runtime_labels.hpp"
 #include "runtime_version_reader.hpp"
 #include "session.hpp"
+#include "storage_access_repair.hpp"
 #include "storage_operations.hpp"
 #include "unique_handle.hpp"
 #include "wine_sidecar.hpp"
@@ -23,13 +24,105 @@
 #include <runtime_swapper/transaction_backend.hpp>
 
 #include <windows.h>
+#include <commctrl.h>
 
 #include <filesystem>
+#include <iterator>
 #include <string>
 #include <string_view>
 
 namespace runtime_swapper::app {
 namespace {
+
+constexpr int repair_storage_access_button_id = 4201;
+
+[[nodiscard]] bool offer_windows_storage_access_repair(
+    const CommandLineOptions& options, const BackendProbeResult& probe) {
+  if (options.quiet || !options.game_root ||
+      !windows_storage_access_repair_needed(probe)) {
+    return false;
+  }
+  const TASKDIALOG_BUTTON buttons[] = {
+      {repair_storage_access_button_id, L"Repair SRS folder access"},
+      {IDCLOSE, L"Close"},
+  };
+  const std::wstring content =
+      L"An SRS storage or lock directory belongs to a different Windows owner. "
+      L"This usually happens after Steam, a mod manager, or SRS was previously run "
+      L"as Administrator.\n\n"
+      L"Repair changes ownership and private access only for the detected SRS storage "
+      L"directories. It does not change Skyrim files. Windows will ask for administrator "
+      L"approval.\n\n"
+      L"Storage: " + probe.coordination_lock.value.parent_path().parent_path().wstring();
+  TASKDIALOGCONFIG configuration{};
+  configuration.cbSize = sizeof(configuration);
+  configuration.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
+  const auto title = application_title();
+  configuration.pszWindowTitle = title.c_str();
+  configuration.pszMainIcon = TD_WARNING_ICON;
+  configuration.pszMainInstruction = L"SRS folder access needs repair";
+  configuration.pszContent = content.c_str();
+  configuration.cButtons = static_cast<UINT>(std::size(buttons));
+  configuration.pButtons = buttons;
+  configuration.nDefaultButton = IDCLOSE;
+  int selected{};
+  if (FAILED(TaskDialogIndirect(&configuration, &selected, nullptr, nullptr)) ||
+      selected != repair_storage_access_button_id) {
+    return false;
+  }
+  const auto repaired = request_windows_storage_access_repair(
+      options.helper_path, *options.game_root);
+  log_diagnostic(L"Windows storage-access repair: result=" +
+                 std::to_wstring(static_cast<int>(repaired)));
+  if (repaired == StorageAccessRepairResult::succeeded) return true;
+  const wchar_t* message = repaired == StorageAccessRepairResult::cancelled
+                               ? L"The SRS folder access repair was cancelled."
+                               : L"Windows could not repair the SRS folder access.";
+  MessageBoxW(nullptr, message, title.c_str(), MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+  return false;
+}
+
+[[nodiscard]] bool offer_linux_storage_access_repair(
+    const CommandLineOptions& options, const BackendProbeResult& probe) {
+  if (options.quiet || !options.game_root ||
+      probe.technical_reason != L"native-storage-ownership") {
+    return false;
+  }
+  const TASKDIALOG_BUTTON buttons[] = {
+      {repair_storage_access_button_id, L"Repair SRS folder access"},
+      {IDCLOSE, L"Close"},
+  };
+  const std::wstring content =
+      L"The native Linux SRS storage directory belongs to a different user. "
+      L"This usually happens after Steam, a mod manager, or SRS was previously "
+      L"started with sudo or as root.\n\n"
+      L"Repair changes ownership only inside the detected SRS storage directory. "
+      L"It does not change Skyrim files. Your Linux desktop may ask for administrator "
+      L"authentication.";
+  TASKDIALOGCONFIG configuration{};
+  configuration.cbSize = sizeof(configuration);
+  configuration.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_SIZE_TO_CONTENT;
+  const auto title = application_title();
+  configuration.pszWindowTitle = title.c_str();
+  configuration.pszMainIcon = TD_WARNING_ICON;
+  configuration.pszMainInstruction = L"SRS folder access needs repair";
+  configuration.pszContent = content.c_str();
+  configuration.cButtons = static_cast<UINT>(std::size(buttons));
+  configuration.pButtons = buttons;
+  configuration.nDefaultButton = IDCLOSE;
+  int selected{};
+  if (FAILED(TaskDialogIndirect(&configuration, &selected, nullptr, nullptr)) ||
+      selected != repair_storage_access_button_id) {
+    return false;
+  }
+  const auto repaired = run_wine_sidecar(
+      WineSidecarOperation::repair_storage_access, *options.game_root);
+  log_operation_result(L"linux-storage-access-repair", repaired);
+  if (repaired.success()) return true;
+  MessageBoxW(nullptr, repaired.message.c_str(), title.c_str(),
+              MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+  return false;
+}
 
 [[nodiscard]] std::wstring wide_ascii(std::string_view value) {
   return std::wstring(value.begin(), value.end());
@@ -128,6 +221,14 @@ int run(int argc, wchar_t** argv) {
     return finish(ExitCode::invalid_arguments, L"The game directory was not specified.",
                   MB_ICONERROR, options.quiet);
   }
+  if (options.repair_storage_access) {
+    std::wstring detail;
+    const auto repaired = repair_windows_storage_access(*options.game_root, &detail);
+    log_diagnostic(L"Elevated Windows storage-access repair: " + detail);
+    return repaired == StorageAccessRepairResult::succeeded
+               ? static_cast<int>(ExitCode::success)
+               : static_cast<int>(ExitCode::internal_error);
+  }
   if (options.watch) return run_watcher(options);
 
   UniqueHandle mutex(CreateMutexW(nullptr, FALSE, operation_mutex_name().c_str()));
@@ -198,11 +299,32 @@ int run(int argc, wchar_t** argv) {
   } else {
     probe = probe_installation_storage(*options.game_root).backend;
   }
+  if (wine && !prepared.success() && offer_linux_storage_access_repair(options, probe)) {
+    prepared = run_wine_sidecar(WineSidecarOperation::prepare_launch, *options.game_root);
+    probe = prepared.backend;
+    if (prepared.code == ExitCode::user_cancelled && probe.success()) {
+      if (options.quiet || show_persistent_downgrade_dialog(*options.game_root, probe) !=
+                               PersistentDialogChoice::accepted) {
+        mutex_lock.unlock();
+        return static_cast<int>(ExitCode::user_cancelled);
+      }
+      risk_accepted = probe.mode == SafetyMode::persistent_with_warning;
+      prepared = run_wine_sidecar(WineSidecarOperation::prepare_launch, *options.game_root,
+                                  risk_accepted, true);
+      probe = prepared.backend;
+    }
+  }
   log_storage_probe(probe);
   if (!probe.success()) {
-    mutex_lock.unlock();
-    if (!options.quiet) show_hard_blocked_dialog(probe);
-    return finish(probe.code, probe.message + L"\n\nNo files were changed.", MB_ICONERROR, true);
+    if (!wine && offer_windows_storage_access_repair(options, probe)) {
+      probe = probe_installation_storage(*options.game_root).backend;
+      log_storage_probe(probe);
+    }
+    if (!probe.success()) {
+      mutex_lock.unlock();
+      if (!options.quiet) show_hard_blocked_dialog(probe);
+      return finish(probe.code, probe.message + L"\n\nNo files were changed.", MB_ICONERROR, true);
+    }
   }
 
   if (!wine) {
@@ -225,6 +347,12 @@ int run(int argc, wchar_t** argv) {
       risk_accepted = probe.mode == SafetyMode::persistent_with_warning;
     }
     transaction_lock = acquire_transaction_lock(probe.coordination_lock);
+    if (!transaction_lock) {
+      if (offer_windows_storage_access_repair(options, probe)) {
+        probe = probe_installation_storage(*options.game_root).backend;
+        if (probe.success()) transaction_lock = acquire_transaction_lock(probe.coordination_lock);
+      }
+    }
     if (!transaction_lock) {
       mutex_lock.unlock();
       return finish(ExitCode::another_instance_failed,

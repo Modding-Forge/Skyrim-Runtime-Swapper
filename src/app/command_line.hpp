@@ -16,6 +16,7 @@ struct CommandLineOptions {
   std::optional<std::wstring> diagnostic_session_id;
   std::optional<std::wstring> diagnostic_parent_run_id;
   bool quiet{};
+  bool repair_storage_access{};
   bool from_skse_loader{};
   bool watch{};
   bool restore_runtime_after_session{};

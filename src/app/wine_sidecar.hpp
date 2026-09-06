@@ -13,6 +13,7 @@ enum class WineSidecarOperation : unsigned short {
   activate_persistent = 4,
   restore_persistent = 5,
   prepare_launch = 6,
+  repair_storage_access = 7,
 };
 
 [[nodiscard]] InstallationOperationResult run_wine_sidecar(

@@ -14,7 +14,7 @@
 namespace runtime_swapper::app::wine_sidecar_protocol {
 
 inline constexpr std::uint32_t protocol_magic = 0x50535253U;
-inline constexpr std::uint16_t protocol_version = 6;
+inline constexpr std::uint16_t protocol_version = 7;
 inline constexpr std::uint32_t maximum_payload = 1024U * 1024U;
 
 #pragma pack(push, 1)

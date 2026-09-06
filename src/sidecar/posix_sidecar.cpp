@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -27,7 +28,7 @@
 namespace {
 
 constexpr std::uint32_t protocol_magic = 0x50535253U;  // SRSP
-constexpr std::uint16_t protocol_version = 6;
+constexpr std::uint16_t protocol_version = 7;
 constexpr std::uint32_t maximum_payload = 1024U * 1024U;
 
 enum class Operation : std::uint16_t {
@@ -37,6 +38,7 @@ enum class Operation : std::uint16_t {
   activate_persistent = 4,
   restore_persistent = 5,
   prepare_launch = 6,
+  repair_storage_access = 7,
 };
 
 enum class LockResult {
@@ -236,6 +238,9 @@ void append_string(std::vector<std::byte>& bytes, std::string_view value) {
   return result;
 }
 
+[[nodiscard]] runtime_swapper::app::InstallationOperationResult
+repair_storage_access(const std::filesystem::path& game_root);
+
 [[nodiscard]] runtime_swapper::app::InstallationOperationResult execute(
     Operation operation, const std::filesystem::path& game_root,
     bool risk_accepted, bool allow_persistent) {
@@ -251,12 +256,107 @@ void append_string(std::vector<std::byte>& bytes, std::string_view value) {
       return restore_persistent_source(game_root);
     case Operation::prepare_launch:
       return prepare_launch(game_root, allow_persistent, risk_accepted);
+    case Operation::repair_storage_access:
+      return repair_storage_access(game_root);
     case Operation::probe:
       break;
   }
   InstallationOperationResult result;
   result.code = runtime_swapper::ExitCode::invalid_arguments;
   result.message = L"Invalid native sidecar operation.";
+  return result;
+}
+
+[[nodiscard]] bool storage_access_repairable(
+    const runtime_swapper::CoordinationLockPath& resolved_lock) noexcept {
+  const auto& lock_path = resolved_lock.value;
+  const auto lock_directory = lock_path.parent_path();
+  const auto storage_root = lock_directory.parent_path();
+  if (lock_path.empty() || !lock_path.is_absolute() ||
+      lock_directory.filename() != "locks" ||
+      (storage_root.filename() != ".runtime-swapper" &&
+       storage_root.filename() != "skyrim-runtime-swapper")) {
+    return false;
+  }
+  bool foreign_owner = false;
+  for (const auto& directory : {storage_root, lock_directory}) {
+    struct stat status {};
+    if (::lstat(directory.c_str(), &status) != 0) {
+      if (errno == ENOENT) continue;
+      return false;
+    }
+    if (!S_ISDIR(status.st_mode) || S_ISLNK(status.st_mode)) return false;
+    foreign_owner = foreign_owner || status.st_uid != ::geteuid();
+  }
+  return foreign_owner;
+}
+
+[[nodiscard]] std::string shell_quote(std::string_view text) {
+  std::string quoted("'");
+  for (const char value : text) {
+    if (value == '\'') quoted += "'\\\"'\\\"'";
+    else quoted += value;
+  }
+  quoted += '\'';
+  return quoted;
+}
+
+[[nodiscard]] std::string terminal_repair_command(const std::filesystem::path& root) {
+  return "sudo chown -R --no-dereference \"$(id -u):$(id -g)\" -- " +
+         shell_quote(root.string());
+}
+
+[[nodiscard]] bool run_pkexec_chown(const std::filesystem::path& root) noexcept {
+  const std::string owner = std::to_string(::getuid()) + ":" +
+                            std::to_string(::getgid());
+  const std::string root_text = root.string();
+  const pid_t child = ::fork();
+  if (child < 0) return false;
+  if (child == 0) {
+    ::execlp("pkexec", "pkexec", "/usr/bin/chown", "-R", "--no-dereference",
+             owner.c_str(), "--", root_text.c_str(), static_cast<char*>(nullptr));
+    _exit(127);
+  }
+  int status{};
+  while (::waitpid(child, &status, 0) < 0) {
+    if (errno != EINTR) return false;
+  }
+  return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+[[nodiscard]] runtime_swapper::app::InstallationOperationResult
+repair_storage_access(const std::filesystem::path& game_root) {
+  using namespace runtime_swapper;
+  using namespace runtime_swapper::app;
+  auto result = probe_installation_storage(game_root);
+  const auto& lock = result.backend.coordination_lock;
+  if (!result.success() || !storage_access_repairable(lock)) {
+    result.code = ExitCode::unsupported_filesystem;
+    result.backend.code = result.code;
+    result.backend.mode = SafetyMode::hard_blocked;
+    result.backend.allowed_operations = StorageOperation::none;
+    result.backend.technical_reason = L"native-storage-access-not-repairable";
+    result.message = L"The detected native storage problem is not a safe ownership repair case.";
+    result.backend.message = result.message;
+    return result;
+  }
+  const auto root = lock.value.parent_path().parent_path();
+  if (run_pkexec_chown(root)) {
+    result.code = ExitCode::success;
+    result.message = L"Linux ownership for the SRS storage directory was repaired.";
+    result.backend.message = result.message;
+    return result;
+  }
+  result.code = ExitCode::unsupported_filesystem;
+  result.backend.code = result.code;
+  result.backend.mode = SafetyMode::hard_blocked;
+  result.backend.allowed_operations = StorageOperation::none;
+  result.backend.technical_reason = L"native-storage-ownership";
+  const auto fallback = terminal_repair_command(root);
+  result.message = L"Linux could not complete the SRS folder repair through pkexec. "
+                   L"In a native terminal, with Skyrim, Steam, and the mod manager closed, run:\n\n" +
+                   std::wstring(fallback.begin(), fallback.end());
+  result.backend.message = result.message;
   return result;
 }
 
@@ -271,6 +371,7 @@ struct OperationPolicy {
     Operation operation) noexcept {
   switch (operation) {
     case Operation::probe:
+    case Operation::repair_storage_access:
       return OperationPolicy{false};
     case Operation::recover:
     case Operation::activate_session:
@@ -291,9 +392,14 @@ struct OperationPolicy {
     probe.backend.code = probe.code;
     probe.backend.mode = SafetyMode::hard_blocked;
     probe.backend.allowed_operations = StorageOperation::none;
-    probe.backend.technical_reason = L"unsafe-native-installation-lock";
-    probe.message = L"The native installation lock path is not owned, local, and free "
-                    L"of symbolic links.";
+    if (storage_access_repairable(probe.backend.coordination_lock)) {
+      probe.backend.technical_reason = L"native-storage-ownership";
+      probe.message = L"The native SRS storage directory is owned by a different Linux user.";
+    } else {
+      probe.backend.technical_reason = L"unsafe-native-installation-lock";
+      probe.message = L"The native installation lock path is not owned, local, and free "
+                      L"of symbolic links.";
+    }
   } else {
     probe.code = ExitCode::another_instance_failed;
     probe.backend.code = probe.code;
@@ -464,6 +570,9 @@ int main(int argc, char** argv) {
   const auto policy = operation_policy(operation);
   runtime_swapper::app::InstallationOperationResult result;
   if (!policy) {
+    result = execute(operation, game_root, *risk != 0,
+                     *allow_persistent != 0);
+  } else if (operation == Operation::repair_storage_access) {
     result = execute(operation, game_root, *risk != 0,
                      *allow_persistent != 0);
   } else if (!policy->requires_installation_lock) {

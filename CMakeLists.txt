@@ -434,6 +434,7 @@ add_executable(runtime_swapper_helper WIN32
   src/app/persistent_dialog.cpp
   src/app/runtime_version_reader.cpp
   src/app/session.cpp
+  src/app/storage_access_repair.cpp
   src/app/storage_operations.cpp
   src/app/wine_sidecar.cpp
   src/app/wine_sidecar_protocol.cpp

@@ -19,6 +19,7 @@ int main() {
   wchar_t restore_catalog_flag[] = L"--restore-content-catalog";
   wchar_t restore_creation_club_flag[] = L"--restore-creation-club";
   wchar_t quiet_flag[] = L"--quiet";
+  wchar_t repair_storage_access_flag[] = L"--repair-storage-access";
 
   std::array argv{executable,
                   game_root_flag,
@@ -35,7 +36,8 @@ int main() {
                   restore_runtime_flag,
                   restore_catalog_flag,
                   restore_creation_club_flag,
-                  quiet_flag};
+                  quiet_flag,
+                  repair_storage_access_flag};
   const auto options =
       runtime_swapper::app::parse_command_line(static_cast<int>(argv.size()), argv.data());
 
@@ -50,7 +52,7 @@ int main() {
       !options.restore_content_catalog_after_session || !options.quiet) {
     return 4;
   }
-  if (!options.restore_creation_club_after_session) return 7;
+  if (!options.restore_creation_club_after_session || !options.repair_storage_access) return 7;
   if (options.from_skse_loader) return 5;
 
   wchar_t invalid_id[] = L"not-a-process";
