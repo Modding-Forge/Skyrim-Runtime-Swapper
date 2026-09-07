@@ -377,16 +377,17 @@ recover_legacy_game_backup(const std::filesystem::path &game_root,
         false, false,
         L"ContentCatalog.txt could not be inspected for migration."};
   }
-  auto &backend = transaction_backend();
-  if (live_status == RegularFileStatus::regular &&
-      sha256_file(catalog) != hash &&
-      (!preserve_recovery_conflict(game_root, catalog,
-                                   "content-catalog-legacy") ||
-       !backend.durable_remove(catalog))) {
-    return ContentCatalogResult{
-        false, false,
-        L"A ContentCatalog conflict could not be preserved before recovery."};
+  // A live catalog changed by Steam is newer than a v1 backup. Retain it
+  // rather than restoring the stale legacy copy over the current CC state.
+  if (live_status == RegularFileStatus::regular && sha256_file(catalog) != hash) {
+    if (!transaction_backend().durable_remove(legacy)) {
+      return ContentCatalogResult{
+          false, false,
+          L"The stale legacy ContentCatalog backup could not be removed."};
+    }
+    return ContentCatalogResult{true, true, {}};
   }
+  auto &backend = transaction_backend();
   if (sha256_file(catalog) != hash &&
       (!restore_recovery_file(game_root, *hash, size, catalog) ||
        sha256_file(catalog) != hash)) {
@@ -485,20 +486,48 @@ recover_impl(const std::filesystem::path &game_root,
             L"The ContentCatalog recovery record belongs to another volume."};
   }
 
-  auto &backend = transaction_backend();
   const auto live_status = inspect_regular_file(catalog, error);
   if (error || (live_status != RegularFileStatus::missing &&
                 live_status != RegularFileStatus::regular)) {
     return {false, false, L"ContentCatalog.txt could not be inspected."};
   }
-  if (live_status == RegularFileStatus::regular &&
-      !record_matches(catalog, *record) &&
-      (game_root.empty() ||
-       !preserve_recovery_conflict(game_root, catalog,
-                                   "content-catalog-conflict") ||
-       !backend.durable_remove(catalog))) {
-    return {false, false,
-            L"A conflicting ContentCatalog.txt could not be preserved."};
+  // Steam can regenerate ContentCatalog.txt when Creation Club entitlement
+  // changes while an SRS session is interrupted. That live file represents
+  // Steam's current catalog state, whereas the hold/vault copy is older.
+  // Never overwrite it: retire the stale SRS transaction instead.
+  const bool live_catalog_is_newer =
+      live_status == RegularFileStatus::regular &&
+      !record_matches(catalog, *record);
+  auto &backend = transaction_backend();
+  if (live_catalog_is_newer) {
+    if (hold_status == RegularFileStatus::regular &&
+        !backend.durable_remove(workspace.hold())) {
+      return {false, false,
+              L"The stale ContentCatalog transaction copy could not be "
+              L"removed."};
+    }
+    if (journal_status == RegularFileStatus::regular &&
+        !backend.durable_remove(workspace.journal())) {
+      return {false, true,
+              L"The stale ContentCatalog journal could not be removed."};
+    }
+    if (metadata.present() &&
+        !remove_recovery_metadata(game_root, metadata_name)) {
+      return {false, true,
+              L"The stale ContentCatalog vault metadata could not be "
+              L"removed."};
+    }
+    if (!cleanup_workspace(workspace)) {
+      return {false, true,
+              L"The current ContentCatalog.txt was retained, but workspace "
+              L"cleanup failed."};
+    }
+    if (!workspace.legacy && !cleanup_workspace(legacy_state)) {
+      return {false, true,
+              L"The current ContentCatalog.txt was retained, but legacy "
+              L"workspace cleanup failed."};
+    }
+    return {true, true, {}};
   }
   if (!record_matches(catalog, *record)) {
     const bool restored =

@@ -147,6 +147,10 @@ Persistent mode restores them with the manual full restore.
 
 If the file is present, SRS secures it before removing it for the older runtime.
 Its location and any existing recovery state are checked independently.
+
+If Steam regenerates the file while an interrupted SRS transaction is pending,
+SRS keeps Steam's newer file and retires the older SRS transaction copy.
+This covers Creation Club content being enabled or disabled through Steam.
 If automatic restoration is unsafe, its state is included in the persistent transaction and restored through the GUI.
 Conflicting regenerated content is preserved before restoration.
 

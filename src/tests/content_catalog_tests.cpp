@@ -182,7 +182,8 @@ int run_tests() {
   write_file(catalog, "legacy-conflict");
   const auto legacy_recovery = recover_content_catalog(game_root);
   if (!legacy_recovery.success || !legacy_recovery.changed ||
-      read_file(catalog) != "catalog-v1" || std::filesystem::exists(legacy)) {
+      read_file(catalog) != "legacy-conflict" ||
+      std::filesystem::exists(legacy)) {
     std::wstring layout_error;
     (void)runtime_swapper::detect_runtime_layout(game_root, &layout_error);
     std::wcerr << L"Legacy recovery failed: success=" << legacy_recovery.success
@@ -196,7 +197,7 @@ int run_tests() {
       runtime_swapper::sha256_string("legacy-conflict");
   const auto vault = runtime_swapper::transaction_backend().probe(game_root);
   if (!legacy_conflict_hash || !vault.success() ||
-      !std::filesystem::is_regular_file(
+      std::filesystem::exists(
           vault.vault_path / L"conflicts" / L"content-catalog-legacy" /
           std::filesystem::path(legacy_conflict_hash->begin(),
                                 legacy_conflict_hash->end()))) {
@@ -213,7 +214,7 @@ int run_tests() {
                                       L".skyrim-runtime-swapper");
   const auto restored = restore_content_catalog(game_root);
   if (!restored.success || !restored.changed ||
-      read_file(catalog) != "catalog-v1" ||
+      read_file(catalog) != "legacy-conflict" ||
       std::filesystem::exists(catalog.parent_path() /
                               L".skyrim-runtime-swapper")) {
     return 3;
@@ -257,16 +258,15 @@ int run_tests() {
     return 6;
   write_file(catalog, "conflict");
   const auto conflict = recover_content_catalog(game_root);
-  if (!conflict.success || read_file(catalog) != "catalog-v1" ||
+  if (!conflict.success || read_file(catalog) != "conflict" ||
       std::filesystem::exists(hold)) {
     return 7;
   }
   const auto conflict_hash = runtime_swapper::sha256_string("conflict");
   if (!conflict_hash ||
-      !std::filesystem::is_regular_file(
+      std::filesystem::exists(
           vault.vault_path / L"conflicts" / L"content-catalog-conflict" /
-          std::filesystem::path(conflict_hash->begin(),
-                                conflict_hash->end()))) {
+          std::filesystem::path(conflict_hash->begin(), conflict_hash->end()))) {
     return 8;
   }
 
