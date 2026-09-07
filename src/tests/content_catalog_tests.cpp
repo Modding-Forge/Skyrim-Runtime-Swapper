@@ -229,7 +229,7 @@ int run_tests() {
                  L"ContentCatalog.journal",
              "competing-legacy");
   const auto competing = recover_content_catalog(game_root);
-  if (competing.success || read_file(catalog) != "catalog-v1")
+  if (competing.success || read_file(catalog) != "legacy-conflict")
     return 13;
   std::filesystem::remove_all(current_workspace);
   std::filesystem::remove_all(catalog.parent_path() /
@@ -248,7 +248,7 @@ int run_tests() {
   const auto hold = workspace / L"ContentCatalog.hold";
   std::filesystem::copy_file(hold, catalog);
   const auto duplicate_recovery = recover_content_catalog(game_root);
-  if (!duplicate_recovery.success || read_file(catalog) != "catalog-v1" ||
+  if (!duplicate_recovery.success || read_file(catalog) != "legacy-conflict" ||
       std::filesystem::exists(hold)) {
     return 5;
   }

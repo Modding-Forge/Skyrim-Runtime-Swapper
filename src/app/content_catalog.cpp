@@ -365,10 +365,10 @@ recover_legacy_game_backup(const std::filesystem::path &game_root,
   }
   const auto hash = sha256_file(legacy);
   const auto size = std::filesystem::file_size(legacy, error);
-  if (!hash || error || !commit_recovery_file(game_root, legacy, *hash, size)) {
+  if (!hash || error) {
     return ContentCatalogResult{false, false,
                                 L"The legacy ContentCatalog backup could not "
-                                L"be migrated to the vault."};
+                                L"be verified."};
   }
   const auto live_status = inspect_regular_file(catalog, error);
   if (error || (live_status != RegularFileStatus::missing &&
@@ -386,6 +386,11 @@ recover_legacy_game_backup(const std::filesystem::path &game_root,
           L"The stale legacy ContentCatalog backup could not be removed."};
     }
     return ContentCatalogResult{true, true, {}};
+  }
+  if (!commit_recovery_file(game_root, legacy, *hash, size)) {
+    return ContentCatalogResult{false, false,
+                                L"The legacy ContentCatalog backup could not "
+                                L"be migrated to the vault."};
   }
   auto &backend = transaction_backend();
   if (sha256_file(catalog) != hash &&
