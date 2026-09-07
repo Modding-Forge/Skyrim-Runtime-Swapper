@@ -23,10 +23,21 @@
 
 namespace {
 
+[[nodiscard]] std::filesystem::path catalog_test_root() {
+#if defined(_WIN32)
+  // The catalog resolver deliberately reads LOCALAPPDATA. Keep its temporary
+  // override on the normal Windows temporary volume instead of inheriting a
+  // potentially virtualized application-local directory from the test host.
+  return std::filesystem::temp_directory_path();
+#else
+  return runtime_swapper::tests::test_root();
+#endif
+}
+
 class TestEnvironment {
 public:
   TestEnvironment()
-      : root_(runtime_swapper::tests::test_root() /
+      : root_(catalog_test_root() /
               ("skyrim-runtime-swapper-catalog-tests-" +
 #if defined(_WIN32)
                std::to_string(GetCurrentProcessId())
