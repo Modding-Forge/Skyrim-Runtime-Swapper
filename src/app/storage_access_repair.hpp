@@ -14,9 +14,8 @@ enum class StorageAccessRepairResult {
   succeeded,
 };
 
-// This is deliberately narrower than a generic ACL repair.  It returns true
-// only when an SRS-owned directory exists, is plain, and has a different
-// Windows owner from the user running SRS.
+// Only existing, plain SRS directories with incorrect ownership or private
+// permissions are eligible. Resolver or identity failures are not repairable.
 [[nodiscard]] bool windows_storage_access_repair_needed(
     const BackendProbeResult& probe) noexcept;
 
@@ -28,8 +27,8 @@ enum class StorageAccessRepairResult {
     const std::filesystem::path& game_root) noexcept;
 
 // Called only by the elevated helper command.  It changes ownership and the
-// private DACL of existing SRS storage directories whose owner is not the
-// current user.  Game files are never in this repair plan.
+// private DACL of existing SRS storage and vault directories. Game files and
+// recovery contents are never changed or removed by this repair plan.
 [[nodiscard]] StorageAccessRepairResult repair_windows_storage_access(
     const std::filesystem::path& game_root, std::wstring* detail = nullptr) noexcept;
 

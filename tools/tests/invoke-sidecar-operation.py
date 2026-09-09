@@ -13,7 +13,7 @@ import tempfile
 
 
 MAGIC = 0x50535253
-VERSION = 6
+VERSION = 7
 MAXIMUM_PAYLOAD = 1024 * 1024
 HEADER = struct.Struct("<IHHI32s")
 OPERATIONS = {
@@ -22,6 +22,7 @@ OPERATIONS = {
     "activate_session": 3,
     "activate_persistent": 4,
     "restore_persistent": 5,
+    "prepare_launch": 6,
 }
 MODES = {
     "automatic": 0,

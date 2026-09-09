@@ -41,6 +41,8 @@ struct InstallationOperationResult {
     const std::filesystem::path& game_root);
 [[nodiscard]] InstallationOperationResult activate_persistent_target(
     const std::filesystem::path& game_root, bool risk_accepted);
+// Caller holds the installation lock; no state from an earlier GUI probe is
+// used to decide whether another restore is needed.
 [[nodiscard]] InstallationOperationResult restore_persistent_source(
     const std::filesystem::path& game_root);
 [[nodiscard]] InstallationOperationResult recover_installation(

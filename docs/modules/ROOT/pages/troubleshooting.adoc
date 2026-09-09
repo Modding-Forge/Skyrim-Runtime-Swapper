@@ -224,7 +224,7 @@ If both locations contain state, or an existing state location is unsafe, SRS bl
 
 == SRS folder access needs repair
 
-SRS offers this repair only after it verifies that an existing SRS lock or recovery directory has a different owner. It never appears for a generic failed lock, a symlink, a non-local filesystem, or a game-file problem.
+SRS offers this repair only for a verified SRS storage ownership problem or, on Windows, incorrect private permissions on its lock or recovery directories. It never appears for a generic failed lock, a symlink, a non-local filesystem, or a game-file problem.
 
 On Windows, select *Repair SRS folder access* and approve the one-time UAC prompt. The repair changes the owner and private access control only for the detected SRS directories; it does not alter Steam or Skyrim files.
 

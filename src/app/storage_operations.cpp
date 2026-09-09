@@ -1,4 +1,6 @@
 #include "storage_operations.hpp"
+#include "storage_operation_support.hpp"
+#include "storage_restore.hpp"
 
 #include "content_catalog.hpp"
 #include "creation_club.hpp"
@@ -9,24 +11,14 @@
 #include <runtime_swapper/recovery_vault.hpp>
 #include <runtime_swapper/runtime_version.hpp>
 
-#include <chrono>
-#include <cstdint>
 #include <utility>
 
 namespace runtime_swapper::app {
 namespace {
 
-constexpr std::string_view restore_intent_name = "persistent-restore";
-constexpr std::string_view restore_intent = "SRS-PERSISTENT-RESTORE-1\n";
-
-using SteadyClock = std::chrono::steady_clock;
-
-[[nodiscard]] std::int64_t
-elapsed_milliseconds(SteadyClock::time_point started) {
-  return std::chrono::duration_cast<std::chrono::milliseconds>(
-             SteadyClock::now() - started)
-      .count();
-}
+using detail::elapsed_milliseconds;
+using detail::failure;
+using detail::SteadyClock;
 
 [[nodiscard]] int mode_rank(SafetyMode mode) noexcept {
   switch (mode) {
@@ -43,22 +35,6 @@ elapsed_milliseconds(SteadyClock::time_point started) {
 }
 
 [[nodiscard]] InstallationOperationResult
-failure(ExitCode code, BackendProbeResult backend, std::wstring message,
-        bool changed = false,
-        RecoveryLifecyclePhase phase = RecoveryLifecyclePhase::inspect,
-        std::wstring technical_detail = {}) {
-  InstallationOperationResult result;
-  result.code = code;
-  result.backend = std::move(backend);
-  result.changed = changed;
-  result.lifecycle_phase = phase;
-  result.technical_detail =
-      technical_detail.empty() ? message : std::move(technical_detail);
-  result.message = std::move(message);
-  return result;
-}
-
-[[nodiscard]] InstallationOperationResult
 recovered_source(const std::filesystem::path &game_root,
                  BackendProbeResult backend) {
   const auto restore_started = SteadyClock::now();
@@ -68,6 +44,7 @@ recovered_source(const std::filesystem::path &game_root,
                    L"The recovery lifecycle metadata is invalid.");
   }
   if (*lifecycle != RecoveryLifecycleState::clean_source &&
+      *lifecycle != RecoveryLifecycleState::source_verified &&
       *lifecycle != RecoveryLifecycleState::restoring &&
       !transition_recovery_lifecycle(game_root,
                                      RecoveryLifecycleState::restoring)) {
@@ -169,84 +146,6 @@ recovered_source(const std::filesystem::path &game_root,
   return result;
 }
 
-[[nodiscard]] InstallationOperationResult
-finish_restore(const std::filesystem::path &game_root,
-               BackendProbeResult backend, bool intent_already_written) {
-  if (!intent_already_written &&
-      !write_recovery_metadata(game_root, restore_intent_name,
-                               restore_intent)) {
-    return failure(
-        ExitCode::commit_failed, std::move(backend),
-        L"The persistent restore intent could not be committed to the vault.");
-  }
-  if (!transition_recovery_lifecycle(game_root,
-                                     RecoveryLifecycleState::restoring)) {
-    return failure(ExitCode::commit_failed, std::move(backend),
-                   L"The persistent restore state could not be committed.");
-  }
-
-  const auto restore_started = SteadyClock::now();
-  const auto creation_club = recover_creation_club_content(game_root);
-  const auto catalog = recover_content_catalog(game_root);
-  const auto runtime = restore_runtime(game_root);
-  if (!creation_club.success || !catalog.success || !runtime.success()) {
-    std::wstring message =
-        L"Persistent restore remains pending in the recovery vault.";
-    if (!runtime.success())
-      message += L"\n" + runtime.message;
-    if (!creation_club.success)
-      message += L"\n" + creation_club.message;
-    if (!catalog.success)
-      message += L"\n" + catalog.message;
-    return failure(
-        !runtime.success() ? runtime.code : ExitCode::recovery_failed,
-        std::move(backend), std::move(message),
-        runtime.changed_files || creation_club.changed || catalog.changed);
-  }
-
-  const auto persistent = clear_persistent_runtime(game_root);
-  const auto fixed = disable_fixed_runtime(game_root);
-  if (!persistent.success() || !fixed.success ||
-      !remove_recovery_metadata(game_root, restore_intent_name)) {
-    return failure(ExitCode::commit_failed, std::move(backend),
-                   L"Skyrim 1.7.104 was restored, but persistent metadata "
-                   L"cleanup is still "
-                   L"pending.",
-                   true);
-  }
-
-  const auto restore_duration = elapsed_milliseconds(restore_started);
-  const auto cleanup_started = SteadyClock::now();
-  const auto cleanup = finalize_recovery_storage(game_root, backend);
-  if (!cleanup.success()) {
-    return failure(
-        cleanup.code, std::move(backend),
-        L"Skyrim 1.7.104 was verified, but recovery cleanup remains pending: " +
-            cleanup.technical_detail,
-        true, cleanup.phase, cleanup.technical_detail);
-  }
-  const auto cleanup_duration = elapsed_milliseconds(cleanup_started);
-
-  InstallationOperationResult result;
-  result.code = ExitCode::success;
-  result.backend = std::move(backend);
-  result.changed =
-      runtime.changed_files || creation_club.changed || catalog.changed;
-  result.runtime_changed = runtime.changed_files;
-  result.creation_club_changed = creation_club.changed;
-  result.content_catalog_changed = catalog.changed;
-  result.lifecycle_state = RecoveryLifecycleState::clean_source;
-  result.lifecycle_phase = RecoveryLifecyclePhase::complete;
-  result.message =
-      L"Skyrim 1.7.104 and all persistently managed content were restored."
-      L"\nPerformance: restore=" +
-      std::to_wstring(restore_duration) + L" ms, cleanup=" +
-      std::to_wstring(cleanup_duration) + L" ms";
-  if (!cleanup.technical_detail.empty())
-    result.message += L"\n" + cleanup.technical_detail;
-  result.technical_detail = cleanup.technical_detail;
-  return result;
-}
 
 [[nodiscard]] InstallationOperationResult
 repair_persistent(const std::filesystem::path &game_root,
@@ -477,7 +376,7 @@ recover_installation(const std::filesystem::path &game_root) {
       return failure(ExitCode::journal_corrupt, std::move(backend),
                      L"The persistent restore intent is invalid.");
     }
-    return finish_restore(game_root, std::move(backend), true);
+    return finish_restore(game_root, std::move(backend));
   }
 
   bool risk_accepted = false;
@@ -627,7 +526,7 @@ restore_persistent_source(const std::filesystem::path &game_root) {
   auto probed = probe_installation_storage(game_root);
   if (!probed.success())
     return probed;
-  return finish_restore(game_root, std::move(probed.backend), false);
+  return finish_restore(game_root, std::move(probed.backend));
 }
 
 } // namespace runtime_swapper::app

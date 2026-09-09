@@ -282,6 +282,7 @@ if(WIN32)
     src/core/sha256.cpp
     src/core/windows_transaction_backend.cpp
     src/core/windows_storage_probe.cpp
+    src/core/windows_storage_access.cpp
   )
 else()
   set(RUNTIME_SWAPPER_PLATFORM_SOURCES
@@ -336,6 +337,17 @@ endif()
 include(CTest)
 
 if(BUILD_TESTING)
+  add_executable(storage_restore_tests
+    src/tests/storage_restore_tests.cpp
+    src/app/storage_restore.cpp
+    src/core/recovery_lifecycle.cpp)
+  target_include_directories(storage_restore_tests PRIVATE src/app src/include)
+  if(MSVC)
+    target_compile_options(storage_restore_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+  else()
+    target_compile_options(storage_restore_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+  endif()
+  add_test(NAME storage_restore_tests COMMAND storage_restore_tests)
   # Real-depot regression probe; never included in release packages.
   if(SKYRIM_RUNTIME_BUILD_PROFILE STREQUAL "boaw-clean")
     add_executable(optional_recovery_probe src/tests/optional_recovery_probe.cpp)
@@ -436,6 +448,7 @@ add_executable(runtime_swapper_helper WIN32
   src/app/session.cpp
   src/app/storage_access_repair.cpp
   src/app/storage_operations.cpp
+  src/app/storage_restore.cpp
   src/app/wine_sidecar.cpp
   src/app/wine_sidecar_protocol.cpp
 )
@@ -551,6 +564,14 @@ if(BUILD_TESTING)
     "diagnostic_run_tests" "VFT_APP")
 
   add_executable(core_storage_tests src/tests/core_storage_tests.cpp)
+  add_executable(windows_storage_access_tests src/tests/windows_storage_access_tests.cpp)
+  target_include_directories(windows_storage_access_tests PRIVATE src/core)
+  target_compile_definitions(windows_storage_access_tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_link_libraries(windows_storage_access_tests PRIVATE runtime_swapper_core)
+  if(MSVC)
+    target_compile_options(windows_storage_access_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+  endif()
+  add_test(NAME windows_storage_access_tests COMMAND windows_storage_access_tests)
   target_include_directories(core_storage_tests PRIVATE src/core)
   target_compile_definitions(core_storage_tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_link_libraries(core_storage_tests PRIVATE runtime_swapper_core)
@@ -712,6 +733,7 @@ else()
     src/app/creation_club_inventory.cpp
     src/app/fixed_runtime.cpp
     src/app/storage_operations.cpp
+    src/app/storage_restore.cpp
   )
   target_include_directories(runtime_swapper_native BEFORE PRIVATE
     "${GENERATED_INCLUDE}" src/include src/app src/core)

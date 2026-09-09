@@ -2,6 +2,26 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.2.5 - 2026-09-09
+
+- Adds guided Windows repair for SRS storage ownership and private permissions,
+  including existing recovery vaults and transaction-lock directories. Repair
+  preserves recovery data and never changes redirected or unrelated directories.
+- Adds guided Linux SRS-folder ownership repair through desktop authentication,
+  with a terminal command when the authentication service is unavailable.
+- Keeps resolved storage paths available when permissions block startup,
+  verifies repair before reporting success, and logs the failing path,
+  operation and Windows error when repair cannot complete.
+- Preserves the current Steam ContentCatalog during recovery when Steam has
+  changed it, instead of replacing it with an older SRS copy.
+- Repeated persistent restores now recheck the current state under the installation
+  lock instead of leaving a new restore request after another GUI already finished.
+- Recovers valid restore requests stranded by older versions when the source
+  runtime is already active, while still recovering supplemental content and
+  verifying the complete source before clearing markers and recovery data.
+- Adds Windows access-repair tests, cross-platform restore regression tests,
+  and interruption/retry coverage, including recovery of stranded restore requests.
+
 ## 1.2.4 - 2026-09-04
 
 - Manual runtime control now verifies the actual `SkyrimSE.exe` hash before

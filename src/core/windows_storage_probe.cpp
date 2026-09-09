@@ -149,7 +149,8 @@ using UniqueHandle = std::unique_ptr<void, HandleCloser>;
 
 [[nodiscard]] bool directory_dacl_allows_only_user_and_system(
     const std::filesystem::path& directory, PSID current_sid,
-    bool require_protected, bool allow_denied, DWORD* native_error = nullptr) {
+    bool require_protected, bool allow_denied, DWORD* native_error = nullptr,
+    bool require_full_control = false) {
   PSID owner{};
   PACL dacl{};
   PSECURITY_DESCRIPTOR descriptor{};
@@ -182,6 +183,8 @@ using UniqueHandle = std::unique_ptr<void, HandleCloser>;
   }
   bool user_allowed = false;
   bool system_allowed = false;
+  ACCESS_MASK user_access{};
+  ACCESS_MASK system_access{};
   for (DWORD index = 0; index < dacl->AceCount; ++index) {
     void* raw_ace{};
     if (!GetAce(dacl, index, &raw_ace)) {
@@ -192,16 +195,23 @@ using UniqueHandle = std::unique_ptr<void, HandleCloser>;
     if (allow_denied && header->AceType == ACCESS_DENIED_ACE_TYPE) continue;
     if (header->AceType != ACCESS_ALLOWED_ACE_TYPE) return false;
     const auto* ace = static_cast<const ACCESS_ALLOWED_ACE*>(raw_ace);
+    if (require_full_control && (header->AceFlags & INHERIT_ONLY_ACE)) continue;
     auto* sid = const_cast<DWORD*>(&ace->SidStart);
     if (EqualSid(sid, current_sid) != FALSE) {
       user_allowed = true;
+      user_access |= ace->Mask;
     } else if (EqualSid(sid, system_storage.data()) != FALSE) {
       system_allowed = true;
+      system_access |= ace->Mask;
     } else {
       return false;
     }
   }
-  return user_allowed && system_allowed;
+  const auto full_control = [](ACCESS_MASK access) {
+    return (access & GENERIC_ALL) != 0 || (access & FILE_ALL_ACCESS) == FILE_ALL_ACCESS;
+  };
+  return user_allowed && system_allowed &&
+         (!require_full_control || (full_control(user_access) && full_control(system_access)));
 }
 
 [[nodiscard]] bool directory_dacl_is_restricted(
@@ -433,6 +443,12 @@ using UniqueHandle = std::unique_ptr<void, HandleCloser>;
 
 }  // namespace
 
+bool windows_storage_directory_is_private(const std::filesystem::path& directory) {
+  auto sid = current_user_sid();
+  return sid && directory_dacl_allows_only_user_and_system(
+                    directory, sid->data(), true, false, nullptr, true);
+}
+
 BackendProbeResult probe_windows_storage(
     TransactionBackend& backend, const std::filesystem::path& managed_root,
                            std::uint64_t required_vault_bytes,
@@ -605,10 +621,10 @@ BackendProbeResult probe_windows_storage(
           restrict_directory_acl(vault_path, current_sid) &&
           directory_dacl_is_restricted(vault_path, current_sid);
       if (!repaired) {
-        return blocked(
+        return attach_storage_paths(blocked(
             L"vault-owner-or-dacl",
             L"The recovery vault is not controlled by the current Windows user.",
-            *target, *vault, vault_path, *id);
+            *target, *vault, vault_path, *id), storage_base, target_storage_base, *id);
       }
     }
     if (!prepare_vault) {
@@ -638,9 +654,10 @@ BackendProbeResult probe_windows_storage(
     if (!current_sid || !owner_is_current_user(vault_path, current_sid) ||
         !restrict_directory_acl(vault_path, current_sid) ||
         !directory_dacl_is_restricted(vault_path, current_sid)) {
-      return blocked(L"vault-owner-or-dacl",
+      return attach_storage_paths(blocked(L"vault-owner-or-dacl",
                      L"The recovery vault is not exclusively controlled by the current "
-                     L"Windows user.", *target, {}, vault_path, *id);
+                     L"Windows user.", *target, *vault, vault_path, *id),
+                     storage_base, target_storage_base, *id);
     }
     vault = inspect_volume(vault_path);
     if (!vault || !vault->local || !vault->stable || !vault->native_durability) {

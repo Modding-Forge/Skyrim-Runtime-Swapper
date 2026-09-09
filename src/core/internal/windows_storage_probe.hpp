@@ -4,6 +4,9 @@
 
 namespace runtime_swapper {
 
+[[nodiscard]] bool windows_storage_directory_is_private(
+    const std::filesystem::path& directory);
+
 [[nodiscard]] BackendProbeResult probe_windows_storage(
     TransactionBackend& backend, const std::filesystem::path& managed_root,
     std::uint64_t required_vault_bytes, bool prepare_vault);
@@ -12,4 +15,3 @@ namespace runtime_swapper {
     const CoordinationLockPath& resolved_lock);
 
 }  // namespace runtime_swapper
-

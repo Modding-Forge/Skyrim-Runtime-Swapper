@@ -47,7 +47,7 @@ constexpr int repair_storage_access_button_id = 4201;
       {IDCLOSE, L"Close"},
   };
   const std::wstring content =
-      L"An SRS storage or lock directory belongs to a different Windows owner. "
+      L"An SRS storage, lock, or recovery-vault directory has incorrect ownership or permissions. "
       L"This usually happens after Steam, a mod manager, or SRS was previously run "
       L"as Administrator.\n\n"
       L"Repair changes ownership and private access only for the detected SRS storage "
