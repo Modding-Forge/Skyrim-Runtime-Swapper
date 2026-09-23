@@ -160,10 +160,10 @@ jobs:
         run: |
           New-Item -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' -Force | Out-Null
           Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' -Name AllowDevelopmentWithoutDevLicense -Type DWord -Value 1
-      - name: Build, test and stage all seven profiles
+      - name: Build and stage all seven profiles (tests for stable releases only)
         shell: pwsh
         run: |
-          cmake "-DNATIVE_SIDECAR_ROOT=$env:GITHUB_WORKSPACE/native" -DSKIP_TESTS=OFF -DSTAGE_ONLY=ON -P tools/build-all.cmake
+          cmake "-DNATIVE_SIDECAR_ROOT=$env:GITHUB_WORKSPACE/native" -DSTAGE_ONLY=ON -P tools/build-all.cmake
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify PE hardening
         shell: pwsh
@@ -223,48 +223,15 @@ jobs:
           retention-days: 90
 
   nexus:
-    name: Nexus ${{ matrix.profile }} ${{ matrix.target }}
+    name: Nexus release (all seven packages)
     needs: [validate, packages]
     if: always() && !cancelled() && needs.validate.result == 'success' && (needs.packages.result == 'success' || (needs.packages.result == 'skipped' && inputs.tested_run_id != '')) && (github.event_name == 'push' || inputs.tested_run_id != '') && vars.NEXUS_UPLOAD_ENABLED == 'true' && !contains(needs.validate.outputs.version, '-')
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 120
     environment: nexus-production
     concurrency:
-      group: nexus-upload-${{ matrix.file_id }}
+      group: nexus-release-upload
       cancel-in-progress: false
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        include:
-          - target: '1.5.97'
-            profile: BoBW
-            file_id: '7901739'
-            display_name: SRS - Best of Both Worlds - 1.7.104 to 1.5.97
-          - target: '1.6.1170'
-            profile: BoBW
-            file_id: '7901745'
-            display_name: SRS - Best of Both Worlds - 1.7.104 to 1.6.1170
-          - target: '1.5.97'
-            profile: BoAW
-            file_id: '7901751'
-            display_name: SRS - Best of All Worlds - 1.7.104 to 1.5.97
-          - target: '1.6.1170'
-            profile: BoAW
-            file_id: '7901757'
-            display_name: SRS - Best of All Worlds - 1.7.104 to 1.6.1170
-          - target: '1.6.640'
-            profile: BoBW
-            file_id: '8001684'
-            display_name: SRS - Best of Both Worlds - 1.7.104 to 1.6.640
-          - target: '1.6.640'
-            profile: BoAW
-            file_id: '8001687'
-            display_name: SRS - Best of All Worlds - 1.7.104 to 1.6.640
-          - target: '1.6.1170'
-            profile: BoAW-Clean
-            file_id: '7901760'
-            display_name: SRS - BoAW and Cleaned - 1.7.104 to 1.6.1170
     steps:
       - uses: actions/download-artifact@v5
         with:
@@ -272,31 +239,138 @@ jobs:
           path: release
           github-token: ${{ github.token }}
           run-id: ${{ inputs.tested_run_id || github.run_id }}
-      - name: Verify release checksums and credentials
+      - name: Verify all release checksums and credentials
         env:
           NEXUS_API_KEY: ${{ secrets.NEXUSMODS_API_KEY }}
-          PACKAGE: SRS-v${{ needs.validate.outputs.version }}-${{ matrix.profile }}-1.7.104-to-${{ matrix.target }}.7z
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
         working-directory: release
         run: |
           test -n "$NEXUS_API_KEY" || { echo 'Missing NEXUSMODS_API_KEY environment secret'; exit 1; }
-          test -f "$PACKAGE"
           sha256sum --check --strict SHA256SUMS.txt
-      - name: Upload new file version
-        id: upload
+          test -f "SRS-v${RELEASE_VERSION}-BoBW-1.7.104-to-1.5.97.7z"
+          test -f "SRS-v${RELEASE_VERSION}-BoBW-1.7.104-to-1.6.1170.7z"
+          test -f "SRS-v${RELEASE_VERSION}-BoAW-1.7.104-to-1.5.97.7z"
+          test -f "SRS-v${RELEASE_VERSION}-BoAW-1.7.104-to-1.6.1170.7z"
+          test -f "SRS-v${RELEASE_VERSION}-BoBW-1.7.104-to-1.6.640.7z"
+          test -f "SRS-v${RELEASE_VERSION}-BoAW-1.7.104-to-1.6.640.7z"
+          test -f "SRS-v${RELEASE_VERSION}-BoAW-Clean-1.7.104-to-1.6.1170.7z"
+      - name: Upload BoBW 1.5.97
+        id: upload_7901739
+        continue-on-error: true
         uses: Nexus-Mods/upload-action@98532f7670c27cbecc78fae03fa3e278147827e2
         with:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
-          file_id: ${{ matrix.file_id }}
-          filename: release/SRS-v${{ needs.validate.outputs.version }}-${{ matrix.profile }}-1.7.104-to-${{ matrix.target }}.7z
+          file_id: '7901739'
+          filename: release/SRS-v${{ needs.validate.outputs.version }}-BoBW-1.7.104-to-1.5.97.7z
           version: v${{ needs.validate.outputs.version }}
-          display_name: ${{ matrix.display_name }}
+          display_name: SRS - Best of Both Worlds - 1.7.104 to 1.5.97
           category: main
           archive_existing_version: 'false'
           update_mod_version: 'false'
           mod_id: '7318624462239'
-      - name: Record uploaded version
+      - name: Upload BoBW 1.6.1170
+        id: upload_7901745
+        continue-on-error: true
+        uses: Nexus-Mods/upload-action@98532f7670c27cbecc78fae03fa3e278147827e2
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_id: '7901745'
+          filename: release/SRS-v${{ needs.validate.outputs.version }}-BoBW-1.7.104-to-1.6.1170.7z
+          version: v${{ needs.validate.outputs.version }}
+          display_name: SRS - Best of Both Worlds - 1.7.104 to 1.6.1170
+          category: main
+          archive_existing_version: 'false'
+          update_mod_version: 'false'
+          mod_id: '7318624462239'
+      - name: Upload BoAW 1.5.97
+        id: upload_7901751
+        continue-on-error: true
+        uses: Nexus-Mods/upload-action@98532f7670c27cbecc78fae03fa3e278147827e2
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_id: '7901751'
+          filename: release/SRS-v${{ needs.validate.outputs.version }}-BoAW-1.7.104-to-1.5.97.7z
+          version: v${{ needs.validate.outputs.version }}
+          display_name: SRS - Best of All Worlds - 1.7.104 to 1.5.97
+          category: main
+          archive_existing_version: 'false'
+          update_mod_version: 'false'
+          mod_id: '7318624462239'
+      - name: Upload BoAW 1.6.1170
+        id: upload_7901757
+        continue-on-error: true
+        uses: Nexus-Mods/upload-action@98532f7670c27cbecc78fae03fa3e278147827e2
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_id: '7901757'
+          filename: release/SRS-v${{ needs.validate.outputs.version }}-BoAW-1.7.104-to-1.6.1170.7z
+          version: v${{ needs.validate.outputs.version }}
+          display_name: SRS - Best of All Worlds - 1.7.104 to 1.6.1170
+          category: main
+          archive_existing_version: 'false'
+          update_mod_version: 'false'
+          mod_id: '7318624462239'
+      - name: Upload BoBW 1.6.640
+        id: upload_8001684
+        continue-on-error: true
+        uses: Nexus-Mods/upload-action@98532f7670c27cbecc78fae03fa3e278147827e2
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_id: '8001684'
+          filename: release/SRS-v${{ needs.validate.outputs.version }}-BoBW-1.7.104-to-1.6.640.7z
+          version: v${{ needs.validate.outputs.version }}
+          display_name: SRS - Best of Both Worlds - 1.7.104 to 1.6.640
+          category: main
+          archive_existing_version: 'false'
+          update_mod_version: 'false'
+          mod_id: '7318624462239'
+      - name: Upload BoAW 1.6.640
+        id: upload_8001687
+        continue-on-error: true
+        uses: Nexus-Mods/upload-action@98532f7670c27cbecc78fae03fa3e278147827e2
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_id: '8001687'
+          filename: release/SRS-v${{ needs.validate.outputs.version }}-BoAW-1.7.104-to-1.6.640.7z
+          version: v${{ needs.validate.outputs.version }}
+          display_name: SRS - Best of All Worlds - 1.7.104 to 1.6.640
+          category: main
+          archive_existing_version: 'false'
+          update_mod_version: 'false'
+          mod_id: '7318624462239'
+      - name: Upload BoAW-Clean 1.6.1170
+        id: upload_7901760
+        continue-on-error: true
+        uses: Nexus-Mods/upload-action@98532f7670c27cbecc78fae03fa3e278147827e2
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_id: '7901760'
+          filename: release/SRS-v${{ needs.validate.outputs.version }}-BoAW-Clean-1.7.104-to-1.6.1170.7z
+          version: v${{ needs.validate.outputs.version }}
+          display_name: SRS - BoAW and Cleaned - 1.7.104 to 1.6.1170
+          category: miscellaneous
+          archive_existing_version: 'false'
+          # Update the page with the final file only when all earlier uploads succeeded.
+          update_mod_version: ${{ steps.upload_7901739.outcome == 'success' && steps.upload_7901745.outcome == 'success' && steps.upload_7901751.outcome == 'success' && steps.upload_7901757.outcome == 'success' && steps.upload_8001684.outcome == 'success' && steps.upload_8001687.outcome == 'success' && 'true' || 'false' }}
+          mod_id: '7318624462239'
+      - name: Record upload results
+        if: always()
         env:
-          FILE_ID: ${{ matrix.file_id }}
-          VERSION_ID: ${{ steps.upload.outputs.version_id }}
+          UPLOAD_STEPS: ${{ toJSON(steps) }}
         run: |
-          printf 'Nexus file %s: uploaded version ID %s\n' "$FILE_ID" "$VERSION_ID" >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY'
+          import json, os
+          steps = json.loads(os.environ['UPLOAD_STEPS'])
+          failed = False
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              for name, step in steps.items():
+                  if not name.startswith('upload_'):
+                      continue
+                  outcome = step['outcome']
+                  version = step.get('outputs', {}).get('version_id', 'not returned')
+                  summary.write(f"Nexus file {name.removeprefix('upload_')}: {outcome}; version ID {version}\n\n")
+                  failed |= outcome != 'success'
+              summary.write('Do not rerun the entire upload job after a partial failure: successful uploads may be duplicated.\n')
+          if failed:
+              raise SystemExit('Not all Nexus uploads succeeded; review individual results before retrying')
+          PY

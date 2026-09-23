@@ -88,10 +88,15 @@ The full **Storage safety** workflow runs manually through GitHub Actions. It co
 Pushing a version tag such as `v1.3.2-rc1` or `v1.3.2` starts the
 **Tag release builds** workflow. The tag must match `vcpkg.json` and the CMake
 release version. Commit the workflow and all required patch assets before tagging.
-Manual workflow runs build and test the selected ref but never upload to Nexus.
+Manual workflow runs normally build the selected ref without uploading to Nexus.
+Supplying `tested_run_id` instead publishes existing verified packages without
+rebuilding; only workflow changes since that successful run are accepted.
 
 The workflow builds all seven Linux-enabled packages, checks the Ubuntu 22.04
-sidecar ABI and binary hardening, and runs the Windows tests even for RC tags.
+sidecar ABI and binary hardening, and runs the Windows tests for stable releases.
+RC versions (`-rcN`) skip compiling and running the Windows test suite, using the
+same version-based defaults as local builds. Package verification and the short
+dependency, ABI and hardening checks remain enabled for RCs.
 Windows stages verified payloads using `-DSTAGE_ONLY=ON`; Linux creates and
 round-trip verifies the archives with native execute permissions preserved.
 
@@ -114,15 +119,22 @@ Before enabling uploads:
    and configure required reviewers for manual publication approval. An environment
    name in YAML alone does not enable approval protection.
 2. Add `NEXUSMODS_API_KEY` as an environment secret, not to source control.
-3. Review the seven file mappings and the `main` category used for new versions.
+3. Review the seven file mappings: the six standard packages use `main`, while
+   BoAW-Clean always uses `miscellaneous`.
 4. Set the repository Actions variable `NEXUS_UPLOAD_ENABLED` to `true`.
 
 Uploads run after all packages pass verification. Existing versions are not
-archived, the mod's overall version and changelog are not changed, and mod-manager
-download preferences are not explicitly overridden. Each successful job records
-the new Nexus version ID in its summary. Uploads are not atomic across seven
-files: after a partial failure, check Nexus before rerunning failed jobs. Do not
-rerun successful upload jobs; the upstream action can create duplicate versions.
+archived and the changelog is not changed. The final file publication updates the
+mod page version (including the `v` prefix) only if all six earlier uploads
+succeeded. Failed earlier uploads leave the page version unchanged. Mod-manager
+download preferences are not explicitly overridden. All seven uploads share one
+`nexus-production` job, so one approval authorizes the entire release. The API key
+remains an environment secret. Uploads run sequentially, with each outcome and
+new Nexus version ID recorded in the job summary. A failed upload does not prevent
+the remaining files from being attempted, but the job fails if any upload fails.
+Uploads are not atomic across seven files: after a partial failure, check Nexus
+and retry only the missing files. Do not rerun the entire upload job; the upstream
+action can create duplicate versions for files that already succeeded.
 
 ## License
 
