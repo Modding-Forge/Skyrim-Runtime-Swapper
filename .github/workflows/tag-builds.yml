@@ -1,0 +1,257 @@
+name: Tag release builds
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tag-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Verify tag matches source version
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          version = json.loads(Path('vcpkg.json').read_text())['version-string']
+          if not re.fullmatch(r'\d+\.\d+\.\d+(?:-rc\d+)?', version):
+              raise SystemExit('Unsupported release version')
+          if os.environ['RELEASE_TAG'] != 'v' + version:
+              raise SystemExit('Tag must match vcpkg.json release version')
+          cmake = Path('CMakeLists.txt').read_text()
+          if f'set(SKYRIM_RUNTIME_RELEASE_VERSION "{version}")' not in cmake:
+              raise SystemExit('CMake release version mismatch')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'version={version}\n')
+          PY
+      - run: python3 tools/tests/verify-third-party-pins.py
+      - run: python3 tools/package-7z.py --self-test
+
+  native:
+    needs: validate
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: '1.5.97', profile: bobw, catalog: '1.7.104-to-1.5.97' }
+          - { target: '1.5.97', profile: boaw, catalog: '1.7.104-to-1.5.97' }
+          - { target: '1.6.640', profile: bobw, catalog: '1.7.104-to-1.6.640' }
+          - { target: '1.6.640', profile: boaw, catalog: '1.7.104-to-1.6.640' }
+          - { target: '1.6.1170', profile: bobw, catalog: '1.7.104-to-1.6.1170' }
+          - { target: '1.6.1170', profile: boaw, catalog: '1.7.104-to-1.6.1170' }
+          - { target: '1.6.1170', profile: boaw-clean, catalog: '1.7.104-to-1.6.1170-clean' }
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Install pinned build tools
+        run: |
+          python3 -m pip install --user cmake==3.31.6 ninja==1.11.1.4
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build native sidecar
+        run: |
+          cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=OFF \
+            -DSKYRIM_RUNTIME_BUILD_PROFILE=${{ matrix.profile }} \
+            -DSKYRIM_RUNTIME_PATCH_MANIFEST="$PWD/assets/runtime/${{ matrix.catalog }}/manifest.json"
+          cmake --build build/native --target runtime_swapper_native --parallel 4
+      - name: Verify ABI, hardening and executable
+        run: |
+          python3 tools/tests/verify-elf-abi.py build/native/SkyrimRuntimeSwapper.Native
+          bash tools/tests/verify-elf-hardening.sh build/native/SkyrimRuntimeSwapper.Native
+          set +e
+          printf short | build/native/SkyrimRuntimeSwapper.Native
+          result=$?
+          set -e
+          test "$result" -eq 2
+      - name: Preserve sidecar layout
+        run: |
+          mkdir -p sidecars/${{ matrix.target }}/${{ matrix.profile }}
+          cp build/native/SkyrimRuntimeSwapper.Native sidecars/${{ matrix.target }}/${{ matrix.profile }}/
+      - uses: actions/upload-artifact@v5
+        with:
+          name: sidecar-${{ matrix.target }}-${{ matrix.profile }}
+          path: sidecars/
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    needs: [validate, native]
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: sidecar-*
+          merge-multiple: true
+          path: native
+      - name: Enable symlink fixtures
+        shell: pwsh
+        run: |
+          New-Item -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' -Force | Out-Null
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' -Name AllowDevelopmentWithoutDevLicense -Type DWord -Value 1
+      - name: Build, test and stage all seven profiles
+        shell: pwsh
+        run: |
+          cmake "-DNATIVE_SIDECAR_ROOT=$env:GITHUB_WORKSPACE/native" -DSKIP_TESTS=OFF -DSTAGE_ONLY=ON -P tools/build-all.cmake
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify PE hardening
+        shell: pwsh
+        run: |
+          $binaries = Get-ChildItem dist/builds -Recurse -File | Where-Object { $_.Name -in @('version.dll', 'SkyrimRuntimeSwapper.exe') }
+          if ($binaries.Count -ne 14) { throw 'Expected fourteen Windows binaries' }
+          ./tools/tests/verify-pe-hardening.ps1 -Path $binaries.FullName
+      - uses: actions/upload-artifact@v5
+        with:
+          name: staged-release
+          path: dist/builds/
+          if-no-files-found: error
+          retention-days: 7
+
+  packages:
+    needs: [validate, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          name: staged-release
+          path: staged
+      - name: Package and round-trip verify
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          python3 - <<'PY'
+          import os, subprocess
+          from pathlib import Path
+          version = os.environ['RELEASE_VERSION']
+          sources = sorted(Path('staged').glob(f'{version}/*/SRS-v{version}-*'))
+          if len(sources) != 7 or any(not path.is_dir() for path in sources):
+              raise SystemExit('Expected exactly seven staged packages')
+          Path('release').mkdir()
+          for source in sources:
+              if not (source / 'SkyrimRuntimeSwapper.Native').is_file():
+                  raise SystemExit('Missing native sidecar')
+              subprocess.run(['python3', 'tools/package-7z.py', '--source', str(source),
+                              '--output', f'release/{source.name}.7z'], check=True)
+          PY
+          cd release
+          sha256sum -- *.7z > SHA256SUMS.txt
+          sha256sum --check SHA256SUMS.txt
+      - uses: actions/upload-artifact@v5
+        with:
+          name: SRS-v${{ needs.validate.outputs.version }}-packages
+          path: |
+            release/*.7z
+            release/SHA256SUMS.txt
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 90
+
+  nexus:
+    name: Nexus ${{ matrix.profile }} ${{ matrix.target }}
+    needs: [validate, packages]
+    if: vars.NEXUS_UPLOAD_ENABLED == 'true' && !contains(needs.validate.outputs.version, '-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: nexus-production
+    concurrency:
+      group: nexus-upload-${{ matrix.file_id }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - target: '1.5.97'
+            profile: BoBW
+            file_id: '7901739'
+            display_name: SRS - Best of Both Worlds - 1.7.104 to 1.5.97
+          - target: '1.6.1170'
+            profile: BoBW
+            file_id: '7901745'
+            display_name: SRS - Best of Both Worlds - 1.7.104 to 1.6.1170
+          - target: '1.5.97'
+            profile: BoAW
+            file_id: '7901751'
+            display_name: SRS - Best of All Worlds - 1.7.104 to 1.5.97
+          - target: '1.6.1170'
+            profile: BoAW
+            file_id: '7901757'
+            display_name: SRS - Best of All Worlds - 1.7.104 to 1.6.1170
+          - target: '1.6.640'
+            profile: BoBW
+            file_id: '8001684'
+            display_name: SRS - Best of Both Worlds - 1.7.104 to 1.6.640
+          - target: '1.6.640'
+            profile: BoAW
+            file_id: '8001687'
+            display_name: SRS - Best of All Worlds - 1.7.104 to 1.6.640
+          - target: '1.6.1170'
+            profile: BoAW-Clean
+            file_id: '7901760'
+            display_name: SRS - BoAW and Cleaned - 1.7.104 to 1.6.1170
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: SRS-v${{ needs.validate.outputs.version }}-packages
+          path: release
+      - name: Verify release checksums and credentials
+        env:
+          NEXUS_API_KEY: ${{ secrets.NEXUSMODS_API_KEY }}
+          PACKAGE: SRS-v${{ needs.validate.outputs.version }}-${{ matrix.profile }}-1.7.104-to-${{ matrix.target }}.7z
+        working-directory: release
+        run: |
+          test -n "$NEXUS_API_KEY" || { echo 'Missing NEXUSMODS_API_KEY environment secret'; exit 1; }
+          test -f "$PACKAGE"
+          sha256sum --check --strict SHA256SUMS.txt
+      - name: Upload new file version
+        id: upload
+        uses: Nexus-Mods/upload-action@98532f7670c27cbecc78fae03fa3e278147827e2
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_id: ${{ matrix.file_id }}
+          filename: release/SRS-v${{ needs.validate.outputs.version }}-${{ matrix.profile }}-1.7.104-to-${{ matrix.target }}.7z
+          version: v${{ needs.validate.outputs.version }}
+          display_name: ${{ matrix.display_name }}
+          category: main
+          archive_existing_version: 'false'
+          update_mod_version: 'false'
+          mod_id: '7318624462239'
+      - name: Record uploaded version
+        env:
+          FILE_ID: ${{ matrix.file_id }}
+          VERSION_ID: ${{ steps.upload.outputs.version_id }}
+        run: |
+          printf 'Nexus file %s: uploaded version ID %s\n' "$FILE_ID" "$VERSION_ID" >> "$GITHUB_STEP_SUMMARY"

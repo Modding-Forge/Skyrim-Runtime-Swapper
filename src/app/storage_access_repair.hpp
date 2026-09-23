@@ -26,9 +26,10 @@ enum class StorageAccessRepairResult {
     const std::filesystem::path& helper_path,
     const std::filesystem::path& game_root) noexcept;
 
-// Called only by the elevated helper command.  It changes ownership and the
-// private DACL of existing SRS storage and vault directories. Game files and
-// recovery contents are never changed or removed by this repair plan.
+// Called only by the elevated helper command. It changes ownership, private
+// DACLs, and read-only attributes of existing SRS storage directories and
+// fixed metadata files. Game files and recovery objects are never changed or
+// removed by this repair plan.
 [[nodiscard]] StorageAccessRepairResult repair_windows_storage_access(
     const std::filesystem::path& game_root, std::wstring* detail = nullptr) noexcept;
 

@@ -20,17 +20,19 @@ IMPORTANT: Do not install more than one Skyrim Runtime Swapper package at the sa
 
 == Building your own mod setup
 
-Version 1.2.5 contains these five packages, distributed as `.7z` archives:
+Version 1.3.2 contains these seven packages, distributed as `.7z` archives:
 
-* `SRS-v1.2.5-BoBW-1.7.104-to-1.6.1170.7z`
-* `SRS-v1.2.5-BoAW-1.7.104-to-1.6.1170.7z`
-* `SRS-v1.2.5-BoBW-1.7.104-to-1.5.97.7z`
-* `SRS-v1.2.5-BoAW-1.7.104-to-1.5.97.7z`
-* `SRS-v1.2.5-BoAW-Clean-1.7.104-to-1.6.1170.7z` (alternative to normal BoAW, not an add-on)
+* `SRS-v1.3.2-BoBW-1.7.104-to-1.6.640.7z`
+* `SRS-v1.3.2-BoAW-1.7.104-to-1.6.640.7z`
+* `SRS-v1.3.2-BoBW-1.7.104-to-1.6.1170.7z`
+* `SRS-v1.3.2-BoAW-1.7.104-to-1.6.1170.7z`
+* `SRS-v1.3.2-BoBW-1.7.104-to-1.5.97.7z`
+* `SRS-v1.3.2-BoAW-1.7.104-to-1.5.97.7z`
+* `SRS-v1.3.2-BoAW-Clean-1.7.104-to-1.6.1170.7z` (alternative to normal BoAW, not an add-on)
 
 === Install and launch
 
-. Decide whether the setup requires Skyrim 1.6.1170 or 1.5.97.
+. Decide whether the setup requires Skyrim 1.6.640, 1.6.1170, or 1.5.97.
 . Choose Best of Both Worlds, Best of All Worlds, or the 1.6.1170 BoAW-Clean alternative as explained in xref:profiles.adoc[].
 . Download the matching archive from link:https://www.nexusmods.com/skyrimspecialedition/mods/189855[Nexus Mods].
 . Install it as a root mod through the mod manager, or extract it manually into the Skyrim game directory.

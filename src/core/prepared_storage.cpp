@@ -1,5 +1,6 @@
 #include <runtime_swapper/prepared_storage.hpp>
 
+#include <runtime_swapper/checked_arithmetic.hpp>
 #include <runtime_swapper/sha256.hpp>
 
 #if defined(_WIN32)
@@ -22,6 +23,8 @@
 
 namespace runtime_swapper {
 namespace {
+
+constexpr std::uint64_t recovery_reserve_bytes = 256ULL * 1024ULL * 1024ULL;
 
 struct FileIdentity {
   std::uint64_t device{};
@@ -147,6 +150,23 @@ thread_local PreparedStorageContext* active_context{};
   return normalized(left) == normalized(right);
 }
 
+[[nodiscard]] bool directory_exists(const std::filesystem::path& path) {
+  if (path.empty()) return false;
+  std::error_code error;
+  return std::filesystem::is_directory(path, error) && !error;
+}
+
+[[nodiscard]] bool has_recovery_capacity(
+    const std::filesystem::path& vault, std::uint64_t required_bytes) {
+  std::uint64_t required{};
+  if (!checked_add(required_bytes, recovery_reserve_bytes, required)) {
+    return false;
+  }
+  std::error_code error;
+  const auto available = std::filesystem::space(vault, error);
+  return !error && available.available >= required;
+}
+
 }  // namespace
 
 struct PreparedStorageContext::Impl {
@@ -170,18 +190,31 @@ PreparedStorageMetrics PreparedStorageContext::metrics() const noexcept {
   return implementation_->metrics;
 }
 
-std::optional<PreparedStorageContext> prepare_storage_context(
-    const std::filesystem::path& game_root, std::uint64_t required_vault_bytes,
-    std::wstring* error_message) {
-  auto backend = transaction_backend().probe(game_root, required_vault_bytes, true);
+std::optional<PreparedStorageContext> prepare_storage_context_from_probe(
+    const std::filesystem::path& game_root, BackendProbeResult backend,
+    std::uint64_t required_vault_bytes, std::wstring* error_message) {
   if (!backend.success()) {
     if (error_message != nullptr) *error_message = backend.message;
     return std::nullopt;
   }
 
+  // A successful non-preparing probe may describe a vault that has not been
+  // created yet. Only that case needs the backend's preparation path. An
+  // existing vault has already passed the caller's ACL and identity checks;
+  // probing it again here would reintroduce a path-based TOCTOU window.
+  if (!directory_exists(backend.vault_path)) {
+    auto prepared = transaction_backend().probe(
+        game_root, required_vault_bytes, true);
+    if (!prepared.success()) {
+      if (error_message != nullptr) *error_message = prepared.message;
+      return std::nullopt;
+    }
+    backend = std::move(prepared);
+  }
+
   auto implementation = std::make_unique<PreparedStorageContext::Impl>();
   implementation->reserved_bytes = required_vault_bytes;
-  implementation->vault_prepared = true;
+  implementation->vault_prepared = directory_exists(backend.vault_path);
   const std::array required_directories{normalized(game_root),
                                         normalized(backend.vault_path)};
   for (const auto& directory : required_directories) {
@@ -218,6 +251,14 @@ std::optional<PreparedStorageContext> prepare_storage_context(
   context.target_volume_id = context.backend.target_volume.stable_id;
   context.vault_volume_id = context.backend.vault_volume.stable_id;
   return context;
+}
+
+std::optional<PreparedStorageContext> prepare_storage_context(
+    const std::filesystem::path& game_root, std::uint64_t required_vault_bytes,
+    std::wstring* error_message) {
+  auto backend = transaction_backend().probe(game_root, required_vault_bytes, true);
+  return prepare_storage_context_from_probe(
+      game_root, std::move(backend), required_vault_bytes, error_message);
 }
 
 PreparedStorageScope::PreparedStorageScope(
@@ -321,6 +362,18 @@ BackendProbeResult probe_prepared_storage(
       required_vault_bytes <= implementation.reserved_bytes) {
     return context.backend;
   }
+
+  // Capacity is the only changing input while the prepared root and vault
+  // are held. Reusing the verified backend avoids a second ACL probe on
+  // Windows, where an elevated repair or inherited DACL can otherwise make
+  // the same vault appear inconsistent between adjacent calls.
+  if (implementation.vault_prepared &&
+      has_recovery_capacity(context.backend.vault_path, required_vault_bytes)) {
+    implementation.reserved_bytes =
+        (std::max)(implementation.reserved_bytes, required_vault_bytes);
+    return context.backend;
+  }
+
   auto refreshed = transaction_backend().probe(game_root, required_vault_bytes,
                                                 prepare_vault);
   if (!refreshed.success()) return refreshed;

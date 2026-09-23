@@ -7,6 +7,7 @@
 #include "manual_gui.hpp"
 #include "path_display.hpp"
 #include "persistent_dialog.hpp"
+#include "progress_console.hpp"
 #include "runtime_labels.hpp"
 #include "runtime_version_reader.hpp"
 #include "session.hpp"
@@ -18,6 +19,7 @@
 #include <runtime_swapper/downgrade.hpp>
 #include <runtime_swapper/exit_code.hpp>
 #include <runtime_swapper/release_version.hpp>
+#include <runtime_swapper/progress.hpp>
 #include <runtime_swapper/runtime_version.hpp>
 #include <runtime_swapper/session_gate.hpp>
 #include <runtime_swapper/session_plan.hpp>
@@ -213,6 +215,9 @@ private:
 
 int run(int argc, wchar_t** argv) {
   const auto options = parse_command_line(argc, argv);
+  ConsoleProgress console_progress(!options.quiet && !options.watch,
+                                   options.loader_process_id.value_or(0));
+  ProgressScope progress_scope(console_progress.sink());
   initialize_diagnostic_run(options.diagnostic_session_id, options.diagnostic_parent_run_id);
   const bool wine = is_wine_environment();
   log_session_header(argc, options, wine);
@@ -368,6 +373,10 @@ int run(int argc, wchar_t** argv) {
   if (prepared.success() && prepared.message != probe.message) {
     log_diagnostic(L"Installation prepare: " + prepared.message);
   }
+  emit_progress({prepared.success() ? ProgressPhase::ready : ProgressPhase::failed,
+                 0, 0,
+                 prepared.success() ? L"Skyrim is ready to launch"
+                                    : L"Runtime preparation failed"});
   if (!prepared.success()) {
     mutex_lock.unlock();
     return finish(prepared.code,

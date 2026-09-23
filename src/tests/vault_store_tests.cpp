@@ -382,6 +382,14 @@ int run_tests() {
           "verified\n") {
     return 17;
   }
+  const auto detailed_metadata = write_recovery_metadata_result(
+      temporary.path(), "test-metadata", "verified\n");
+  if (!detailed_metadata ||
+      detailed_metadata.detail.find(L"metadata-path=") == std::wstring::npos ||
+      read_recovery_metadata(temporary.path(), "test-metadata").contents !=
+          "verified\n") {
+    return 89;
+  }
   if (!write_recovery_metadata(
           temporary.path(), "lifecycle",
           "SRS-RECOVERY-LIFECYCLE-1\nstate=restoring\n") ||
@@ -394,6 +402,14 @@ int run_tests() {
       inspect_recovery_lifecycle(temporary.path()) !=
           RecoveryLifecycleState::preparing) {
     return 88;
+  }
+  SetEnvironmentVariableA("SKYRIM_RUNTIME_SWAPPER_FAULT_POINT", "write.before");
+  const auto failed_transition = transition_recovery_lifecycle_result(
+      temporary.path(), RecoveryLifecycleState::target_active);
+  SetEnvironmentVariableA("SKYRIM_RUNTIME_SWAPPER_FAULT_POINT", nullptr);
+  if (failed_transition ||
+      failed_transition.detail.find(L"metadata-path=") == std::wstring::npos) {
+    return 90;
   }
   const auto metadata = vault->probe.vault_path / L"attachments" /
                         L"test-metadata";

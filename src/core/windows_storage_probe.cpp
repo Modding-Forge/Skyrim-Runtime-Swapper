@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -236,6 +237,101 @@ using UniqueHandle = std::unique_ptr<void, HandleCloser>;
   return volume_guid;
 }
 
+[[nodiscard]] std::optional<STORAGE_HOTPLUG_INFO> query_hotplug_info(
+    HANDLE device) {
+  STORAGE_HOTPLUG_INFO hotplug{};
+  hotplug.Size = sizeof(hotplug);
+  DWORD returned{};
+  if (!DeviceIoControl(device, IOCTL_STORAGE_GET_HOTPLUG_INFO, nullptr, 0,
+                       &hotplug, sizeof(hotplug), &returned, nullptr) ||
+      returned < sizeof(hotplug)) {
+    return std::nullopt;
+  }
+  return hotplug;
+}
+
+[[nodiscard]] std::optional<std::vector<std::uint32_t>> volume_disk_numbers(
+    HANDLE volume) {
+  std::array<std::byte, sizeof(VOLUME_DISK_EXTENTS)> header{};
+  DWORD returned{};
+  const auto first_query = DeviceIoControl(
+      volume, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, nullptr, 0, header.data(),
+      static_cast<DWORD>(header.size()), &returned, nullptr);
+  const auto first_error = first_query ? ERROR_SUCCESS : GetLastError();
+  if (!first_query && first_error != ERROR_MORE_DATA) return std::nullopt;
+
+  const auto* header_extents =
+      reinterpret_cast<const VOLUME_DISK_EXTENTS*>(header.data());
+  const auto count = static_cast<std::size_t>(header_extents->NumberOfDiskExtents);
+  constexpr std::size_t max_volume_extents = 1024;
+  if (count == 0 || count > max_volume_extents) return std::nullopt;
+
+  std::size_t extent_bytes{};
+  if (!checked_multiply(count - 1, sizeof(DISK_EXTENT), extent_bytes) ||
+      !checked_add(sizeof(VOLUME_DISK_EXTENTS), extent_bytes, extent_bytes)) {
+    return std::nullopt;
+  }
+  if (extent_bytes > (std::numeric_limits<DWORD>::max)()) return std::nullopt;
+  std::vector<std::byte> bytes(extent_bytes);
+  const auto* extents = header_extents;
+  if (!first_query || extent_bytes > header.size()) {
+    returned = 0;
+    if (!DeviceIoControl(volume, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, nullptr, 0,
+                         bytes.data(), static_cast<DWORD>(bytes.size()), &returned,
+                         nullptr)) {
+      return std::nullopt;
+    }
+    extents = reinterpret_cast<const VOLUME_DISK_EXTENTS*>(bytes.data());
+  }
+
+  if (extents->NumberOfDiskExtents == 0 ||
+      extents->NumberOfDiskExtents != header_extents->NumberOfDiskExtents) {
+    return std::nullopt;
+  }
+  std::vector<std::uint32_t> disks;
+  disks.reserve(extents->NumberOfDiskExtents);
+  for (DWORD index = 0; index < extents->NumberOfDiskExtents; ++index) {
+    disks.push_back(extents->Extents[index].DiskNumber);
+  }
+  return disks;
+}
+
+[[nodiscard]] std::optional<StorageMedium> query_physical_medium(
+    std::wstring_view volume_root, std::wstring_view volume_guid) {
+  const auto volume_path =
+      volume_device_path(std::wstring(volume_root), std::wstring(volume_guid));
+  UniqueHandle volume(CreateFileW(
+      volume_path.c_str(), 0,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+      OPEN_EXISTING, 0, nullptr));
+  if (!volume) return std::nullopt;
+
+  const auto disks = volume_disk_numbers(volume.get());
+  if (!disks || disks->empty()) return std::nullopt;
+
+  bool all_internal = true;
+  for (const auto disk_number : *disks) {
+    const auto physical_path = L"\\\\.\\PhysicalDrive" +
+                               std::to_wstring(disk_number);
+    UniqueHandle physical(CreateFileW(
+        physical_path.c_str(), 0,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, 0, nullptr));
+    if (!physical) {
+      all_internal = false;
+      continue;
+    }
+    const auto hotplug = query_hotplug_info(physical.get());
+    if (!hotplug) {
+      all_internal = false;
+      continue;
+    }
+    if (hotplug->MediaRemovable != FALSE) return StorageMedium::removable;
+    if (hotplug->DeviceHotplug != FALSE) return StorageMedium::external;
+  }
+  return all_internal ? std::optional(StorageMedium::internal) : std::nullopt;
+}
+
 [[nodiscard]] bool volume_is_system_volume(std::wstring_view volume_root) {
   std::array<wchar_t, MAX_PATH> windows_directory{};
   std::array<wchar_t, MAX_PATH> windows_volume{};
@@ -247,8 +343,8 @@ using UniqueHandle = std::unique_ptr<void, HandleCloser>;
 }
 
 [[nodiscard]] StorageMedium query_medium(std::wstring_view volume_root,
-                                         std::wstring_view volume_guid,
-                                         UINT drive_type) {
+                                          std::wstring_view volume_guid,
+                                          UINT drive_type) {
   if (drive_type == DRIVE_REMOTE) return StorageMedium::network;
   if (drive_type == DRIVE_REMOVABLE || drive_type == DRIVE_CDROM) {
     return StorageMedium::removable;
@@ -261,14 +357,9 @@ using UniqueHandle = std::unique_ptr<void, HandleCloser>;
                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                   nullptr, OPEN_EXISTING, 0, nullptr));
   if (handle) {
-    STORAGE_HOTPLUG_INFO hotplug{};
-    hotplug.Size = sizeof(hotplug);
-    DWORD hotplug_returned{};
-    if (DeviceIoControl(handle.get(), IOCTL_STORAGE_GET_HOTPLUG_INFO, nullptr, 0,
-                        &hotplug, sizeof(hotplug), &hotplug_returned, nullptr) &&
-        hotplug_returned >= sizeof(hotplug)) {
-      if (hotplug.MediaRemovable != FALSE) return StorageMedium::removable;
-      if (hotplug.DeviceHotplug != FALSE) return StorageMedium::external;
+    if (const auto hotplug = query_hotplug_info(handle.get())) {
+      if (hotplug->MediaRemovable != FALSE) return StorageMedium::removable;
+      if (hotplug->DeviceHotplug != FALSE) return StorageMedium::external;
     }
     STORAGE_PROPERTY_QUERY query{};
     query.PropertyId = StorageDeviceProperty;
@@ -302,6 +393,12 @@ using UniqueHandle = std::unique_ptr<void, HandleCloser>;
           break;
       }
     }
+  }
+  // Volume handles do not expose storage properties on all Windows storage
+  // stacks. Resolve their physical extents and use hotplug state as a
+  // conservative internal-disk signal before falling back to a warning.
+  if (const auto medium = query_physical_medium(volume_root, volume_guid)) {
+    return *medium;
   }
   // The system volume is a safe fallback when storage-property access is restricted.
   // Other fixed volumes remain unclassified and require an explicit warning.
@@ -447,6 +544,12 @@ bool windows_storage_directory_is_private(const std::filesystem::path& directory
   auto sid = current_user_sid();
   return sid && directory_dacl_allows_only_user_and_system(
                     directory, sid->data(), true, false, nullptr, true);
+}
+
+bool windows_storage_file_is_private(const std::filesystem::path& file) {
+  auto sid = current_user_sid();
+  return sid && directory_dacl_allows_only_user_and_system(
+                    file, sid->data(), true, false, nullptr, true);
 }
 
 BackendProbeResult probe_windows_storage(

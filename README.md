@@ -1,8 +1,8 @@
 # Skyrim Runtime Swapper
 
-Run Skyrim mod setups for **1.6.1170** or **1.5.97** through the existing `skse64_loader.exe`. SRS switches the required files before SKSE checks the game version.
+Run Skyrim mod setups for **1.6.640**, **1.6.1170**, or **1.5.97** through the existing `skse64_loader.exe`. SRS switches the required files before SKSE checks the game version.
 
-Current version: **1.2.4** · [Changelog](CHANGELOG.md) · [User documentation](https://moddingforge.com/docs/skyrim-runtime-swapper) · [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/189855)
+Current version: **1.3.2** · [Changelog](CHANGELOG.md) · [User documentation](https://moddingforge.com/docs/skyrim-runtime-swapper) · [Nexus Mods](https://www.nexusmods.com/skyrimspecialedition/mods/189855)
 
 A new downgrade starts from Steam's **Skyrim 1.7.104**. An already-downgraded installation also works if its managed files exactly match the selected package.
 Only exact, legitimate Steam files are supported. Modified, unofficial, unlicensed, or pirated game files are not compatible with SRS and cannot be made compatible.
@@ -11,7 +11,7 @@ Only exact, legitimate Steam files are supported. Modified, unofficial, unlicens
 
 **Using a Collection?** Let Vortex or your Collection installer install its selected SRS package and dependencies. Use the Collection's SKSE entry; do not add another variant manually. The steps below are for your own mod setup.
 
-Both target runtimes have two profiles:
+Each target runtime has two profiles:
 
 - **Best of Both Worlds:** older runtime with newer 1.7.104 game data.
 - **Best of All Worlds:** also switches selected game data and official masters. For 1.5.97, present Creation Club files are kept out of the active game until restoration.
@@ -70,7 +70,7 @@ git submodule update --init --recursive
 build.bat Release
 ```
 
-The build uses the catalogs in `assets/runtime`, tests each profile for stable releases, and writes five `.7z` packages to `dist/builds/<version>/<build-id>/`, including the alternative BoAW-Clean 1.6.1170 package. RC builds skip tests by default; `-DSKIP_TESTS=OFF` opts in. For Linux-enabled bundles, supply matching helpers through `NATIVE_SIDECAR_ROOT/<target>/<profile>/SkyrimRuntimeSwapper.Native`. See [the build script](tools/build-all.cmake).
+The build uses the catalogs in `assets/runtime`, tests each profile for stable releases, and writes seven `.7z` packages to `dist/builds/<version>/<build-id>/`, including the alternative BoAW-Clean 1.6.1170 package. RC builds skip tests by default; `-DSKIP_TESTS=OFF` opts in. For Linux-enabled bundles, supply matching helpers through `NATIVE_SIDECAR_ROOT/<target>/<profile>/SkyrimRuntimeSwapper.Native`. See [the build script](tools/build-all.cmake).
 
 Packaging uses solid LZMA2 with a 64 MiB dictionary, one compression thread, sorted filenames and omitted timestamps. The encoder is built from the pinned vendored LZMA SDK. Windows delegates packaging to the default WSL distribution (override with `-DWSL_DISTRIBUTION=Ubuntu`). Temporary Linux staging preserves the native helper's `0700` mode. Every archive is extracted and all file hashes and native permissions are checked before delivery; `.7z.build.json` receipts record encoder and payload hashes. Identical staged inputs and encoder produce identical archives; this does not claim byte-reproducible compiler outputs. Existing outputs are never overwritten.
 
@@ -81,6 +81,47 @@ Tests accept `SRS_TEST_ROOT` for an isolated writable fixture directory. On Wind
 The full **Storage safety** workflow runs manually through GitHub Actions. It covers the platform matrices, sanitizers, fuzzing, dependency pins, and reproducibility checks. Additional storage fault-injection runners are in [tools/tests](tools/tests).
 
 `SHA256SUMS.txt` accompanies the release packages. Windows binaries are not Authenticode-signed. Packages contain binary patches, not Bethesda game files.
+
+
+## Tag builds
+
+Pushing a version tag such as `v1.3.2-rc1` or `v1.3.2` starts the
+**Tag release builds** workflow. The tag must match `vcpkg.json` and the CMake
+release version. Commit the workflow and all required patch assets before tagging.
+
+The workflow builds all seven Linux-enabled packages, checks the Ubuntu 22.04
+sidecar ABI and binary hardening, and runs the Windows tests even for RC tags.
+Windows stages verified payloads using `-DSTAGE_ONLY=ON`; Linux creates and
+round-trip verifies the archives with native execute permissions preserved.
+
+Download `SRS-v<version>-packages` from the completed workflow's artifacts for
+the seven `.7z` files and `SHA256SUMS.txt` (90-day retention). This does not
+publish a GitHub Release or sign the binaries. The separate manual Storage
+safety workflow remains necessary for the extended Linux/Wine/fuzzing matrix.
+
+
+### Nexus uploads
+
+Stable tags can upload the seven verified archives to the existing Nexus file
+IDs configured in `tag-builds.yml` (mod API ID `7318624462239`). RC tags never
+upload. Nexus file versions include the `v` prefix (for example, `v1.3.2`).
+The official Nexus upload action is pinned to a reviewed commit.
+
+Before enabling uploads:
+
+1. Create the GitHub environment `nexus-production`, restrict it to release tags,
+   and configure required reviewers for manual publication approval. An environment
+   name in YAML alone does not enable approval protection.
+2. Add `NEXUSMODS_API_KEY` as an environment secret, not to source control.
+3. Review the seven file mappings and the `main` category used for new versions.
+4. Set the repository Actions variable `NEXUS_UPLOAD_ENABLED` to `true`.
+
+Uploads run after all packages pass verification. Existing versions are not
+archived, the mod's overall version and changelog are not changed, and mod-manager
+download preferences are not explicitly overridden. Each successful job records
+the new Nexus version ID in its summary. Uploads are not atomic across seven
+files: after a partial failure, check Nexus before rerunning failed jobs. Do not
+rerun successful upload jobs; the upstream action can create duplicate versions.
 
 ## License
 

@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(SkyrimRuntimeSwapper VERSION 1.2.5 LANGUAGES C CXX)
+project(SkyrimRuntimeSwapper VERSION 1.3.2 LANGUAGES C CXX)
 
 option(SKYRIM_RUNTIME_BUILD_FUZZER
   "Build the Linux libFuzzer target for the handle-bound HDiffPatch adapter" OFF)
 
-set(SKYRIM_RUNTIME_RELEASE_VERSION "1.2.5")
+set(SKYRIM_RUNTIME_RELEASE_VERSION "1.3.2")
 if(SKYRIM_RUNTIME_RELEASE_VERSION MATCHES "-")
   set(SKYRIM_RUNTIME_VERSION_FLAGS "VS_FF_PRERELEASE")
 else()
@@ -77,8 +77,8 @@ if(NOT HDIFFPATCH_VERSION STREQUAL "5.1.3")
   message(FATAL_ERROR "The native patch library requires HDiffPatch 5.1.3 assets")
 endif()
 if(NOT SOURCE_VERSION STREQUAL "1.7.104" OR
-   NOT TARGET_VERSION MATCHES "^(1\.6\.1170|1\.5\.97)$")
-  message(FATAL_ERROR "Only Skyrim 1.7.104 <-> 1.6.1170/1.5.97 is currently supported")
+   NOT TARGET_VERSION MATCHES "^(1\.6\.640|1\.6\.1170|1\.5\.97)$")
+  message(FATAL_ERROR "Only Skyrim 1.7.104 <-> 1.6.640/1.6.1170/1.5.97 is currently supported")
 endif()
 
 include(cmake/runtime_profiles.cmake)
@@ -301,6 +301,7 @@ add_library(runtime_swapper_core STATIC
   src/core/legacy_storage_cleanup.cpp
   src/core/path_presentation.cpp
   src/core/persistent_runtime.cpp
+  src/core/progress.cpp
   src/core/prepared_storage.cpp
   src/core/recovery_vault.cpp
   src/core/recovery_lifecycle.cpp
@@ -360,6 +361,18 @@ if(BUILD_TESTING)
   target_link_libraries(recovery_selection_tests PRIVATE runtime_swapper_core)
   srs_harden_compile(recovery_selection_tests)
   add_test(NAME recovery_selection_tests COMMAND recovery_selection_tests)
+
+  add_executable(progress_tests src/tests/progress_tests.cpp)
+  target_include_directories(progress_tests BEFORE PRIVATE
+    "${GENERATED_INCLUDE}" src/include)
+  target_link_libraries(progress_tests PRIVATE runtime_swapper_core)
+  if(MSVC)
+    target_compile_options(progress_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+  else()
+    target_compile_options(progress_tests PRIVATE
+      -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+  endif()
+  add_test(NAME progress_tests COMMAND progress_tests)
 
   add_executable(prepared_storage_tests src/tests/prepared_storage_tests.cpp)
   target_include_directories(prepared_storage_tests BEFORE PRIVATE
@@ -444,6 +457,7 @@ add_executable(runtime_swapper_helper WIN32
   src/app/manual_gui.cpp
   src/app/path_display.cpp
   src/app/persistent_dialog.cpp
+  src/app/progress_console.cpp
   src/app/runtime_version_reader.cpp
   src/app/session.cpp
   src/app/storage_access_repair.cpp
@@ -491,6 +505,12 @@ endif()
 
 if(BUILD_TESTING)
   add_executable(runtime_version_tests src/tests/runtime_version_tests.cpp)
+  add_executable(proxy_bootstrap_tests src/tests/proxy_bootstrap_tests.cpp
+    src/proxy/bootstrap.cpp src/core/file_identity.cpp)
+  target_include_directories(proxy_bootstrap_tests PRIVATE src/include src/proxy)
+  target_compile_definitions(proxy_bootstrap_tests PRIVATE UNICODE _UNICODE)
+  target_compile_options(proxy_bootstrap_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+  add_test(NAME proxy_bootstrap_tests COMMAND proxy_bootstrap_tests)
   target_include_directories(runtime_version_tests BEFORE PRIVATE "${GENERATED_INCLUDE}" src/include)
   if(MSVC)
     target_compile_options(runtime_version_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
@@ -572,6 +592,8 @@ if(BUILD_TESTING)
     target_compile_options(windows_storage_access_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
   endif()
   add_test(NAME windows_storage_access_tests COMMAND windows_storage_access_tests)
+  add_test(NAME windows_catalog_storage_access_tests
+    COMMAND windows_storage_access_tests --catalog-acl-only)
   target_include_directories(core_storage_tests PRIVATE src/core)
   target_compile_definitions(core_storage_tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_link_libraries(core_storage_tests PRIVATE runtime_swapper_core)

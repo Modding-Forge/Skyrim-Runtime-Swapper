@@ -62,7 +62,7 @@ If recovery is blocked, preserve its data and collect logs before changing packa
 == Does SKSE need to match the target runtime?
 
 Yes.
-SKSE and all SKSE plugins must match 1.6.1170 or 1.5.97 according to the selected package.
+SKSE and all SKSE plugins must match 1.6.640, 1.6.1170, or 1.5.97 according to the selected package.
 
 == Do I replace skse64_loader.exe?
 

@@ -1,11 +1,12 @@
 = Introduction
 
-Current SRS release: *1.2.5*.
+Current SRS release: *1.3.2*.
 
 Skyrim Runtime Swapper lets a Skyrim mod setup built for an older runtime start through the unmodified `skse64_loader.exe` without requiring the Steam installation to remain permanently downgraded.
 
 The current release supports these target runtimes:
 
+* Skyrim 1.6.640
 * Skyrim 1.6.1170
 * Skyrim 1.5.97
 
@@ -33,7 +34,7 @@ The original state can later be restored through `SkyrimRuntimeSwapper.exe`.
 
 * Automatic session switching on trusted internal NTFS, ext4, XFS, and Btrfs storage
 * Recoverable persistent switching on supported external and uncertain storage
-* Best of Both Worlds and Best of All Worlds packages for both target runtimes
+* Best of Both Worlds and Best of All Worlds packages for all three target runtimes
 * An alternative xref:boaw_clean.adoc[BoAW-Clean package] for 1.6.1170, with optional Beafarmer
 * Native Windows, Linux, Wine, and Proton storage handling
 * SHA-256 verification of source files, patches, staged output, and restored files

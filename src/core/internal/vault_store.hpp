@@ -32,6 +32,12 @@ enum class PersistentMarkerState { inactive, active, invalid };
 [[nodiscard]] std::optional<VaultLayout> resolve_vault_layout(
     const std::filesystem::path& game_root, std::uint64_t required_bytes = 0,
     std::wstring* error_message = nullptr, bool prepare_vault = true);
+// Returns true only for a newly created, completely empty recovery vault with
+// no locator or transaction state that could describe an interrupted commit.
+// Such a vault can safely be adopted as a fresh source state.
+[[nodiscard]] bool fresh_empty_recovery_vault(
+    const std::filesystem::path& game_root,
+    BackendProbeResult* probe_out = nullptr);
 [[nodiscard]] std::optional<TargetCacheLayout> resolve_target_cache_layout(
     const std::filesystem::path& game_root);
 [[nodiscard]] bool target_cache_object_available(

@@ -6,8 +6,11 @@
 #include "creation_club.hpp"
 #include "fixed_runtime.hpp"
 
+#include "internal/runtime_transaction_support.hpp"
+
 #include <runtime_swapper/downgrade.hpp>
 #include <runtime_swapper/prepared_storage.hpp>
+#include <runtime_swapper/progress.hpp>
 #include <runtime_swapper/recovery_vault.hpp>
 #include <runtime_swapper/runtime_version.hpp>
 
@@ -36,7 +39,10 @@ using detail::SteadyClock;
 
 [[nodiscard]] InstallationOperationResult
 recovered_source(const std::filesystem::path &game_root,
-                 BackendProbeResult backend) {
+                 BackendProbeResult backend,
+                 bool retain_recovery_storage) {
+  emit_progress({ProgressPhase::recovering, 0, 0,
+                 L"Recovering the verified source state"});
   const auto restore_started = SteadyClock::now();
   const auto lifecycle = inspect_recovery_lifecycle(game_root);
   if (!lifecycle) {
@@ -45,11 +51,15 @@ recovered_source(const std::filesystem::path &game_root,
   }
   if (*lifecycle != RecoveryLifecycleState::clean_source &&
       *lifecycle != RecoveryLifecycleState::source_verified &&
-      *lifecycle != RecoveryLifecycleState::restoring &&
-      !transition_recovery_lifecycle(game_root,
-                                     RecoveryLifecycleState::restoring)) {
-    return failure(ExitCode::commit_failed, std::move(backend),
-                   L"The pending recovery state could not be committed.");
+      *lifecycle != RecoveryLifecycleState::restoring) {
+    const auto transition = transition_recovery_lifecycle_result(
+        game_root, RecoveryLifecycleState::restoring);
+    if (!transition) {
+      return failure(
+          ExitCode::commit_failed, std::move(backend),
+          L"The pending recovery state could not be committed.\n" +
+              core::mutation_failure_detail(transition));
+    }
   }
   const auto runtime = recover_runtime(game_root);
   if (!runtime.success()) {
@@ -73,16 +83,29 @@ recovered_source(const std::filesystem::path &game_root,
   const bool source_active = source_runtime_is_active(game_root);
   if (!source_active && target_runtime_is_active(game_root)) {
     const auto current_lifecycle = inspect_recovery_lifecycle(game_root);
-    if (!current_lifecycle ||
-        (*current_lifecycle != RecoveryLifecycleState::target_active &&
-         !transition_recovery_lifecycle(
-             game_root, RecoveryLifecycleState::target_active))) {
+    if (!current_lifecycle) {
+      const auto transition = transition_recovery_lifecycle_result(
+          game_root, RecoveryLifecycleState::target_active);
       return failure(ExitCode::commit_failed, std::move(backend),
                      L"The verified existing target state could not be "
-                     L"committed.",
+                     L"committed.\n" +
+                         core::mutation_failure_detail(transition),
                      runtime.changed_files || creation_club.changed ||
                          catalog.changed,
                      RecoveryLifecyclePhase::verify_source);
+    }
+    if (*current_lifecycle != RecoveryLifecycleState::target_active) {
+      const auto transition = transition_recovery_lifecycle_result(
+          game_root, RecoveryLifecycleState::target_active);
+      if (!transition) {
+        return failure(ExitCode::commit_failed, std::move(backend),
+                       L"The verified existing target state could not be "
+                       L"committed.\n" +
+                           core::mutation_failure_detail(transition),
+                       runtime.changed_files || creation_club.changed ||
+                           catalog.changed,
+                       RecoveryLifecyclePhase::verify_source);
+      }
     }
     InstallationOperationResult result;
     result.code = ExitCode::success;
@@ -113,6 +136,53 @@ recovered_source(const std::filesystem::path &game_root,
                        catalog.changed,
                    RecoveryLifecyclePhase::verify_source);
   }
+  // Activation follows recovery in the same native operation. Keep the
+  // verified vault instead of deleting it and invalidating the prepared
+  // handles between the two phases. The lifecycle is reset to clean_source so
+  // the following activation can enter preparing without another probe.
+  if (retain_recovery_storage) {
+    const auto current = inspect_recovery_lifecycle(game_root);
+    if (!current) {
+      return failure(
+          ExitCode::journal_corrupt, std::move(backend),
+          L"The recovered source lifecycle metadata is invalid.",
+          runtime.changed_files || creation_club.changed || catalog.changed,
+          RecoveryLifecyclePhase::verify_source);
+    }
+    if (*current != RecoveryLifecycleState::clean_source) {
+      const auto source_verified = transition_recovery_lifecycle_result(
+          game_root, RecoveryLifecycleState::source_verified);
+      const auto clean_source =
+          source_verified ? transition_recovery_lifecycle_result(
+                                game_root, RecoveryLifecycleState::clean_source)
+                          : MutationResult{};
+      if (!source_verified || !clean_source) {
+        const auto &failed_transition = source_verified ? clean_source
+                                                         : source_verified;
+        return failure(
+            ExitCode::commit_failed, std::move(backend),
+            L"The recovered source state could not be committed for activation.\n" +
+                core::mutation_failure_detail(failed_transition),
+            runtime.changed_files || creation_club.changed || catalog.changed,
+            RecoveryLifecyclePhase::verify_source);
+      }
+    }
+    InstallationOperationResult result;
+    result.code = ExitCode::success;
+    result.backend = std::move(backend);
+    result.runtime_changed = runtime.changed_files;
+    result.creation_club_changed = creation_club.changed;
+    result.content_catalog_changed = catalog.changed;
+    result.lifecycle_state = RecoveryLifecycleState::clean_source;
+    result.lifecycle_phase = RecoveryLifecyclePhase::complete;
+    result.changed = result.runtime_changed || result.creation_club_changed ||
+                     result.content_catalog_changed;
+    result.message =
+        L"The installation is in a verified source state. Recovery storage "
+        L"was retained for the following activation.";
+    return result;
+  }
+
   const auto restore_duration = elapsed_milliseconds(restore_started);
   const auto cleanup_started = SteadyClock::now();
   const auto cleanup = finalize_recovery_storage(game_root, backend);
@@ -151,15 +221,21 @@ recovered_source(const std::filesystem::path &game_root,
 repair_persistent(const std::filesystem::path &game_root,
                   BackendProbeResult backend, bool risk_accepted,
                   bool catalog_persistent) {
-  auto source = recovered_source(game_root, backend);
+  // This operation immediately creates a new persistent target. Retain the
+  // verified source vault until that target has been committed.
+  auto source = recovered_source(game_root, backend, true);
   if (!source.success())
     return source;
-  if (!transition_recovery_lifecycle(game_root,
-                                     RecoveryLifecycleState::preparing)) {
+  const auto prepare_transition = transition_recovery_lifecycle_result(
+      game_root, RecoveryLifecycleState::preparing);
+  if (!prepare_transition) {
     return failure(ExitCode::commit_failed, std::move(backend),
-                   L"The persistent preparation state could not be committed.");
+                   L"The persistent preparation state could not be committed.\n" +
+                       core::mutation_failure_detail(prepare_transition));
   }
 
+  emit_progress({ProgressPhase::staging, 0, 0,
+                 L"Applying the persistent runtime and content changes"});
   auto runtime = downgrade_runtime_persistent_after_recovery(
       game_root, game_root / L"RuntimeSwap" / L"patches", risk_accepted);
   if (!runtime.success()) {
@@ -188,10 +264,12 @@ repair_persistent(const std::filesystem::path &game_root,
                    L"The persistent target state failed final verification.",
                    true);
   }
-  if (!transition_recovery_lifecycle(game_root,
-                                     RecoveryLifecycleState::target_active)) {
+  const auto target_transition = transition_recovery_lifecycle_result(
+      game_root, RecoveryLifecycleState::target_active);
+  if (!target_transition) {
     return failure(ExitCode::commit_failed, std::move(backend),
-                   L"The verified target state could not be committed.", true);
+                   L"The verified target state could not be committed.\n" +
+                       core::mutation_failure_detail(target_transition), true);
   }
 
   const auto marker =
@@ -208,10 +286,12 @@ repair_persistent(const std::filesystem::path &game_root,
                        : (!fixed.success ? fixed.message : finalized.message),
                    true);
   }
-  if (!transition_recovery_lifecycle(game_root,
-                                     RecoveryLifecycleState::persistent)) {
+  const auto persistent_transition = transition_recovery_lifecycle_result(
+      game_root, RecoveryLifecycleState::persistent);
+  if (!persistent_transition) {
     return failure(ExitCode::commit_failed, std::move(backend),
-                   L"The persistent lifecycle state could not be committed.",
+                   L"The persistent lifecycle state could not be committed.\n" +
+                       core::mutation_failure_detail(persistent_transition),
                    true);
   }
 
@@ -266,7 +346,7 @@ probe_installation_storage(const std::filesystem::path &game_root) {
   const auto catalog = probe_content_catalog_storage(game_root);
   if (!catalog.success()) {
     result.code = catalog.code;
-    result.backend.code = catalog.code;
+    result.backend = catalog;
     result.backend.mode = SafetyMode::hard_blocked;
     result.backend.allowed_operations = StorageOperation::none;
     result.backend.technical_reason =
@@ -304,6 +384,8 @@ probe_installation_storage(const std::filesystem::path &game_root) {
 InstallationOperationResult
 prepare_launch(const std::filesystem::path &game_root, bool allow_persistent,
                bool risk_accepted) {
+  emit_progress({ProgressPhase::checking_storage, 0, 0,
+                 L"Checking storage and recovery safety"});
   auto initial = probe_installation_storage(game_root);
   if (!initial.success())
     return initial;
@@ -331,7 +413,11 @@ prepare_launch(const std::filesystem::path &game_root, bool allow_persistent,
   }
 
   std::wstring context_error;
-  auto context = prepare_storage_context(game_root, 0, &context_error);
+  // The preflight probe has already authenticated the vault. Build the
+  // capability from that exact result instead of probing the path a second
+  // time, which can race with Windows ACL repair and produce a false block.
+  auto context = prepare_storage_context_from_probe(
+      game_root, initial.backend, 0, &context_error);
   if (!context) {
     return failure(ExitCode::unsupported_filesystem, std::move(initial.backend),
                    L"The prepared storage context could not be established: " +
@@ -356,7 +442,10 @@ prepare_launch(const std::filesystem::path &game_root, bool allow_persistent,
 }
 
 InstallationOperationResult
-recover_installation(const std::filesystem::path &game_root) {
+recover_installation(const std::filesystem::path &game_root,
+                     bool retain_recovery_storage) {
+  emit_progress({ProgressPhase::recovering, 0, 0,
+                 L"Checking for pending recovery work"});
   auto probed = probe_installation_storage(game_root);
   if (!probed.success())
     return probed;
@@ -390,7 +479,8 @@ recover_installation(const std::filesystem::path &game_root) {
                    L"allowed until recovery completes.");
   }
   if (persistent == PersistentRuntimeState::inactive) {
-    return recovered_source(game_root, std::move(backend));
+    return recovered_source(game_root, std::move(backend),
+                            retain_recovery_storage);
   }
 
   const auto runtime = finalize_fixed_target_runtime(game_root);
@@ -400,12 +490,23 @@ recover_installation(const std::filesystem::path &game_root) {
                            : recover_content_catalog(game_root);
   if (runtime.success() && creation_club.success && catalog.success) {
     const auto lifecycle = inspect_recovery_lifecycle(game_root);
-    if (!lifecycle || (*lifecycle != RecoveryLifecycleState::persistent &&
-                       !transition_recovery_lifecycle(
-                           game_root, RecoveryLifecycleState::persistent))) {
+    if (!lifecycle) {
+      const auto transition = transition_recovery_lifecycle_result(
+          game_root, RecoveryLifecycleState::persistent);
       return failure(
           ExitCode::commit_failed, std::move(backend),
-          L"The migrated persistent lifecycle could not be committed.");
+          L"The migrated persistent lifecycle could not be committed.\n" +
+              core::mutation_failure_detail(transition));
+    }
+    if (*lifecycle != RecoveryLifecycleState::persistent) {
+      const auto transition = transition_recovery_lifecycle_result(
+          game_root, RecoveryLifecycleState::persistent);
+      if (!transition) {
+        return failure(
+            ExitCode::commit_failed, std::move(backend),
+            L"The migrated persistent lifecycle could not be committed.\n" +
+                core::mutation_failure_detail(transition));
+      }
     }
     InstallationOperationResult result;
     result.code = ExitCode::success;
@@ -426,17 +527,19 @@ recover_installation(const std::filesystem::path &game_root) {
 
 InstallationOperationResult
 activate_session_target(const std::filesystem::path &game_root) {
-  auto recovered = recover_installation(game_root);
+  auto recovered = recover_installation(game_root, true);
   if (!recovered.success() || recovered.persistent)
     return recovered;
   if (!recovered.backend.allows(StorageOperation::activate_session)) {
     return failure(ExitCode::unsupported_filesystem, recovered.backend,
                    L"This volume supports only a persistent downgrade.");
   }
-  if (!transition_recovery_lifecycle(game_root,
-                                     RecoveryLifecycleState::preparing)) {
+  const auto prepare_transition = transition_recovery_lifecycle_result(
+      game_root, RecoveryLifecycleState::preparing);
+  if (!prepare_transition) {
     return failure(ExitCode::commit_failed, recovered.backend,
-                   L"The session preparation state could not be committed.");
+                   L"The session preparation state could not be committed.\n" +
+                       core::mutation_failure_detail(prepare_transition));
   }
 
   auto runtime = downgrade_runtime_after_recovery(
@@ -446,6 +549,8 @@ activate_session_target(const std::filesystem::path &game_root) {
                    runtime.changed_files);
   }
   const auto creation_club = quarantine_creation_club_content(game_root);
+  emit_progress({ProgressPhase::staging, 0, 0,
+                 L"Preparing Creation Club and catalog content"});
   const auto catalog = creation_club.success
                            ? remove_incompatible_content_catalog(game_root)
                            : ContentCatalogResult{};
@@ -462,14 +567,15 @@ activate_session_target(const std::filesystem::path &game_root) {
         recovered.backend,
         !creation_club.success ? creation_club.message : catalog.message, true);
   }
-  if (!transition_recovery_lifecycle(game_root,
-                                     RecoveryLifecycleState::target_active)) {
+  const auto target_transition = transition_recovery_lifecycle_result(
+      game_root, RecoveryLifecycleState::target_active);
+  if (!target_transition) {
     (void)recover_creation_club_content(game_root);
     (void)recover_content_catalog(game_root);
     (void)restore_runtime(game_root);
     return failure(ExitCode::commit_failed, recovered.backend,
-                   L"The verified session target state could not be committed.",
-                   true);
+                   L"The verified session target state could not be committed.\n" +
+                       core::mutation_failure_detail(target_transition), true);
   }
 
   recovered.changed =
@@ -486,7 +592,7 @@ activate_session_target(const std::filesystem::path &game_root) {
 InstallationOperationResult
 activate_persistent_target(const std::filesystem::path &game_root,
                            bool risk_accepted) {
-  auto recovered = recover_installation(game_root);
+  auto recovered = recover_installation(game_root, true);
   if (!recovered.success())
     return recovered;
   if (!recovered.backend.allows(StorageOperation::activate_persistent)) {
@@ -523,6 +629,8 @@ activate_persistent_target(const std::filesystem::path &game_root,
 
 InstallationOperationResult
 restore_persistent_source(const std::filesystem::path &game_root) {
+  emit_progress({ProgressPhase::restoring, 0, 0,
+                 L"Restoring the verified source installation"});
   auto probed = probe_installation_storage(game_root);
   if (!probed.success())
     return probed;

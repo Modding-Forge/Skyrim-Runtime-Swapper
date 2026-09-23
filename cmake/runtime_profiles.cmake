@@ -9,7 +9,8 @@ function(runtime_profile_files PROFILE TARGET_VERSION OUTPUT_VARIABLE)
       "binkw64.dll"
       "steam_api64.dll"
     )
-  elseif(NOT TARGET_VERSION STREQUAL "1.6.1170")
+  elseif(NOT TARGET_VERSION STREQUAL "1.6.1170" AND
+         NOT TARGET_VERSION STREQUAL "1.6.640")
     message(FATAL_ERROR "Unsupported target runtime: ${TARGET_VERSION}")
   endif()
   if(PROFILE STREQUAL "bobw")

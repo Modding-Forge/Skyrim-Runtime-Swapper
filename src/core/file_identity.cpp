@@ -69,11 +69,15 @@ bool files_have_identical_content(const std::filesystem::path& left,
 
 bool is_skse_loader_entry_image(
     const std::filesystem::path& process_image) noexcept {
-  const auto filename = process_image.filename().wstring();
-  if (ascii_equals_ignore_case(filename, L"skse64_loader.exe")) return true;
-  if (!ascii_equals_ignore_case(filename, L"SkyrimSELauncher.exe")) return false;
-  return files_have_identical_content(
-      process_image, process_image.parent_path() / L"skse64_loader.exe");
+  try {
+    const auto filename = process_image.filename().wstring();
+    if (ascii_equals_ignore_case(filename, L"skse64_loader.exe")) return true;
+    if (!ascii_equals_ignore_case(filename, L"SkyrimSELauncher.exe")) return false;
+    return files_have_identical_content(
+        process_image, process_image.parent_path() / L"skse64_loader.exe");
+  } catch (...) {
+    return false;
+  }
 }
 
 }  // namespace runtime_swapper

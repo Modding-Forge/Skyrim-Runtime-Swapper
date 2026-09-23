@@ -220,6 +220,53 @@ std::optional<VaultLayout> resolve_vault_layout(
   return result;
 }
 
+bool fresh_empty_recovery_vault(
+    const std::filesystem::path& game_root,
+    BackendProbeResult* probe_out) {
+  auto probe = probe_prepared_storage(game_root, 0, false);
+  if (!probe.success() || probe.vault_path.empty() ||
+      !probe.vault_path.is_absolute() ||
+      !managed_path_is_safe(probe.vault_path)) {
+    return false;
+  }
+  std::error_code error;
+  if (!std::filesystem::is_directory(probe.vault_path, error) || error) {
+    return false;
+  }
+  std::filesystem::directory_iterator entries(probe.vault_path, error);
+  if (error || entries != std::filesystem::directory_iterator{}) return false;
+
+  const auto locator = workspace_locator(probe);
+  const auto legacy_locator =
+      legacy_installation_work_root(game_root) / L"vault.locator";
+  for (const auto& candidate : {locator, legacy_locator}) {
+    error.clear();
+    const auto status = std::filesystem::symlink_status(candidate, error);
+    if (error != std::errc::no_such_file_or_directory ||
+        (!error && std::filesystem::exists(status))) {
+      return false;
+    }
+  }
+  if (!probe.transaction_work.value.empty()) {
+    error.clear();
+    const auto status = std::filesystem::symlink_status(
+        probe.transaction_work.value, error);
+    if (!error && std::filesystem::exists(status)) {
+      if (!std::filesystem::is_directory(status)) return false;
+      error.clear();
+      std::filesystem::directory_iterator work_entries(
+          probe.transaction_work.value, error);
+      if (error || work_entries != std::filesystem::directory_iterator{}) {
+        return false;
+      }
+    } else if (error != std::errc::no_such_file_or_directory) {
+      return false;
+    }
+  }
+  if (probe_out != nullptr) *probe_out = std::move(probe);
+  return true;
+}
+
 std::optional<TargetCacheLayout> resolve_target_cache_layout(
     const std::filesystem::path& game_root) {
   auto probe = probe_prepared_storage(game_root, 0, false);

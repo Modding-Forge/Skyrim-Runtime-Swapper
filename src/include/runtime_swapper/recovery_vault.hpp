@@ -77,6 +77,11 @@ struct RecoveryMetadataReadResult {
 [[nodiscard]] bool write_recovery_metadata(const std::filesystem::path& game_root,
                                            std::string_view name,
                                            std::string_view contents);
+// Detailed variant used by mutating operations. The legacy bool wrapper is
+// retained for callers that only need success/failure.
+[[nodiscard]] MutationResult write_recovery_metadata_result(
+    const std::filesystem::path& game_root, std::string_view name,
+    std::string_view contents);
 [[nodiscard]] RecoveryMetadataReadResult read_recovery_metadata(
     const std::filesystem::path& game_root, std::string_view name);
 [[nodiscard]] bool remove_recovery_metadata(const std::filesystem::path& game_root,
@@ -84,6 +89,8 @@ struct RecoveryMetadataReadResult {
 [[nodiscard]] std::optional<RecoveryLifecycleState> inspect_recovery_lifecycle(
     const std::filesystem::path& game_root);
 [[nodiscard]] bool transition_recovery_lifecycle(
+    const std::filesystem::path& game_root, RecoveryLifecycleState next);
+[[nodiscard]] MutationResult transition_recovery_lifecycle_result(
     const std::filesystem::path& game_root, RecoveryLifecycleState next);
 
 // Retires a legacy locator only when no recoverable transaction state remains

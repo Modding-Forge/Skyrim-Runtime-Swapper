@@ -11,6 +11,7 @@
 #include <runtime_swapper/hdiff_patch.hpp>
 #include <runtime_swapper/patch_plan.hpp>
 #include <runtime_swapper/prepared_storage.hpp>
+#include <runtime_swapper/progress.hpp>
 #include <runtime_swapper/runtime_layout.hpp>
 #include <runtime_swapper/runtime_version.hpp>
 #include <runtime_swapper/sha256.hpp>
@@ -88,7 +89,21 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
                                   bool to_target, bool recover_first,
                                   bool risk_accepted) {
   try {
-    if (!to_target) return recover_to_source_internal(game_root, patch_root, true);
+    emit_progress({to_target ? ProgressPhase::checking_storage
+                             : ProgressPhase::restoring,
+                   0, 0,
+                   to_target ? L"Preparing the runtime swap"
+                             : L"Restoring the verified source runtime"});
+    if (!to_target) {
+      const auto restored =
+          recover_to_source_internal(game_root, patch_root, true);
+      emit_progress({restored.success() ? ProgressPhase::ready
+                                        : ProgressPhase::failed,
+                     0, 0,
+                     restored.success() ? L"Source runtime restored"
+                                        : L"Source runtime restoration failed"});
+      return restored;
+    }
 
     const auto total_started = SteadyClock::now();
     std::int64_t recovery_duration{};
@@ -100,6 +115,8 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
     std::size_t target_cache_candidates{};
 
     if (recover_first) {
+      emit_progress({ProgressPhase::recovering, 0, 0,
+                     L"Checking for interrupted transactions"});
       const auto recovery_started = SteadyClock::now();
       const auto recovered = recover_to_source_internal(game_root, patch_root);
       recovery_duration = elapsed_milliseconds(recovery_started);
@@ -202,6 +219,8 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
     preflight_duration = elapsed_milliseconds(preflight_started);
 
     const auto source_vault_started = SteadyClock::now();
+    emit_progress({ProgressPhase::backing_up, 0, 0,
+                   L"Committing verified source originals"});
     const auto backup_result = ensure_source_backups(game_root);
     if (!backup_result.success()) {
       clean_runtime_transaction_best_effort(game_root, active);
@@ -219,6 +238,8 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
     source_vault_duration = elapsed_milliseconds(source_vault_started);
 
     const auto staging_started = SteadyClock::now();
+    emit_progress({ProgressPhase::staging, 0, work.size(),
+                   L"Applying verified runtime patches"});
     const bool cache_targets = vault->probe.mode == SafetyMode::automatic;
     const auto target_cache = cache_targets
                                   ? resolve_target_cache_layout(game_root)
@@ -359,6 +380,8 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
       staged_records.push_back(
           {JournalPhase::staged, static_cast<std::uint32_t>(item.index),
            item.plan->target_sha256});
+      emit_progress({ProgressPhase::staging, staged_records.size(), work.size(),
+                     L"Runtime patch staged"});
     }
     if (!journal.append_batch(staged_records)) {
       const auto rollback = recover_to_source_internal(game_root, patch_root);
@@ -368,6 +391,8 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
     staging_duration = elapsed_milliseconds(staging_started);
 
     const auto commit_started = SteadyClock::now();
+    emit_progress({ProgressPhase::committing, 0, work.size(),
+                   L"Installing staged runtime files"});
     std::vector<JournalAppend> replace_intents;
     replace_intents.reserve(work.size());
     for (const auto& item : work) {
@@ -427,6 +452,8 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
       replaced_records.push_back(
           {JournalPhase::replaced, static_cast<std::uint32_t>(item.index),
            item.plan->target_sha256});
+      emit_progress({ProgressPhase::committing, replaced_records.size(), work.size(),
+                     L"Runtime file installed"});
       add_unique_directory(commit_directories,
                            item.managed.effective.parent_path());
       add_unique_directory(commit_directories, item.staged.parent_path());
@@ -457,6 +484,10 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
 
     std::vector<JournalAppend> cleanup_records;
     cleanup_records.reserve(work.size());
+    emit_progress({ProgressPhase::verifying, work.size(), work.size(),
+                   L"Verifying the active runtime"});
+    emit_progress({ProgressPhase::cleaning_up, 0, work.size(),
+                   L"Finalizing transaction metadata"});
     std::vector<std::filesystem::path> cleanup_directories;
     for (const auto& item : work) {
       if (std::filesystem::is_regular_file(item.rollback) &&
@@ -490,6 +521,9 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
 
     commit_duration = elapsed_milliseconds(commit_started);
     const auto total_duration = elapsed_milliseconds(total_started);
+
+    emit_progress({ProgressPhase::ready, work.size(), work.size(),
+                   L"Runtime swap completed"});
 
     return {ExitCode::success, true,
             L"Skyrim was switched from " + source_version() + L" to " + target_version() +

@@ -3,6 +3,9 @@ cmake_minimum_required(VERSION 3.25)
 if(NOT DEFINED CONFIGURATION)
   set(CONFIGURATION Release)
 endif()
+if(NOT DEFINED STAGE_ONLY)
+  set(STAGE_ONLY OFF)
+endif()
 if(NOT CONFIGURATION MATCHES "^(Debug|Release)$")
   message(FATAL_ERROR "CONFIGURATION must be Debug or Release")
 endif()
@@ -86,9 +89,9 @@ foreach(ASSET_MANIFEST IN LISTS ASSET_MANIFESTS)
     message(FATAL_ERROR "The asset catalog must use format 3 HDIFFW26 Zstandard patches")
   endif()
   if(NOT SOURCE_VERSION STREQUAL "1.7.104" OR
-     NOT TARGET_VERSION MATCHES "^(1\.6\.1170|1\.5\.97)$")
+     NOT TARGET_VERSION MATCHES "^(1\.6\.640|1\.6\.1170|1\.5\.97)$")
     message(FATAL_ERROR
-      "The asset catalog must describe Skyrim 1.7.104 <-> 1.6.1170/1.5.97")
+      "The asset catalog must describe Skyrim 1.7.104 <-> 1.6.640/1.6.1170/1.5.97")
   endif()
   if(NOT HDIFF_VERSION STREQUAL "5.1.3")
     message(FATAL_ERROR "The native patch library requires HDiffPatch 5.1.3 assets")
@@ -278,6 +281,12 @@ ${SELECTED_ENTRIES}
 }
 ")
     file(WRITE "${OUTPUT_ROOT}/RuntimeSwap/manifest.json" "${RELEASE_MANIFEST}")
+
+    # CI packages these verified payloads on Linux to preserve ELF execute bits.
+    if(STAGE_ONLY)
+      message(STATUS "Staged ${OUTPUT_ROOT}")
+      continue()
+    endif()
 
     set(PACKAGING_ARGUMENTS "")
     if(DEFINED WSL_DISTRIBUTION AND NOT WSL_DISTRIBUTION STREQUAL "")

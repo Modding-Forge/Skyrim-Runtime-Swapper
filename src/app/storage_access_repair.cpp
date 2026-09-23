@@ -1,6 +1,8 @@
 #include "storage_access_repair.hpp"
 
 #include "path_display.hpp"
+#include "content_catalog.hpp"
+#include "storage_operations.hpp"
 #include "unique_handle.hpp"
 
 #include <runtime_swapper/prepared_storage.hpp>
@@ -43,7 +45,7 @@ StorageAccessRepairResult request_windows_storage_access_repair(
     }
     // Recheck as the original, unelevated user. UAC may have used a different
     // administrator account; its successful probe is not sufficient evidence.
-    const auto verified = probe_prepared_storage(game_root);
+    const auto verified = probe_installation_storage(game_root).backend;
     return verified.success() && !windows_storage_directories_need_repair(verified)
                ? StorageAccessRepairResult::succeeded
                : StorageAccessRepairResult::failed;
@@ -59,7 +61,16 @@ StorageAccessRepairResult repair_windows_storage_access(
       if (detail) *detail = repaired.detail;
       return StorageAccessRepairResult::failed;
     }
-    const auto verified = probe_prepared_storage(game_root);
+    const auto catalog = probe_content_catalog_storage(game_root);
+    if (!catalog.success() || windows_storage_directories_need_repair(catalog)) {
+      const auto catalog_repair = repair_windows_storage_directories(catalog);
+      if (!catalog_repair) {
+        if (detail) *detail = L"ContentCatalog storage access repair: " +
+                              catalog_repair.detail;
+        return StorageAccessRepairResult::failed;
+      }
+    }
+    const auto verified = probe_installation_storage(game_root).backend;
     if (!verified.success() || windows_storage_directories_need_repair(verified)) {
       if (detail) *detail = L"Storage access repair verification failed: " +
                             verified.technical_reason + L"; " + verified.message;

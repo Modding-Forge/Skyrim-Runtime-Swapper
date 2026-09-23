@@ -46,6 +46,7 @@ struct InstallationOperationResult {
 [[nodiscard]] InstallationOperationResult restore_persistent_source(
     const std::filesystem::path& game_root);
 [[nodiscard]] InstallationOperationResult recover_installation(
-    const std::filesystem::path& game_root);
+    const std::filesystem::path& game_root,
+    bool retain_recovery_storage = false);
 
 }  // namespace runtime_swapper::app

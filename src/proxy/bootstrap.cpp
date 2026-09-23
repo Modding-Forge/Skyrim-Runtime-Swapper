@@ -4,6 +4,7 @@
 #include <runtime_swapper/file_identity.hpp>
 
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -14,6 +15,12 @@ namespace {
 HMODULE g_module{};
 std::once_flag g_bootstrap_once;
 bool g_bootstrap_succeeded = true;
+DWORD g_bootstrap_error = ERROR_SUCCESS;
+
+struct HandleCloser {
+  void operator()(void* handle) const noexcept { CloseHandle(handle); }
+};
+using ScopedHandle = std::unique_ptr<void, HandleCloser>;
 
 std::filesystem::path module_path(HMODULE module) {
   std::vector<wchar_t> buffer(512);
@@ -84,11 +91,11 @@ bool run_helper() {
     return false;
   }
 
-  CloseHandle(process.hThread);
-  const DWORD wait_result = WaitForSingleObject(process.hProcess, INFINITE);
+  const ScopedHandle process_handle(process.hProcess);
+  const ScopedHandle thread_handle(process.hThread);
+  const DWORD wait_result = WaitForSingleObject(process_handle.get(), INFINITE);
   DWORD exit_code = static_cast<DWORD>(runtime_swapper::ExitCode::internal_error);
-  const BOOL got_exit_code = GetExitCodeProcess(process.hProcess, &exit_code);
-  CloseHandle(process.hProcess);
+  const BOOL got_exit_code = GetExitCodeProcess(process_handle.get(), &exit_code);
 
   if (wait_result != WAIT_OBJECT_0 || !got_exit_code ||
       exit_code != static_cast<DWORD>(runtime_swapper::ExitCode::success)) {
@@ -105,11 +112,14 @@ namespace runtime_swapper::proxy {
 void set_module(HMODULE module) noexcept { g_module = module; }
 
 bool ensure_runtime_ready(const wchar_t* queried_file) noexcept {
-  if (!is_skse_loader() || !is_skyrim_executable(queried_file)) {
-    return true;
-  }
   try {
-    std::call_once(g_bootstrap_once, [] { g_bootstrap_succeeded = run_helper(); });
+    if (!is_skyrim_executable(queried_file)) return true;
+    std::call_once(g_bootstrap_once, [] {
+      if (!is_skse_loader()) return;
+      g_bootstrap_succeeded = run_helper();
+      if (!g_bootstrap_succeeded) g_bootstrap_error = GetLastError();
+    });
+    if (!g_bootstrap_succeeded) SetLastError(g_bootstrap_error);
     return g_bootstrap_succeeded;
   } catch (...) {
     SetLastError(ERROR_UNHANDLED_EXCEPTION);
@@ -118,18 +128,23 @@ bool ensure_runtime_ready(const wchar_t* queried_file) noexcept {
 }
 
 bool ensure_runtime_ready(const char* queried_file) noexcept {
-  if (queried_file == nullptr) {
-    return true;
-  }
-  const int count = MultiByteToWideChar(CP_ACP, 0, queried_file, -1, nullptr, 0);
-  if (count <= 0) {
+  try {
+    if (queried_file == nullptr) {
+      return true;
+    }
+    const int count = MultiByteToWideChar(CP_ACP, 0, queried_file, -1, nullptr, 0);
+    if (count <= 0) {
+      return false;
+    }
+    std::wstring wide(static_cast<std::size_t>(count), L'\0');
+    if (MultiByteToWideChar(CP_ACP, 0, queried_file, -1, wide.data(), count) <= 0) {
+      return false;
+    }
+    return ensure_runtime_ready(wide.c_str());
+  } catch (...) {
+    SetLastError(ERROR_UNHANDLED_EXCEPTION);
     return false;
   }
-  std::wstring wide(static_cast<std::size_t>(count), L'\0');
-  if (MultiByteToWideChar(CP_ACP, 0, queried_file, -1, wide.data(), count) <= 0) {
-    return false;
-  }
-  return ensure_runtime_ready(wide.c_str());
 }
 
 }  // namespace runtime_swapper::proxy

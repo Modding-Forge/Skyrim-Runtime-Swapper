@@ -71,8 +71,9 @@ constexpr std::string_view backup_marker_prefix =
   if (relative.empty() || relative == "backups" ||
       relative == "backups/1.7.104" ||
       relative == "backups/1.7.104/.complete" || relative == "versions" ||
-      relative == "versions/1.7.104" || relative == "versions/1.6.1170" ||
-      relative == "versions/1.5.97" || relative == "transaction" ||
+      relative == "versions/1.7.104" || relative == "versions/1.6.640" ||
+      relative == "versions/1.6.1170" || relative == "versions/1.5.97" ||
+      relative == "transaction" ||
       relative == "backups/1.7.104/CreationClub") {
     return true;
   }
@@ -84,6 +85,7 @@ constexpr std::string_view backup_marker_prefix =
     const std::array candidates{
         std::string(backup_prefix) + std::string(file.relative_file),
         std::string("versions/1.7.104/") + std::string(file.relative_file),
+        std::string("versions/1.6.640/") + std::string(file.relative_file),
         std::string("versions/1.6.1170/") + std::string(file.relative_file),
         std::string("versions/1.5.97/") + std::string(file.relative_file),
         staging ? std::string(first) + "/" + std::string(file.relative_file)
@@ -150,7 +152,7 @@ constexpr std::string_view backup_marker_prefix =
     return temporary && find_managed_file(*temporary, managed_files) != nullptr;
   }
 
-  for (const std::string_view version : {"1.7.104", "1.6.1170", "1.5.97"}) {
+  for (const std::string_view version : {"1.7.104", "1.6.640", "1.6.1170", "1.5.97"}) {
     const auto prefix = std::string("versions/") + std::string(version) + "/";
     if (relative.starts_with(prefix)) {
       return find_managed_file(relative.substr(prefix.size()), managed_files) !=

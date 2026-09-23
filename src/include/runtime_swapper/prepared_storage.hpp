@@ -49,6 +49,10 @@ class PreparedStorageContext {
 
   friend std::optional<PreparedStorageContext> prepare_storage_context(
       const std::filesystem::path&, std::uint64_t, std::wstring*);
+  friend std::optional<PreparedStorageContext>
+  prepare_storage_context_from_probe(const std::filesystem::path&,
+                                     BackendProbeResult, std::uint64_t,
+                                     std::wstring*);
   friend class PreparedStorageScope;
   friend std::optional<bool> prepared_hash_matches(
       const std::filesystem::path&, std::string_view, std::string*);
@@ -59,6 +63,14 @@ class PreparedStorageContext {
 
 [[nodiscard]] std::optional<PreparedStorageContext> prepare_storage_context(
     const std::filesystem::path& game_root,
+    std::uint64_t required_vault_bytes = 0,
+    std::wstring* error_message = nullptr);
+
+// Builds a capability from a probe already verified by the caller. This
+// avoids a second path-based ACL probe between preflight and mutation.
+[[nodiscard]] std::optional<PreparedStorageContext>
+prepare_storage_context_from_probe(
+    const std::filesystem::path& game_root, BackendProbeResult backend,
     std::uint64_t required_vault_bytes = 0,
     std::wstring* error_message = nullptr);
 

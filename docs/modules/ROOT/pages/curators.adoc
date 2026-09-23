@@ -18,7 +18,7 @@ image::collection-srs-skse-dependencies.png[Vortex collection editor showing SRS
 [#collection-game-version]
 == Collection game version
 
-Set the Collection's Skyrim version requirement to the supported Steam *source: 1.7.104*, even when targeting 1.6.1170 or 1.5.97.
+Set the Collection's Skyrim version requirement to the supported Steam *source: 1.7.104*, even when targeting 1.6.640, 1.6.1170, or 1.5.97.
 The manager checks the installed game before SRS runs; declaring the target here causes a misleading wrong-version prompt on a correct source installation.
 
 SRS also accepts xref:faqs.adoc#already-downgraded[verified already-downgraded installations]; it leaves their runtime active after exit.

@@ -66,7 +66,7 @@ This log cleanup does not delete SKSE's own logs, runtime backups, or recovery j
 == The Collection reports the wrong installed Skyrim version
 
 This warning comes from the manager's Collection compatibility check, before SRS switches the runtime.
-If Skyrim is correctly installed as 1.7.104 but the Collection expects 1.6.1170 or 1.5.97, ask the curator to set the Collection's game-version requirement to the source version.
+If Skyrim is correctly installed as 1.7.104 but the Collection expects 1.6.640, 1.6.1170, or 1.5.97, ask the curator to set the Collection's game-version requirement to the source version.
 The SRS package and SKSE should still target the older runtime.
 
 Do not manually downgrade or replace the Collection's files just to silence this warning.

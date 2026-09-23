@@ -2,6 +2,48 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.3.2 - 2026-09-23
+
+- Avoids unnecessary SKSE loader checks for unrelated version queries while
+  retaining verification of renamed launchers.
+- Prevents bootstrap allocation and path exceptions from terminating the loader.
+- Uses scoped process handles and preserves helper failure diagnostics across
+  repeated version queries.
+- Adds proxy bootstrap regression coverage for normal and renamed loaders,
+  unrelated processes, missing helpers, helper failures and one-time activation.
+- These changes do not guarantee removal of antivirus false-positive detections.
+
+## 1.3.1 - 2026-09-22
+
+- Fixes ContentCatalog storage permission errors not offering the Windows
+  SRS folder repair action. Diagnostics and repair now use the affected
+  ContentCatalog storage paths instead of the game installation's vault.
+- Rechecks both game and ContentCatalog storage after permission repair,
+  including verification by the original unelevated process.
+
+## 1.3.0 - 2026-09-21
+
+- Adds verified Best of Both Worlds and Best of All Worlds packages for
+  downgrading Skyrim 1.7.104 to 1.6.640. BoBW switches SkyrimSE.exe,
+  SkyrimSELauncher.exe and Skyrim - Shaders.bsa; BoAW additionally switches
+  Skyrim - Interface.bsa and the five official master files.
+- Expands the release catalog to seven packages across Skyrim 1.5.97,
+  1.6.640 and 1.6.1170, while retaining the separate 1.6.1170 BoAW-Clean
+  package.
+- Extends first-run legacy storage cleanup to recognize and safely retire
+  1.6.640 version data, without touching active or unverifiable state.
+- Improves Windows storage classification for fixed NTFS volumes whose volume
+  handle does not expose storage properties. SRS now resolves the physical
+  volume extents and checks their hotplug state, so internal secondary SSDs
+  can use Automatic mode while external or removable media remain protected.
+- Updates package metadata, profile definitions, documentation and migration
+  checks for the new target runtime and verifies all archives after packaging.
+- Improves Windows recovery-vault permission repair and diagnostics for
+  installations whose existing SRS directories block session preparation.
+- Keeps verified recovery storage available when recovery and activation run
+  in the same launch, preventing session preparation from using a vault that
+  was already cleaned up.
+
 ## 1.2.5 - 2026-09-09
 
 - Adds guided Windows repair for SRS storage ownership and private permissions,

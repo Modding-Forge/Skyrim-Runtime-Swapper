@@ -3,7 +3,7 @@ function(generate_legacy_storage_plan_entries OUTPUT_VARIABLE)
   set(SOURCE_PRESENT "")
   set(SOURCE_HASHES "")
   set(SOURCE_SIZES "")
-  foreach(TARGET_VERSION 1.5.97 1.6.1170)
+  foreach(TARGET_VERSION 1.5.97 1.6.1170 1.6.640)
     set(MANIFEST_PATH
       "${PROJECT_SOURCE_DIR}/assets/runtime/1.7.104-to-${TARGET_VERSION}/manifest.json")
     if(NOT EXISTS "${MANIFEST_PATH}")

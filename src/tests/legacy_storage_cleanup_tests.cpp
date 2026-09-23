@@ -60,6 +60,7 @@ void write_file(const std::filesystem::path& path, std::string_view contents) {
   write_file(legacy / "backups/1.7.104/.complete/1.6.1170-1.complete",
              "SRS-SOURCE-BACKUP-1\nsource=1.7.104\ntarget=1.6.1170\n");
   write_file(legacy / "versions/1.7.104/managed.bin", source);
+  write_file(legacy / "versions/1.6.640/managed.bin", "disposable-target");
   write_file(legacy / "versions/1.6.1170/managed.bin", "disposable-target");
   write_file(legacy / "staging-123/managed.bin", "partial-staging-data");
   write_file(legacy / "transaction.lock", {});

@@ -12,6 +12,7 @@
 #include <runtime_swapper/patch_plan.hpp>
 #include <runtime_swapper/prepared_storage.hpp>
 #include <runtime_swapper/checked_arithmetic.hpp>
+#include <runtime_swapper/progress.hpp>
 #include <runtime_swapper/release_version.hpp>
 #include <runtime_swapper/runtime_layout.hpp>
 #include <runtime_swapper/runtime_version.hpp>
@@ -349,6 +350,8 @@ struct SourceCandidateRestore {
 [[nodiscard]] DowngradeResult recover_to_source(const std::filesystem::path& game_root,
                                                 const std::filesystem::path& patch_root,
                                                 bool restore_clean_target = false) {
+  emit_progress({ProgressPhase::recovering, 0, 0,
+                 L"Recovering interrupted runtime changes"});
   auto& backend = transaction_backend();
   const auto backend_result = probe_backend(game_root);
   if (!backend_result.success()) return backend_result;
@@ -795,6 +798,7 @@ struct SourceCandidateRestore {
             L"Runtime recovery completed, but transaction cleanup failed.\n\n" +
                 cleanup.detail};
   }
+  emit_progress({ProgressPhase::ready, 0, 0, L"Recovery completed"});
   return {ExitCode::success, changed,
           changed ? L"Skyrim " + source_version() + L" was recovered successfully." +
                          (backup_fallback_used
@@ -881,6 +885,8 @@ bool source_runtime_is_active_internal(
 DowngradeResult finalize_fixed_target_runtime_internal(
     const std::filesystem::path& game_root) {
   try {
+    emit_progress({ProgressPhase::verifying, 0, 0,
+                   L"Verifying the fixed target runtime"});
     const auto backend_result = probe_backend(game_root);
     if (!backend_result.success()) return backend_result;
     if (!target_runtime_is_active_internal(game_root)) {
@@ -898,6 +904,8 @@ DowngradeResult finalize_fixed_target_runtime_internal(
     }
     const auto active = existing_transaction_root(
         game_root, vault->probe, journal, make_transaction_id());
+    emit_progress({ProgressPhase::cleaning_up, 0, 0,
+                   L"Finalizing the fixed runtime state"});
     for (const auto& marker : {workspace_session_marker(vault->probe),
                                legacy_session_marker(game_root)}) {
       const auto marker_cleanup = remove_transaction_file(marker);
@@ -913,6 +921,8 @@ DowngradeResult finalize_fixed_target_runtime_internal(
               L"The fixed target runtime could not be finalized.\n\n" +
                   cleanup.detail};
     }
+    emit_progress({ProgressPhase::ready, 0, 0,
+                   L"Fixed target runtime finalized"});
     return {ExitCode::success, false,
             L"Skyrim " + target_version() + L" is fixed as the active runtime."};
   } catch (const std::exception&) {

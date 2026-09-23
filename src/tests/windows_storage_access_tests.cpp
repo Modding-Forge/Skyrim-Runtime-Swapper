@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -51,7 +52,7 @@ struct Fixture {
 };
 }
 
-int main() {
+int main(int argc, char** argv) {
   try {
     Fixture fixture;
     const auto game = fixture.root / L"Steam" / L"steamapps" / L"common" / L"Skyrim Special Edition";
@@ -65,11 +66,19 @@ int main() {
                 storage.filename() == L".runtime-swapper", "local fixture isolation");
     std::filesystem::create_directories(vault / L"objects");
     std::filesystem::create_directories(vault / L"transactions");
+    std::filesystem::create_directories(vault / L"attachments");
     std::filesystem::create_directories(probe.coordination_lock.value.parent_path());
     broad_acl(vault);
     broad_acl(vault / L"objects");
     const auto backup = vault / L"objects" / L"preserve.bin";
     std::ofstream(backup, std::ios::binary) << "verified recovery fixture";
+    const auto lifecycle = vault / L"attachments" / L"lifecycle";
+    std::ofstream(lifecycle, std::ios::binary)
+        << "SRS-RECOVERY-LIFECYCLE-1\nstate=clean_source\n";
+    broad_acl(lifecycle);
+    require(SetFileAttributesW(lifecycle.c_str(), FILE_ATTRIBUTE_READONLY) != FALSE,
+            "set metadata read-only fixture");
+    const auto lifecycle_contents = runtime_swapper::sha256_file(lifecycle);
     const auto before = runtime_swapper::sha256_file(backup);
     const auto backup_security = security_snapshot(backup);
     const auto library_security = security_snapshot(storage.parent_path());
@@ -85,11 +94,43 @@ int main() {
     require(static_cast<bool>(repaired), "repair succeeds");
     require(backend.probe(game).success(), "normal probe passes after repair");
     require(runtime_swapper::windows_storage_directory_is_private(vault / L"objects"), "child DACL repaired");
+    require(runtime_swapper::windows_storage_file_is_private(lifecycle), "metadata file DACL repaired");
+    require((GetFileAttributesW(lifecycle.c_str()) & FILE_ATTRIBUTE_READONLY) == 0,
+            "metadata read-only attribute repaired");
+    require(lifecycle_contents == runtime_swapper::sha256_file(lifecycle), "metadata file unchanged");
     require(before == runtime_swapper::sha256_file(backup), "backup unchanged");
     require(backup_security == security_snapshot(backup), "backup ACL unchanged");
     require(library_security == security_snapshot(storage.parent_path()), "Steam library ACL unchanged");
+    require(SetFileAttributesW(lifecycle.c_str(), FILE_ATTRIBUTE_READONLY) != FALSE,
+            "reapply metadata read-only fixture");
+    require(runtime_swapper::windows_storage_directories_need_repair(probe),
+            "read-only metadata repair is offered");
+    require(static_cast<bool>(runtime_swapper::repair_windows_storage_directories(probe)),
+            "read-only metadata repair succeeds");
     require(!runtime_swapper::windows_storage_directories_need_repair(probe), "no repeat prompt");
     require(static_cast<bool>(runtime_swapper::repair_windows_storage_directories(probe)), "idempotent repair");
+
+    broad_acl(vault);
+    auto catalog_failure = backend.probe(game);
+    catalog_failure.technical_reason = L"content-catalog:vault-owner-or-dacl";
+    require(runtime_swapper::windows_storage_directories_need_repair(catalog_failure),
+            "namespaced ContentCatalog ACL failure offers repair");
+    require(static_cast<bool>(runtime_swapper::repair_windows_storage_directories(catalog_failure)),
+            "namespaced ContentCatalog ACL failure repairs resolved storage");
+    require(backend.probe(game).success(), "catalog ACL repair restores valid storage");
+    require(before == runtime_swapper::sha256_file(backup), "catalog repair preserves backup");
+    require(library_security == security_snapshot(storage.parent_path()),
+            "catalog repair preserves library permissions");
+    auto catalog_identity_failure = catalog_failure;
+    catalog_identity_failure.technical_reason = L"content-catalog:active-vault-unavailable";
+    require(!runtime_swapper::windows_storage_directories_need_repair(catalog_identity_failure),
+            "catalog identity failure cannot offer ACL repair");
+    require(!runtime_swapper::repair_windows_storage_directories(catalog_identity_failure),
+            "catalog identity failure cannot mutate storage");
+    if (argc == 2 && std::string_view(argv[1]) == "--catalog-acl-only") {
+      std::cout << "ContentCatalog ACL repair and recovery preservation passed\n";
+      return 0;
+    }
 
     auto unrelated = probe;
     unrelated.recovery_vault.value = fixture.root / L"unrelated";

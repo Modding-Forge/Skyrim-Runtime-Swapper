@@ -9,7 +9,15 @@ PersistentRuntimeState inspect_persistent_runtime(
     bool* catalog_persistent, bool repair_missing_game_marker) {
   const auto vault = core::resolve_vault_layout(
       game_root, 0, nullptr, repair_missing_game_marker);
-  if (!vault) return PersistentRuntimeState::invalid;
+  if (!vault) {
+    // A failed first start may leave only the freshly created empty vault.
+    // With no locator or transaction content it contains no recovery claim and
+    // can be treated as an inactive persistent state.
+    if (core::fresh_empty_recovery_vault(game_root)) {
+      return PersistentRuntimeState::inactive;
+    }
+    return PersistentRuntimeState::invalid;
+  }
   switch (core::reconcile_persistent_marker(*vault, game_root, risk_accepted,
                                             catalog_persistent,
                                             repair_missing_game_marker)) {
