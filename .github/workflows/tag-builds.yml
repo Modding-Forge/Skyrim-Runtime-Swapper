@@ -2,12 +2,18 @@ name: Tag release builds
 
 on:
   workflow_dispatch:
+    inputs:
+      tested_run_id:
+        description: 'Upload existing packages from a successful run (skips build/tests; blank builds without publishing)'
+        type: string
+        required: false
   push:
     tags:
       - 'v*'
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: tag-build-${{ github.ref }}
@@ -45,9 +51,44 @@ jobs:
           PY
       - run: python3 tools/tests/verify-third-party-pins.py
       - run: python3 tools/package-7z.py --self-test
+      - name: Validate previously tested release
+        if: inputs.tested_run_id != ''
+        uses: actions/github-script@v7
+        env:
+          TESTED_RUN_ID: ${{ inputs.tested_run_id }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        with:
+          script: |
+            const runId = process.env.TESTED_RUN_ID;
+            if (!/^[0-9]+$/.test(runId)) throw new Error('Invalid run ID');
+            const repo = context.repo;
+            const {data: run} = await github.rest.actions.getWorkflowRun({...repo, run_id: runId});
+            if (run.status !== 'completed' || run.conclusion !== 'success' ||
+                run.path !== '.github/workflows/tag-builds.yml' || run.head_branch !== 'master' ||
+                run.head_repository?.full_name !== `${repo.owner}/${repo.repo}` ||
+                !['push', 'workflow_dispatch'].includes(run.event)) {
+              throw new Error('Source must be a successful trusted release build from master');
+            }
+            const {data: diff} = await github.rest.repos.compareCommitsWithBasehead({
+              ...repo, basehead: `${run.head_sha}...${context.sha}`
+            });
+            if (!['ahead', 'identical'].includes(diff.status) || !diff.files ||
+                diff.files.length >= 300 || diff.files.some(file =>
+                  file.filename !== '.github/workflows/tag-builds.yml' || file.status !== 'modified')) {
+              throw new Error('Source changed since tests: rebuild required');
+            }
+            const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
+              ...repo, run_id: runId, per_page: 100
+            });
+            const name = `SRS-v${process.env.RELEASE_VERSION}-packages`;
+            if (artifacts.filter(a => a.name === name && !a.expired).length !== 1) {
+              throw new Error('Expected exactly one unexpired release artifact');
+            }
+            core.summary.addRaw(`Reusing verified packages from run ${runId}, commit ${run.head_sha}.`).write();
 
   native:
     needs: validate
+    if: inputs.tested_run_id == ''
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     strategy:
@@ -184,7 +225,7 @@ jobs:
   nexus:
     name: Nexus ${{ matrix.profile }} ${{ matrix.target }}
     needs: [validate, packages]
-    if: github.event_name == 'push' && vars.NEXUS_UPLOAD_ENABLED == 'true' && !contains(needs.validate.outputs.version, '-')
+    if: always() && !cancelled() && needs.validate.result == 'success' && (needs.packages.result == 'success' || (needs.packages.result == 'skipped' && inputs.tested_run_id != '')) && (github.event_name == 'push' || inputs.tested_run_id != '') && vars.NEXUS_UPLOAD_ENABLED == 'true' && !contains(needs.validate.outputs.version, '-')
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: nexus-production
@@ -229,6 +270,8 @@ jobs:
         with:
           name: SRS-v${{ needs.validate.outputs.version }}-packages
           path: release
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.tested_run_id || github.run_id }}
       - name: Verify release checksums and credentials
         env:
           NEXUS_API_KEY: ${{ secrets.NEXUSMODS_API_KEY }}
