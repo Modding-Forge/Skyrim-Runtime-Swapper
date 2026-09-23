@@ -55,8 +55,10 @@ struct NativeHandle {
           (directory ? FILE_FLAG_BACKUP_SEMANTICS : FILE_FLAG_SEQUENTIAL_SCAN),
       nullptr);
   if (handle->value == INVALID_HANDLE_VALUE) return {};
-  FILE_ATTRIBUTE_TAG_INFO tag{};
-  if (!GetFileInformationByHandleEx(handle->value, FileAttributeTagInfo, &tag,
+  // FileAttributeTagInfo is unsupported on exFAT. Basic attributes still
+  // identify directories and reparse points on the same opened object.
+  FILE_BASIC_INFO tag{};
+  if (!GetFileInformationByHandleEx(handle->value, FileBasicInfo, &tag,
                                     sizeof(tag)) ||
       (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
       ((tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) != directory) {

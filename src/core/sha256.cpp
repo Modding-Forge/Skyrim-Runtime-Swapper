@@ -100,10 +100,10 @@ std::optional<std::string> sha256_file(const std::filesystem::path& file) {
 
 std::optional<std::string> sha256_native_file(std::intptr_t native_handle) {
   const HANDLE handle = reinterpret_cast<HANDLE>(native_handle);
-  FILE_ATTRIBUTE_TAG_INFO attributes{};
+  FILE_BASIC_INFO attributes{};
   if (handle == nullptr || handle == INVALID_HANDLE_VALUE ||
       GetFileType(handle) != FILE_TYPE_DISK ||
-      !GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &attributes,
+      !GetFileInformationByHandleEx(handle, FileBasicInfo, &attributes,
                                     sizeof(attributes)) ||
       (attributes.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY |
                                     FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {

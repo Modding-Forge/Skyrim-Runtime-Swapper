@@ -117,8 +117,8 @@ MutationResult pin_directory(const std::filesystem::path& path,
                               FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
                               nullptr));
     if (handle.get() == INVALID_HANDLE_VALUE) return failure(cursor, L"pin directory", GetLastError());
-    FILE_ATTRIBUTE_TAG_INFO info{};
-    if (!GetFileInformationByHandleEx(handle.get(), FileAttributeTagInfo, &info, sizeof(info))) {
+    FILE_BASIC_INFO info{};
+    if (!GetFileInformationByHandleEx(handle.get(), FileBasicInfo, &info, sizeof(info))) {
       return failure(cursor, L"inspect handle", GetLastError());
     }
     if (!(info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
@@ -274,9 +274,9 @@ MutationResult pin_file(const std::filesystem::path& path,
   if (handle.get() == INVALID_HANDLE_VALUE) {
     return failure(path, L"pin file", GetLastError());
   }
-  FILE_ATTRIBUTE_TAG_INFO info{};
+  FILE_BASIC_INFO info{};
   FILE_STANDARD_INFO standard{};
-  if (!GetFileInformationByHandleEx(handle.get(), FileAttributeTagInfo, &info,
+  if (!GetFileInformationByHandleEx(handle.get(), FileBasicInfo, &info,
                                     sizeof(info))) {
     return failure(path, L"inspect file attributes", GetLastError());
   }

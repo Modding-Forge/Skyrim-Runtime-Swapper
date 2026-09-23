@@ -130,12 +130,12 @@ UniqueHandle acquire_transaction_lock(const CoordinationLockPath& resolved_lock)
     report_windows_failure(L"CreateFileW-exclusive-open", error);
     return {};
   }
-  FILE_ATTRIBUTE_TAG_INFO attributes{};
+  FILE_BASIC_INFO attributes{};
   FILE_STANDARD_INFO standard{};
-  if (!GetFileInformationByHandleEx(lock.get(), FileAttributeTagInfo, &attributes,
+  if (!GetFileInformationByHandleEx(lock.get(), FileBasicInfo, &attributes,
                                     sizeof(attributes))) {
     const DWORD error = GetLastError();
-    report_windows_failure(L"GetFileInformationByHandleEx-FileAttributeTagInfo", error);
+    report_windows_failure(L"GetFileInformationByHandleEx-FileBasicInfo", error);
     return {};
   }
   if (!GetFileInformationByHandleEx(lock.get(), FileStandardInfo, &standard, sizeof(standard))) {

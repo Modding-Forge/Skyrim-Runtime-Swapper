@@ -19,10 +19,10 @@ namespace {
       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
       nullptr);
   if (file == INVALID_HANDLE_VALUE) return false;
-  FILE_ATTRIBUTE_TAG_INFO tag{};
+  FILE_BASIC_INFO tag{};
   FILE_STANDARD_INFO standard{};
   const bool matches =
-      GetFileInformationByHandleEx(file, FileAttributeTagInfo, &tag,
+      GetFileInformationByHandleEx(file, FileBasicInfo, &tag,
                                    sizeof(tag)) &&
       GetFileInformationByHandleEx(file, FileStandardInfo, &standard,
                                    sizeof(standard)) &&
@@ -60,9 +60,9 @@ bool private_directory(const std::filesystem::path& path) noexcept {
       OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
       nullptr);
   if (directory == INVALID_HANDLE_VALUE) return false;
-  FILE_ATTRIBUTE_TAG_INFO tag{};
+  FILE_BASIC_INFO tag{};
   const bool matches =
-      GetFileInformationByHandleEx(directory, FileAttributeTagInfo, &tag,
+      GetFileInformationByHandleEx(directory, FileBasicInfo, &tag,
                                    sizeof(tag)) &&
       (tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
       (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;

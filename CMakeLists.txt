@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(SkyrimRuntimeSwapper VERSION 1.3.2 LANGUAGES C CXX)
+project(SkyrimRuntimeSwapper VERSION 1.3.3 LANGUAGES C CXX)
 
 option(SKYRIM_RUNTIME_BUILD_FUZZER
   "Build the Linux libFuzzer target for the handle-bound HDiffPatch adapter" OFF)
 
-set(SKYRIM_RUNTIME_RELEASE_VERSION "1.3.2")
+set(SKYRIM_RUNTIME_RELEASE_VERSION "1.3.3-rc1")
 if(SKYRIM_RUNTIME_RELEASE_VERSION MATCHES "-")
   set(SKYRIM_RUNTIME_VERSION_FLAGS "VS_FF_PRERELEASE")
 else()
@@ -511,6 +511,15 @@ if(BUILD_TESTING)
   target_link_libraries(windows_private_directory_tests PRIVATE runtime_swapper_core)
   target_compile_options(windows_private_directory_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
   add_test(NAME windows_private_directory_tests COMMAND windows_private_directory_tests)
+  add_executable(windows_filesystem_compatibility_tests
+    src/tests/windows_filesystem_compatibility_tests.cpp)
+  target_include_directories(windows_filesystem_compatibility_tests PRIVATE
+    src/core src/tests)
+  target_link_libraries(windows_filesystem_compatibility_tests PRIVATE runtime_swapper_core)
+  target_compile_options(windows_filesystem_compatibility_tests PRIVATE
+    /W4 /permissive- /EHsc /utf-8)
+  add_test(NAME windows_filesystem_compatibility_tests
+    COMMAND windows_filesystem_compatibility_tests)
   add_executable(proxy_bootstrap_tests src/tests/proxy_bootstrap_tests.cpp
     src/proxy/bootstrap.cpp src/core/file_identity.cpp)
   target_include_directories(proxy_bootstrap_tests PRIVATE src/include src/proxy)

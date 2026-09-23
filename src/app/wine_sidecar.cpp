@@ -110,10 +110,10 @@ struct VerifiedSidecar {
       path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
       FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
   BY_HANDLE_FILE_INFORMATION info{};
-  FILE_ATTRIBUTE_TAG_INFO attributes{};
+  FILE_BASIC_INFO attributes{};
   if (!handle || GetFileType(handle.get()) != FILE_TYPE_DISK ||
       !GetFileInformationByHandle(handle.get(), &info) ||
-      !GetFileInformationByHandleEx(handle.get(), FileAttributeTagInfo,
+      !GetFileInformationByHandleEx(handle.get(), FileBasicInfo,
                                     &attributes, sizeof(attributes)) ||
       (attributes.FileAttributes &
        (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {

@@ -2,6 +2,14 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.3.3-rc1 - 2026-09-23
+
+- Fixes Windows exFAT failures when preparing storage, hashing files and
+  validating transaction entries. Handle-bound attribute checks now use an
+  exFAT-compatible query without relaxing reparse-point or file-type checks.
+- Adds a filesystem compatibility regression test for hashing, storage
+  preparation, copying, replacement, restore and removal on NTFS and exFAT.
+
 ## 1.3.2 - 2026-09-23
 
 - Sets explicit current-user ownership and private permissions when creating

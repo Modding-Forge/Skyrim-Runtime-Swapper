@@ -266,9 +266,9 @@ struct FileIdentity {
       path.c_str(), access,
       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
       OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
-  FILE_ATTRIBUTE_TAG_INFO attributes{};
+  FILE_BASIC_INFO attributes{};
   if (!handle ||
-      !GetFileInformationByHandleEx(handle.get(), FileAttributeTagInfo,
+      !GetFileInformationByHandleEx(handle.get(), FileBasicInfo,
                                     &attributes, sizeof(attributes)) ||
       (attributes.FileAttributes &
        (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
@@ -286,9 +286,9 @@ struct FileIdentity {
       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
       OPEN_EXISTING,
       FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
-  FILE_ATTRIBUTE_TAG_INFO attributes{};
+  FILE_BASIC_INFO attributes{};
   if (!handle ||
-      !GetFileInformationByHandleEx(handle.get(), FileAttributeTagInfo,
+      !GetFileInformationByHandleEx(handle.get(), FileBasicInfo,
                                     &attributes, sizeof(attributes)) ||
       (attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
       (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
@@ -772,16 +772,13 @@ class WindowsTransactionBackend final : public TransactionBackend {
                        std::error_code(static_cast<int>(error),
                                        std::system_category()));
     }
-    FILE_ATTRIBUTE_TAG_INFO tag{};
     FILE_STANDARD_INFO standard{};
     FILE_BASIC_INFO basic{};
-    if (!GetFileInformationByHandleEx(file.get(), FileAttributeTagInfo, &tag,
-                                      sizeof(tag)) ||
-        !GetFileInformationByHandleEx(file.get(), FileStandardInfo, &standard,
+    if (!GetFileInformationByHandleEx(file.get(), FileStandardInfo, &standard,
                                       sizeof(standard)) ||
         !GetFileInformationByHandleEx(file.get(), FileBasicInfo, &basic,
                                       sizeof(basic)) ||
-        (tag.FileAttributes &
+        (basic.FileAttributes &
          (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
         !entry_matches_handle(path, file.get())) {
       return MutationResult::failure(MutationStep::validate,
@@ -862,8 +859,8 @@ class WindowsTransactionBackend final : public TransactionBackend {
                        std::error_code(static_cast<int>(error),
                                        std::system_category()));
     }
-    FILE_ATTRIBUTE_TAG_INFO tag{};
-    if (!GetFileInformationByHandleEx(file.get(), FileAttributeTagInfo, &tag,
+    FILE_BASIC_INFO tag{};
+    if (!GetFileInformationByHandleEx(file.get(), FileBasicInfo, &tag,
                                       sizeof(tag)) ||
         (tag.FileAttributes &
          (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
@@ -951,9 +948,9 @@ class WindowsTransactionBackend final : public TransactionBackend {
           OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS |
                              FILE_FLAG_OPEN_REPARSE_POINT,
           nullptr));
-      FILE_ATTRIBUTE_TAG_INFO attributes{};
+      FILE_BASIC_INFO attributes{};
       if (!handle ||
-          !GetFileInformationByHandleEx(handle.get(), FileAttributeTagInfo,
+          !GetFileInformationByHandleEx(handle.get(), FileBasicInfo,
                                         &attributes, sizeof(attributes)) ||
           (attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
           (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
