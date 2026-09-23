@@ -1,4 +1,5 @@
 #include "internal/windows_storage_probe.hpp"
+#include "internal/windows_private_directory.hpp"
 #include "internal/storage_probe_common.hpp"
 
 #include <runtime_swapper/checked_arithmetic.hpp>
@@ -726,7 +727,8 @@ BackendProbeResult probe_windows_storage(
       if (!repaired) {
         return attach_storage_paths(blocked(
             L"vault-owner-or-dacl",
-            L"The recovery vault is not controlled by the current Windows user.",
+            L"The recovery vault is not controlled by the current Windows user." +
+                windows_security_diagnostic(vault_path, current_sid),
             *target, *vault, vault_path, *id), storage_base, target_storage_base, *id);
       }
     }
@@ -748,10 +750,12 @@ BackendProbeResult probe_windows_storage(
               target_storage_base, *id);
     }
 
-    std::filesystem::create_directories(vault_path, error);
-    if (error || !managed_path_is_safe(vault_path)) {
+    if (!create_windows_private_directories(vault_path, current_sid, error) ||
+        !managed_path_is_safe(vault_path)) {
       return blocked(L"vault-create-failed",
-                     L"The automatic recovery vault could not be created safely.", *target,
+                     L"The automatic recovery vault could not be created safely. Error=" +
+                         std::to_wstring(error.value()) +
+                         windows_security_diagnostic(vault_path, current_sid), *target,
                      {}, vault_path, *id);
     }
     if (!current_sid || !owner_is_current_user(vault_path, current_sid) ||
@@ -759,7 +763,8 @@ BackendProbeResult probe_windows_storage(
         !directory_dacl_is_restricted(vault_path, current_sid)) {
       return attach_storage_paths(blocked(L"vault-owner-or-dacl",
                      L"The recovery vault is not exclusively controlled by the current "
-                     L"Windows user.", *target, *vault, vault_path, *id),
+                     L"Windows user." + windows_security_diagnostic(vault_path, current_sid),
+                     *target, *vault, vault_path, *id),
                      storage_base, target_storage_base, *id);
     }
     vault = inspect_volume(vault_path);
@@ -824,16 +829,16 @@ MutationResult prepare_windows_coordination_lock(
           L"The coordination-lock path is outside the SRS storage root.");
     }
     std::error_code error;
-    std::filesystem::create_directories(lock_directory, error);
+    const auto sid = current_user_sid();
+    auto* current_sid =
+        sid ? static_cast<PSID>(const_cast<std::byte*>(sid->data())) : nullptr;
+    (void)create_windows_private_directories(lock_directory, current_sid, error);
     if (error) {
       return MutationResult::failure(
           MutationStep::validate, MutationState::untouched, error,
           L"Could not create the coordination-lock directory: " + lock_directory.wstring());
     }
-    const auto sid = current_user_sid();
     const DWORD sid_error = sid ? ERROR_SUCCESS : GetLastError();
-    auto* current_sid =
-        sid ? static_cast<PSID>(const_cast<std::byte*>(sid->data())) : nullptr;
     const auto failed = [](DWORD status, std::wstring detail) {
       return MutationResult::failure(
           MutationStep::validate, MutationState::untouched,

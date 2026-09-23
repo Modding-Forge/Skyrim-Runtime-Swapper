@@ -1,6 +1,7 @@
 name: Tag release builds
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - 'v*'
@@ -26,6 +27,7 @@ jobs:
         id: version
         env:
           RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_EVENT: ${{ github.event_name }}
         run: |
           python3 - <<'PY'
           import json, os, re
@@ -33,7 +35,7 @@ jobs:
           version = json.loads(Path('vcpkg.json').read_text())['version-string']
           if not re.fullmatch(r'\d+\.\d+\.\d+(?:-rc\d+)?', version):
               raise SystemExit('Unsupported release version')
-          if os.environ['RELEASE_TAG'] != 'v' + version:
+          if os.environ.get('RELEASE_EVENT') != 'workflow_dispatch' and os.environ['RELEASE_TAG'] != 'v' + version:
               raise SystemExit('Tag must match vcpkg.json release version')
           cmake = Path('CMakeLists.txt').read_text()
           if f'set(SKYRIM_RUNTIME_RELEASE_VERSION "{version}")' not in cmake:
@@ -182,7 +184,7 @@ jobs:
   nexus:
     name: Nexus ${{ matrix.profile }} ${{ matrix.target }}
     needs: [validate, packages]
-    if: vars.NEXUS_UPLOAD_ENABLED == 'true' && !contains(needs.validate.outputs.version, '-')
+    if: github.event_name == 'push' && vars.NEXUS_UPLOAD_ENABLED == 'true' && !contains(needs.validate.outputs.version, '-')
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: nexus-production

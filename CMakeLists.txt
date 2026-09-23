@@ -282,6 +282,7 @@ if(WIN32)
     src/core/sha256.cpp
     src/core/windows_transaction_backend.cpp
     src/core/windows_storage_probe.cpp
+    src/core/windows_private_directory.cpp
     src/core/windows_storage_access.cpp
   )
 else()
@@ -505,6 +506,11 @@ endif()
 
 if(BUILD_TESTING)
   add_executable(runtime_version_tests src/tests/runtime_version_tests.cpp)
+  add_executable(windows_private_directory_tests src/tests/windows_private_directory_tests.cpp)
+  target_include_directories(windows_private_directory_tests PRIVATE src/core src/tests)
+  target_link_libraries(windows_private_directory_tests PRIVATE runtime_swapper_core)
+  target_compile_options(windows_private_directory_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+  add_test(NAME windows_private_directory_tests COMMAND windows_private_directory_tests)
   add_executable(proxy_bootstrap_tests src/tests/proxy_bootstrap_tests.cpp
     src/proxy/bootstrap.cpp src/core/file_identity.cpp)
   target_include_directories(proxy_bootstrap_tests PRIVATE src/include src/proxy)

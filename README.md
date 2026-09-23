@@ -88,6 +88,7 @@ The full **Storage safety** workflow runs manually through GitHub Actions. It co
 Pushing a version tag such as `v1.3.2-rc1` or `v1.3.2` starts the
 **Tag release builds** workflow. The tag must match `vcpkg.json` and the CMake
 release version. Commit the workflow and all required patch assets before tagging.
+Manual workflow runs build and test the selected ref but never upload to Nexus.
 
 The workflow builds all seven Linux-enabled packages, checks the Ubuntu 22.04
 sidecar ABI and binary hardening, and runs the Windows tests even for RC tags.

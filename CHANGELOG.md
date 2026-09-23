@@ -4,6 +4,11 @@ All notable changes to Skyrim Runtime Swapper are documented in this file.
 
 ## 1.3.2 - 2026-09-23
 
+- Sets explicit current-user ownership and private permissions when creating
+  new Windows recovery and lock directories, including elevated processes.
+  Existing directories are not silently taken over; rejected vaults report
+  the actual owner and DACL for diagnosis.
+
 - Avoids unnecessary SKSE loader checks for unrelated version queries while
   retaining verification of renamed launchers.
 - Prevents bootstrap allocation and path exceptions from terminating the loader.
