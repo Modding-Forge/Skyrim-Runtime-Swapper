@@ -1,5 +1,4 @@
 #include "internal/posix_storage_probe.hpp"
-#include "internal/storage_probe_common.hpp"
 #include "internal/storage_probe.hpp"
 
 #include <runtime_swapper/checked_arithmetic.hpp>

@@ -39,6 +39,7 @@ class Platform final : public StorageProbePlatform {
   bool access_failure{};
   bool create_failure{};
   bool lose_volume{};
+  bool missing_anchor{};
   bool lose_space{};
   bool write_failure{};
   bool fail_after_write{};
@@ -53,6 +54,7 @@ class Platform final : public StorageProbePlatform {
   }
   std::optional<fs::path> existing_ancestor(const fs::path& path) override {
     calls.push_back("ancestor");
+    if (missing_anchor) return std::nullopt;
     return path.parent_path();
   }
   bool has_space(const fs::path&, std::uint64_t required) override {
@@ -156,6 +158,31 @@ void scenarios(PathSyntax syntax) {
     const auto before = read(f.current);
     check_result(f, f.probe(true));
     require(read(f.current) == before && f.platform.writes == 0, "current locator wins");
+  }
+  {
+    Fixture f(syntax);
+    const auto original = f.context.recovery_vault;
+    f.context.recovery_vault.value = f.root / "recorded-vault";
+    f.manifest();
+    f.locator(f.current);
+    f.context.recovery_vault = original;
+    const auto result = f.probe(true);
+    require(result.success() && result.vault_path == f.root / "recorded-vault" &&
+            result.coordination_lock.value == f.context.recovery_base / "locks/skyrimse-test.lock",
+            "recorded vault overrides default but never changes lock authority");
+    require(!fs::exists(original.value), "pinned vault cannot create replacement default");
+  }
+  {
+    Fixture f(syntax);
+    fs::create_directories(f.current);
+    require(f.probe(true).technical_reason == L"active-vault-unavailable" &&
+            !fs::exists(f.context.recovery_vault.value), "non-file locator blocks before writes");
+  }
+  {
+    Fixture f(syntax);
+    f.platform.missing_anchor = true;
+    require(f.probe(true).technical_reason == L"vault-volume-not-durable" &&
+            f.platform.calls == std::vector<std::string>{"ancestor"}, "missing vault volume");
   }
   for (const bool prepare : {false, true}) {
     Fixture f(syntax);

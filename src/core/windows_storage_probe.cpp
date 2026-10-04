@@ -1,6 +1,5 @@
 #include "internal/windows_storage_probe.hpp"
 #include "internal/windows_private_directory.hpp"
-#include "internal/storage_probe_common.hpp"
 #include "internal/storage_probe.hpp"
 
 #include <runtime_swapper/checked_arithmetic.hpp>
@@ -16,8 +15,6 @@
 #include <cstddef>
 #include <cwctype>
 #include <filesystem>
-#include <fstream>
-#include <iterator>
 #include <limits>
 #include <memory>
 #include <optional>

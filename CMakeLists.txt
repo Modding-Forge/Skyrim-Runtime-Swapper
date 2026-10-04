@@ -351,6 +351,13 @@ if(BUILD_TESTING)
   target_link_libraries(storage_probe_tests PRIVATE runtime_swapper_core)
   srs_harden_compile(storage_probe_tests)
   add_test(NAME storage_probe_tests COMMAND storage_probe_tests)
+  foreach(TEST_TARGET storage_policy_tests storage_probe_tests)
+    if(MSVC)
+      target_compile_options(${TEST_TARGET} PRIVATE /W4 /permissive- /EHsc /utf-8)
+    else()
+      target_compile_options(${TEST_TARGET} PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    endif()
+  endforeach()
 
   add_executable(storage_restore_tests
     src/tests/storage_restore_tests.cpp
@@ -818,6 +825,11 @@ else()
 
   if(BUILD_TESTING)
     add_executable(posix_storage_tests src/tests/posix_storage_tests.cpp)
+    add_executable(posix_storage_resolution_tests src/tests/posix_storage_resolution_tests.cpp)
+    target_link_libraries(posix_storage_resolution_tests PRIVATE runtime_swapper_core)
+    target_compile_options(posix_storage_resolution_tests PRIVATE
+      -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    add_test(NAME posix_storage_resolution_tests COMMAND posix_storage_resolution_tests)
     target_include_directories(posix_storage_tests BEFORE PRIVATE
       "${GENERATED_INCLUDE}" src/include src/core src/tests)
     target_link_libraries(posix_storage_tests PRIVATE runtime_swapper_core)
