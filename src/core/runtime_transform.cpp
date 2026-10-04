@@ -89,6 +89,17 @@ struct CleanupResult {
   });
 }
 
+// Journal text is untrusted; hexadecimal preserves embedded control bytes in logs.
+[[nodiscard]] std::wstring profile_bytes(std::string_view profile) {
+  constexpr wchar_t digits[] = L"0123456789abcdef";
+  std::wstring result;
+  for (const unsigned char value : profile) {
+    result.push_back(digits[value >> 4U]);
+    result.push_back(digits[value & 15U]);
+  }
+  return result;
+}
+
 [[nodiscard]] std::filesystem::path legacy_journal_path(
     const std::filesystem::path& game_root) {
   return legacy_transaction_root(game_root) / L"runtime.journal";
@@ -368,12 +379,15 @@ struct SourceCandidateRestore {
   const auto journal = runtime_journal_path(*vault);
   const auto legacy_journal = legacy_journal_path(game_root);
   const auto recovery_path = recovery_journal_path(*vault);
-  auto journal_state = read_transaction_journal(journal);
+  auto selected_journal = journal;
+  auto journal_state = read_transaction_journal(selected_journal);
   if (journal_state.status == JournalReadStatus::missing) {
-    journal_state = read_transaction_journal(legacy_journal);
+    selected_journal = legacy_journal;
+    journal_state = read_transaction_journal(selected_journal);
   }
   if (journal_state.status == JournalReadStatus::missing) {
-    journal_state = read_transaction_journal(recovery_path);
+    selected_journal = recovery_path;
+    journal_state = read_transaction_journal(selected_journal);
   }
   if (journal_state.status == JournalReadStatus::corrupt) {
     return {ExitCode::recovery_failed, false,
@@ -514,7 +528,22 @@ struct SourceCandidateRestore {
       if (!recoverable_profile) {
         return {ExitCode::recovery_failed, false,
                 L"The pending runtime transaction uses an incompatible layout "
-                L"profile. Recovery was stopped before writing any file."};
+                L"profile. Recovery was stopped before writing any file."
+                L"\nJournal: " + quote_path(selected_journal) +
+                L"\nRecorded profile bytes (hex): " + profile_bytes(recorded_profile) +
+                L"; length=" + std::to_wstring(recorded_profile.size()) +
+                L"\nExpected profile: " + std::wstring(current_profile.begin(), current_profile.end()) +
+                L"\nLegacy name: " + std::wstring(legacy_name.begin(), legacy_name.end()) +
+                L"\nLegacy layout profile: " + std::wstring(legacy_current.begin(), legacy_current.end()) +
+                L"\nTransaction bytes (hex): " + profile_bytes(active_transaction_id) +
+                L"; records=" + std::to_wstring(journal_state.records.size()) +
+                L"; last-sequence=" + std::to_wstring(journal_state.records.back().sequence) +
+                L"; last-phase=" + std::to_wstring(static_cast<std::uint32_t>(journal_state.records.back().phase)) +
+                L"; torn-tail=" + std::to_wstring(journal_state.ignored_torn_tail) +
+                L"\nPatch plan: " + std::wstring(patch_plan_hash_utf8.begin(), patch_plan_hash_utf8.end()) +
+                L"; source-files=" + std::to_wstring(source_count) +
+                L"; target-files=" + std::to_wstring(target_count) +
+                L"; unknown-files=" + std::to_wstring(unknown_count)};
       }
       recovery_layout_rebound = !legacy_bound;
       if (recovery_layout_rebound && unknown_count != 0) {
@@ -710,8 +739,8 @@ struct SourceCandidateRestore {
         restored = fallback.success;
         if (restored) {
           backup_fallback_used = true;
-        } else if (reverse_patch_detail.empty()) {
-          reverse_patch_detail = fallback.detail;
+        } else {
+          reverse_patch_detail += L"\nFallback restore: " + fallback.detail;
         }
       }
       if (!restored) {
@@ -719,11 +748,9 @@ struct SourceCandidateRestore {
                 L"A source-runtime file could not be restored from its reverse patch or "
                 L"fallback backup: " + quote_path(managed.logical) +
                     managed_link_verification_detail(managed) +
-                    (rollback_restore
-                         ? L"\n\n" + mutation_failure_detail(*rollback_restore)
-                         : reverse_patch_detail.empty()
-                               ? L""
-                               : L"\n\n" + reverse_patch_detail)};
+                    (rollback_restore ? L"\n\nRollback restore: " +
+                                            mutation_failure_detail(*rollback_restore) : L"") +
+                    (reverse_patch_detail.empty() ? L"" : L"\n\n" + reverse_patch_detail)};
       }
 
       if (std::filesystem::is_regular_file(used_discarded) &&

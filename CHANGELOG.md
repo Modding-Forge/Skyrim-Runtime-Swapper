@@ -2,6 +2,22 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.3.3-rc3 - 2026-10-04
+
+- Reports rejected recovery journal profiles, their exact bytes, selected journal,
+  transaction, expected and legacy profiles, patch plan and observed file states.
+- Adds failure-only Windows file snapshots with read-only/reparse attributes,
+  hardlink count and identity, without additional content hashing or permission changes.
+- Distinguishes skipped post-replacement hash checks from hash failures and keeps
+  replacement diagnostics captured before rollback. Includes the RC2 diagnostics.
+
+## 1.3.3-rc2 - 2026-09-30
+
+- Preserves Windows error codes at failing replacement checks and reports the
+  operation, affected path, occupied rollback destinations and identity changes.
+- Reports fallback restore failures alongside the original recovery failure.
+- Adds regression coverage for locked files and occupied rollback destinations.
+
 ## 1.3.3-rc1 - 2026-09-23
 
 - Fixes Windows exFAT failures when preparing storage, hashing files and

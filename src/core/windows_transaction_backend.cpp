@@ -260,25 +260,67 @@ struct FileIdentity {
           info.nFileIndexLow};
 }
 
+// Failure-only snapshot; never follows a reparse point or modifies the file.
+[[nodiscard]] std::wstring file_snapshot(const std::filesystem::path& path) {
+  UniqueHandle handle(CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+      FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+  if (handle.get() == INVALID_HANDLE_VALUE) {
+    const DWORD code = GetLastError();
+    return L"; snapshot-open-error=" + std::to_wstring(code);
+  }
+  BY_HANDLE_FILE_INFORMATION info{};
+  if (!GetFileInformationByHandle(handle.get(), &info)) {
+    const DWORD code = GetLastError();
+    return L"; snapshot-info-error=" + std::to_wstring(code);
+  }
+  return L"; attributes=" + std::to_wstring(info.dwFileAttributes) +
+      L"; read-only=" + std::to_wstring((info.dwFileAttributes & FILE_ATTRIBUTE_READONLY) != 0) +
+      L"; reparse=" + std::to_wstring((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) +
+      L"; links=" + std::to_wstring(info.nNumberOfLinks) +
+      L"; volume=" + std::to_wstring(info.dwVolumeSerialNumber) +
+      L"; file-id=" + std::to_wstring((static_cast<std::uint64_t>(info.nFileIndexHigh) << 32U) | info.nFileIndexLow);
+}
+
 [[nodiscard]] UniqueHandle open_plain_file(const std::filesystem::path& path,
-                                           DWORD access) {
+                                           DWORD access,
+                                           MutationResult* diagnostic = nullptr) {
+  const auto fail = [&](const wchar_t* operation, DWORD code) -> UniqueHandle {
+    if (diagnostic) {
+      *diagnostic = MutationResult::failure(MutationStep::validate,
+          MutationState::untouched, std::error_code(static_cast<int>(code), std::system_category()),
+          std::wstring(operation) + L"; path=" + path.wstring() +
+          L"; requested-access=" + std::to_wstring(access) + file_snapshot(path));
+    }
+    return {};
+  };
   UniqueHandle handle(CreateFileW(
       path.c_str(), access,
       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
       OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
   FILE_BASIC_INFO attributes{};
-  if (!handle ||
-      !GetFileInformationByHandleEx(handle.get(), FileBasicInfo,
-                                    &attributes, sizeof(attributes)) ||
-      (attributes.FileAttributes &
+  if (handle.get() == INVALID_HANDLE_VALUE) return fail(L"CreateFileW(file)", GetLastError());
+  if (!GetFileInformationByHandleEx(handle.get(), FileBasicInfo,
+                                    &attributes, sizeof(attributes))) {
+    return fail(L"GetFileInformationByHandleEx(FileBasicInfo)", GetLastError());
+  }
+  if ((attributes.FileAttributes &
        (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
-    return {};
+    return fail(L"reject-non-regular-file", ERROR_INVALID_DATA);
   }
   return handle;
 }
 
 [[nodiscard]] UniqueHandle open_plain_directory(
-    const std::filesystem::path& path) {
+    const std::filesystem::path& path, MutationResult* diagnostic = nullptr) {
+  const auto fail = [&](const wchar_t* operation, DWORD code) -> UniqueHandle {
+    if (diagnostic) {
+      *diagnostic = MutationResult::failure(MutationStep::validate,
+          MutationState::untouched, std::error_code(static_cast<int>(code), std::system_category()),
+          std::wstring(operation) + L"; path=" + path.wstring() + file_snapshot(path));
+    }
+    return {};
+  };
   // Renames/deletions use DELETE on the individual file handles. Do not
   // require FILE_DELETE_CHILD, which normal directory Modify rights omit.
   UniqueHandle handle(CreateFileW(
@@ -287,12 +329,14 @@ struct FileIdentity {
       OPEN_EXISTING,
       FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
   FILE_BASIC_INFO attributes{};
-  if (!handle ||
-      !GetFileInformationByHandleEx(handle.get(), FileBasicInfo,
-                                    &attributes, sizeof(attributes)) ||
-      (attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+  if (handle.get() == INVALID_HANDLE_VALUE) return fail(L"CreateFileW(directory)", GetLastError());
+  if (!GetFileInformationByHandleEx(handle.get(), FileBasicInfo,
+                                    &attributes, sizeof(attributes))) {
+    return fail(L"GetFileInformationByHandleEx(FileBasicInfo)", GetLastError());
+  }
+  if ((attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
       (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-    return {};
+    return fail(L"reject-non-plain-directory", ERROR_INVALID_DATA);
   }
   return handle;
 }
@@ -484,31 +528,75 @@ class WindowsTransactionBackend final : public TransactionBackend {
     }
     std::error_code error;
     std::filesystem::create_directories(rollback.parent_path(), error);
-    if (error || path_has_unsupported_reparse_component(live) ||
-        path_has_unsupported_reparse_component(staged) ||
-        path_has_unsupported_reparse_component(rollback.parent_path()) ||
-        !same_volume(live, staged) || !same_volume(live, rollback)) {
-      return MutationResult::failure(MutationStep::validate,
-                                     MutationState::untouched);
+    const auto rejected = [&](const wchar_t* check, const std::filesystem::path& path,
+                              std::error_code code = {}) {
+      return MutationResult::failure(MutationStep::validate, MutationState::untouched,
+          code, std::wstring(check) + L"; path=" + path.wstring() +
+          L"; live=" + live.wstring() + L"; staged=" + staged.wstring() +
+          L"; rollback=" + rollback.wstring() + file_snapshot(path));
+    };
+    if (error) return rejected(L"create-rollback-directory", rollback.parent_path(), error);
+    for (const auto& path : {live, staged, rollback.parent_path()}) {
+      if (path_has_unsupported_reparse_component(path)) {
+        return rejected(L"unsafe-or-uninspectable-path", path);
+      }
     }
-    if (std::filesystem::exists(rollback, error) || error) {
-      return MutationResult::failure(MutationStep::validate,
-                                     MutationState::untouched);
+    for (const auto& path : {staged, rollback}) {
+      if (!same_volume(live, path)) return rejected(L"volume-check-failed", path);
     }
-    auto live_parent = open_plain_directory(live.parent_path());
-    auto staged_parent = open_plain_directory(staged.parent_path());
-    auto rollback_parent = open_plain_directory(rollback.parent_path());
-    auto live_file = open_plain_file(live, DELETE | GENERIC_READ | GENERIC_WRITE);
-    auto staged_file = open_plain_file(staged, DELETE | GENERIC_READ | GENERIC_WRITE);
-    if (!live_parent || !staged_parent || !rollback_parent || !live_file ||
-        !staged_file || !directory_matches_handle(live.parent_path(), live_parent.get()) ||
-        !directory_matches_handle(staged.parent_path(), staged_parent.get()) ||
-        !directory_matches_handle(rollback.parent_path(), rollback_parent.get()) ||
-        !entry_matches_handle(live, live_file.get()) ||
-        !entry_matches_handle(staged, staged_file.get()) ||
-        !FlushFileBuffers(staged_file.get())) {
-      return windows_failure(MutationStep::validate,
-                             MutationState::untouched);
+    const bool rollback_exists = std::filesystem::exists(rollback, error);
+    if (error) return rejected(L"inspect-rollback-destination", rollback, error);
+    if (rollback_exists) return rejected(L"rollback-destination-exists", rollback);
+    MutationResult diagnostic;
+    auto live_parent = open_plain_directory(live.parent_path(), &diagnostic);
+    if (!live_parent) return diagnostic;
+    auto staged_parent = open_plain_directory(staged.parent_path(), &diagnostic);
+    if (!staged_parent) return diagnostic;
+    auto rollback_parent = open_plain_directory(rollback.parent_path(), &diagnostic);
+    if (!rollback_parent) return diagnostic;
+    auto live_file = open_plain_file(live, DELETE | GENERIC_READ | GENERIC_WRITE, &diagnostic);
+    if (!live_file) return diagnostic;
+    auto staged_file = open_plain_file(staged, DELETE | GENERIC_READ | GENERIC_WRITE, &diagnostic);
+    if (!staged_file) return diagnostic;
+    const auto matches = [&](const std::filesystem::path& path, HANDLE held, bool directory) {
+      auto current = directory ? open_plain_directory(path, &diagnostic)
+                               : open_plain_file(path, FILE_READ_ATTRIBUTES, &diagnostic);
+      if (!current) return false;
+      const auto held_identity = identity_from_handle(held);
+      if (!held_identity) {
+        const DWORD code = GetLastError();
+        diagnostic = rejected(L"GetFileInformationByHandle(held)", path,
+            std::error_code(static_cast<int>(code), std::system_category()));
+        return false;
+      }
+      const auto current_identity = identity_from_handle(current.get());
+      if (!current_identity) {
+        const DWORD code = GetLastError();
+        diagnostic = rejected(L"GetFileInformationByHandle(current)", path,
+            std::error_code(static_cast<int>(code), std::system_category()));
+        return false;
+      }
+      if (*held_identity != *current_identity) {
+        diagnostic = rejected(L"file-identity-changed", path);
+        diagnostic.detail += L"; held-volume=" + std::to_wstring(held_identity->volume) +
+            L"; held-file=" + std::to_wstring(held_identity->file) +
+            L"; current-volume=" + std::to_wstring(current_identity->volume) +
+            L"; current-file=" + std::to_wstring(current_identity->file);
+        return false;
+      }
+      return true;
+    };
+    if (!matches(live.parent_path(), live_parent.get(), true) ||
+        !matches(staged.parent_path(), staged_parent.get(), true) ||
+        !matches(rollback.parent_path(), rollback_parent.get(), true) ||
+        !matches(live, live_file.get(), false) ||
+        !matches(staged, staged_file.get(), false)) {
+      return diagnostic;
+    }
+    if (!FlushFileBuffers(staged_file.get())) {
+      const DWORD code = GetLastError();
+      return rejected(L"FlushFileBuffers(staged)", staged,
+          std::error_code(static_cast<int>(code), std::system_category()));
     }
     (void)core::fault_injected("replace.after-resolve");
     if (!rename_open_file(live_file.get(), rollback_parent.get(),
@@ -526,10 +614,13 @@ class WindowsTransactionBackend final : public TransactionBackend {
     }
     if (!rename_open_file(staged_file.get(), live_parent.get(), live.filename(),
                           false)) {
+      const DWORD code = GetLastError();
       (void)rename_open_file(live_file.get(), live_parent.get(), live.filename(),
                              false);
-      return windows_failure(MutationStep::install_replacement,
-                             MutationState::source_relocated);
+      return MutationResult::failure(MutationStep::install_replacement,
+          MutationState::source_relocated,
+          std::error_code(static_cast<int>(code), std::system_category()),
+          L"rename-staged-to-live; staged=" + staged.wstring() + L"; live=" + live.wstring());
     }
     if (core::fault_injected("replace.after-rename")) {
       return MutationResult::failure(MutationStep::install_replacement,

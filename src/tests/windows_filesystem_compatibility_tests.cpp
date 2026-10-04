@@ -92,6 +92,36 @@ int main() {
               "separate recovery volume");
     }
     auto& backend = transaction_backend();
+    require(SetFileAttributesW(live.c_str(), FILE_ATTRIBUTE_READONLY) != FALSE,
+            "mark replacement input read-only");
+    const auto readonly = backend.atomic_replace(live, staged, rollback);
+    require(SetFileAttributesW(live.c_str(), FILE_ATTRIBUTE_NORMAL) != FALSE,
+            "reset replacement input attributes");
+    require(!readonly && readonly.error.value() == ERROR_ACCESS_DENIED &&
+                readonly.detail.find(L"read-only=1") != std::wstring::npos &&
+                readonly.detail.find(L"links=1") != std::wstring::npos &&
+                readonly.state == MutationState::untouched,
+            "identify read-only file without changing original error");
+    const HANDLE locked = CreateFileW(live.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    require(locked != INVALID_HANDLE_VALUE, "lock live fixture");
+    const auto blocked = backend.atomic_replace(live, staged, rollback);
+    CloseHandle(locked);
+    require(!blocked && blocked.step == MutationStep::validate &&
+                blocked.state == MutationState::untouched &&
+                blocked.error.value() == ERROR_SHARING_VIOLATION &&
+                blocked.detail.find(L"CreateFileW(file)") != std::wstring::npos &&
+                blocked.detail.find(live.wstring()) != std::wstring::npos,
+            "preserve exact sharing failure and path");
+    require(sha256_file(live) == original_hash && sha256_file(staged) == target_hash,
+            "blocked replace leaves files untouched");
+    { std::ofstream(rollback, std::ios::binary) << "occupied"; }
+    const auto occupied = backend.atomic_replace(live, staged, rollback);
+    require(!occupied && occupied.state == MutationState::untouched &&
+                occupied.detail.find(L"rollback-destination-exists") != std::wstring::npos &&
+                occupied.detail.find(rollback.wstring()) != std::wstring::npos,
+            "identify occupied rollback destination");
+    require(std::filesystem::remove(rollback), "remove occupied fixture");
     require(backend.copy_atomic(live, fixture.root / "copy.bin"), "copy file");
     require(sha256_file(fixture.root / "copy.bin") == original_hash, "verify copy");
     require(backend.atomic_replace(live, staged, rollback), "replace file");

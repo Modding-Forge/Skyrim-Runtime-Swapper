@@ -447,7 +447,11 @@ DowngradeResult transform_runtime(const std::filesystem::path& game_root,
                     managed_link_verification_detail(item.managed) +
                     (!layout_matches || installed
                          ? L""
-                         : L"\n" + mutation_failure_detail(installed))};
+                         : L"\nPost-replacement hash check: not attempted (backend operation failed)."
+                           L"\nReplacement paths: live=" + quote_path(item.managed.effective) +
+                           L"; staged=" + quote_path(item.staged) +
+                           L"; rollback=" + quote_path(item.rollback) +
+                           L"\n" + mutation_failure_detail(installed))};
       }
       replaced_records.push_back(
           {JournalPhase::replaced, static_cast<std::uint32_t>(item.index),
