@@ -2,6 +2,18 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.4.0-rc3 - 2026-10-04
+
+- Allows a fully verified Skyrim 1.7.104 installation to retire stale recovery
+  metadata after switching packages, including normal BoAW to BoAW Cleaned.
+  Verifies the union of current and previous managed files against embedded
+  source hashes, required presence, sizes and safe link mappings.
+- Recovers Creation Club and ContentCatalog before retiring runtime state.
+  Keeps non-source recovery contents in a verified, content-addressed archive;
+  installation locking, volume identities and persistent-mode consent remain required.
+- Separates supplemental vault access from runtime-profile selection, so an old
+  optional-file selection cannot prevent recovery of unrelated content.
+
 ## 1.4.0-rc2 - 2026-10-04
 
 - Diagnoses Windows sharing violations before rollback: records requested access,

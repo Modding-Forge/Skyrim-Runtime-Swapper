@@ -70,6 +70,10 @@ void check_clean() {
 }
 
 namespace runtime_swapper {
+namespace app {
+std::optional<InstallationOperationResult> reconcile_source_storage(
+    const std::filesystem::path&, const BackendProbeResult&) { return std::nullopt; }
+}
 RecoveryMetadataReadResult read_recovery_metadata(const std::filesystem::path&, std::string_view name) {
   require(name == app::restore_intent_name, "intent name");
   if (store.metadata_unavailable) return {RecoveryMetadataStatus::unavailable, {}};

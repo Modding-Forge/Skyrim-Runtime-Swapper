@@ -198,6 +198,21 @@ struct PersistentFlags {
 std::optional<VaultLayout> resolve_vault_layout(
     const std::filesystem::path& game_root, std::uint64_t required_bytes,
     std::wstring* error_message, bool prepare_vault) {
+  auto result = resolve_vault_storage(game_root, required_bytes, error_message, prepare_vault);
+  if (!result) return std::nullopt;
+  result->runtime_layout = detect_runtime_layout(game_root, error_message);
+  if (result->runtime_layout == RuntimeLayout::invalid) {
+    if (error_message != nullptr && error_message->empty()) {
+      *error_message = L"The managed runtime layout could not be inspected safely.";
+    }
+    return std::nullopt;
+  }
+  return result;
+}
+
+std::optional<VaultLayout> resolve_vault_storage(
+    const std::filesystem::path& game_root, std::uint64_t required_bytes,
+    std::wstring* error_message, bool prepare_vault) {
   auto probe = probe_prepared_storage(game_root, required_bytes, prepare_vault);
   if (!probe.success()) {
     if (error_message != nullptr) *error_message = probe.message;
@@ -205,13 +220,7 @@ std::optional<VaultLayout> resolve_vault_layout(
   }
   VaultLayout result;
   result.probe = std::move(probe);
-  result.runtime_layout = detect_runtime_layout(game_root, error_message);
-  if (result.runtime_layout == RuntimeLayout::invalid) {
-    if (error_message != nullptr && error_message->empty()) {
-      *error_message = L"The managed runtime layout could not be inspected safely.";
-    }
-    return std::nullopt;
-  }
+  result.runtime_layout = RuntimeLayout::invalid;
   result.objects = result.probe.vault_path / L"objects";
   result.transactions = result.probe.vault_path / L"transactions";
   result.conflicts = result.probe.vault_path / L"conflicts";

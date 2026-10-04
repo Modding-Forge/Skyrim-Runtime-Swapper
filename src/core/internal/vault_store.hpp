@@ -29,6 +29,11 @@ struct TargetCacheLayout {
 
 enum class PersistentMarkerState { inactive, active, invalid };
 
+// Supplemental recovery objects do not depend on the selected runtime profile.
+[[nodiscard]] std::optional<VaultLayout> resolve_vault_storage(
+    const std::filesystem::path& game_root, std::uint64_t required_bytes = 0,
+    std::wstring* error_message = nullptr, bool prepare_vault = true);
+
 [[nodiscard]] std::optional<VaultLayout> resolve_vault_layout(
     const std::filesystem::path& game_root, std::uint64_t required_bytes = 0,
     std::wstring* error_message = nullptr, bool prepare_vault = true);

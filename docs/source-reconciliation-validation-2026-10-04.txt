@@ -1,0 +1,43 @@
+1.4.0-rc3: verified-source recovery reconciliation
+
+Scope
+- Retirement is performed under the existing installation lock, before new
+  runtime activation. Persistent-only storage still requires consent.
+- A recognized prior manifest must identify this installation and both current
+  volumes. Its source paths/hashes/sizes must match the embedded source catalog.
+- Both profiles' files are checked, including prior BoAW masters when the new
+  package is BoBW. Required absence and safe final-link mappings are checked.
+- Creation Club and ContentCatalog recover using the profile-independent vault
+  object/metadata resolver. Remaining supplemental metadata prevents retirement.
+- Source files and directories are synchronized before original backups retire.
+- Non-source recovery files are copied and verified in source-state-archive,
+  outside active/work storage, with content-addressed provenance inventories.
+  These archives are not automatically deleted. The old manifest is removed last.
+- Unknown, unreadable or incomplete manifests do not authorize this shortcut;
+  normal recovery remains responsible for those states.
+
+Passed locally
+- Windows: source_recovery_tests, recovery_selection_tests,
+  prepared_storage_tests, storage_restore_tests, content_catalog_tests,
+  creation_club_tests (6/6).
+- Ubuntu 22.04 under WSL: the same six targeted test groups, using the POSIX
+  ContentCatalog and Creation Club tests (6/6).
+- New retirement tests cover pending supplemental metadata, changed live source,
+  unknown-file preservation, source presence/absence, manifest identity/hash/path
+  rejection, interruption after archive and during deletion, and retry cleanup.
+- Isolated Windows real-file fixture: normal BoAW manifest and obsolete journal/
+  persistent marker -> Cleaned source reconciliation -> downgrade -> source restore.
+- Isolated Linux real-file fixture: normal BoAW manifest and obsolete journal/
+  persistent marker -> Cleaned native prepare_launch over the production sidecar
+  protocol -> successful restore_persistent. No real game installation was used.
+- All seven release variants compiled. Windows version resources and embedded
+  sidecar hashes checked; all 14 PE hardening checks passed. All seven native
+  ELF ABI/hardening checks passed with the existing Ubuntu 22.04 build baseline.
+- All seven 7z packages passed extraction/file-hash verification and the final
+  SHA256SUMS.txt check. Final local package set: dist/builds/1.4.0-rc3/20261004-214422.
+
+Limits
+- This is targeted RC validation, not a rerun of the full release matrix.
+- No new physical unplug, Amethyst VFS, or end-user reproduction is claimed.
+- Same-user external tools must not modify the installation during an operation;
+  identity/hash changes detected at the existing boundaries remain fail-closed.

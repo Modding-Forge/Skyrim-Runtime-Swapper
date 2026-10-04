@@ -55,7 +55,7 @@ DowngradeResult commit_persistent_runtime(const std::filesystem::path& game_root
 bool preserve_recovery_conflict(const std::filesystem::path& game_root,
                                 const std::filesystem::path& live,
                                 std::string_view transaction_id) {
-  const auto vault = core::resolve_vault_layout(game_root);
+  const auto vault = core::resolve_vault_storage(game_root);
   return vault && core::preserve_conflict(*vault, live, transaction_id);
 }
 

@@ -13,9 +13,11 @@ using detail::elapsed_milliseconds;
 using detail::failure;
 using detail::SteadyClock;
 
+
 [[nodiscard]] InstallationOperationResult
 finish_restore(const std::filesystem::path &game_root,
                BackendProbeResult backend) {
+  if (auto reconciled = reconcile_source_storage(game_root, backend)) return *reconciled;
   // The caller holds the installation lock. Never trust a GUI snapshot from
   // before another process completed a restore.
   const auto stored_intent = read_recovery_metadata(game_root, restore_intent_name);

@@ -5,7 +5,7 @@ project(SkyrimRuntimeSwapper VERSION 1.4.0 LANGUAGES C CXX)
 option(SKYRIM_RUNTIME_BUILD_FUZZER
   "Build the Linux libFuzzer target for the handle-bound HDiffPatch adapter" OFF)
 
-set(SKYRIM_RUNTIME_RELEASE_VERSION "1.4.0-rc2")
+set(SKYRIM_RUNTIME_RELEASE_VERSION "1.4.0-rc3")
 if(SKYRIM_RUNTIME_RELEASE_VERSION MATCHES "-")
   set(SKYRIM_RUNTIME_VERSION_FLAGS "VS_FF_PRERELEASE")
 else()
@@ -301,6 +301,8 @@ add_library(runtime_swapper_core STATIC
   src/core/fault_injection.cpp
   src/core/hdiff_patch.cpp
   src/core/legacy_storage_cleanup.cpp
+  src/core/source_recovery.cpp
+  src/core/source_recovery_cleanup.cpp
   src/core/path_presentation.cpp
   src/core/persistent_runtime.cpp
   src/core/progress.cpp
@@ -379,6 +381,14 @@ if(BUILD_TESTING)
   endif()
 
   add_executable(recovery_selection_tests src/tests/recovery_selection_tests.cpp)
+  add_executable(source_recovery_tests src/tests/source_recovery_tests.cpp)
+  add_executable(source_recovery_probe src/tests/source_recovery_probe.cpp)
+  target_include_directories(source_recovery_probe PRIVATE src/core)
+  target_link_libraries(source_recovery_probe PRIVATE runtime_swapper_core)
+  target_include_directories(source_recovery_tests PRIVATE src/core)
+  target_link_libraries(source_recovery_tests PRIVATE runtime_swapper_core)
+  srs_harden_compile(source_recovery_tests)
+  add_test(NAME source_recovery_tests COMMAND source_recovery_tests)
   target_include_directories(recovery_selection_tests PRIVATE src/core)
   target_link_libraries(recovery_selection_tests PRIVATE runtime_swapper_core)
   srs_harden_compile(recovery_selection_tests)
@@ -484,6 +494,7 @@ add_executable(runtime_swapper_helper WIN32
   src/app/session.cpp
   src/app/storage_access_repair.cpp
   src/app/storage_operations.cpp
+  src/app/source_recovery.cpp
   src/app/storage_restore.cpp
   src/app/wine_sidecar.cpp
   src/app/wine_sidecar_protocol.cpp
@@ -806,6 +817,7 @@ else()
     src/app/creation_club_inventory.cpp
     src/app/fixed_runtime.cpp
     src/app/storage_operations.cpp
+    src/app/source_recovery.cpp
     src/app/storage_restore.cpp
   )
   target_include_directories(runtime_swapper_native BEFORE PRIVATE

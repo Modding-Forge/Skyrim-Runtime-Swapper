@@ -335,15 +335,8 @@ int run(int argc, wchar_t** argv) {
   if (!wine) {
     const auto persistent_state =
         inspect_persistent_runtime(*options.game_root, nullptr, nullptr, false);
-    if (persistent_state == PersistentRuntimeState::invalid) {
-      mutex_lock.unlock();
-      return finish(ExitCode::journal_corrupt,
-                    L"The persistent recovery markers are inconsistent. Skyrim was not "
-                    L"started.",
-                    MB_ICONERROR, options.quiet);
-    }
     if (probe.mode != SafetyMode::automatic &&
-        persistent_state == PersistentRuntimeState::inactive) {
+        persistent_state != PersistentRuntimeState::active) {
       if (options.quiet || show_persistent_downgrade_dialog(*options.game_root, probe) !=
                                PersistentDialogChoice::accepted) {
         mutex_lock.unlock();

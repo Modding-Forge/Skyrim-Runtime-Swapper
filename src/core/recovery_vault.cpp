@@ -65,14 +65,14 @@ fresh_metadata_path(const std::filesystem::path& game_root,
 bool commit_recovery_file(const std::filesystem::path& game_root,
                           const std::filesystem::path& source,
                           std::string_view sha256, std::uint64_t expected_size) {
-  const auto vault = core::resolve_vault_layout(game_root, expected_size);
+  const auto vault = core::resolve_vault_storage(game_root, expected_size);
   return vault && core::commit_vault_object(*vault, source, sha256, expected_size);
 }
 
 bool restore_recovery_file(const std::filesystem::path& game_root,
                            std::string_view sha256, std::uint64_t expected_size,
                            const std::filesystem::path& destination) {
-  const auto vault = core::resolve_vault_layout(game_root);
+  const auto vault = core::resolve_vault_storage(game_root);
   return vault &&
          core::restore_vault_object(*vault, sha256, expected_size, destination);
 }
@@ -80,7 +80,7 @@ bool restore_recovery_file(const std::filesystem::path& game_root,
 bool recovery_file_available(const std::filesystem::path& game_root,
                              std::string_view sha256,
                              std::uint64_t expected_size) {
-  const auto vault = core::resolve_vault_layout(game_root);
+  const auto vault = core::resolve_vault_storage(game_root);
   return vault && core::vault_object_matches(*vault, sha256, expected_size);
 }
 
@@ -94,7 +94,7 @@ MutationResult write_recovery_metadata_result(
         L"metadata-name=" + wide_ascii(name) + L"; invalid metadata name");
   }
   std::wstring vault_error;
-  const auto vault = core::resolve_vault_layout(game_root, 0, &vault_error);
+  const auto vault = core::resolve_vault_storage(game_root, 0, &vault_error);
   std::filesystem::path path;
   bool fresh_vault = false;
   if (vault) {
@@ -127,7 +127,7 @@ RecoveryMetadataReadResult read_recovery_metadata(
   if (!valid_name(name)) {
     return {RecoveryMetadataStatus::invalid_entry, {}};
   }
-  const auto vault = core::resolve_vault_layout(game_root);
+  const auto vault = core::resolve_vault_storage(game_root);
   const auto path = vault ? std::optional(metadata_path(*vault, name))
                           : fresh_metadata_path(game_root, name);
   if (!path) return {RecoveryMetadataStatus::unavailable, {}};
@@ -151,7 +151,7 @@ RecoveryMetadataReadResult read_recovery_metadata(
 bool remove_recovery_metadata(const std::filesystem::path& game_root,
                               std::string_view name) {
   if (!valid_name(name)) return false;
-  const auto vault = core::resolve_vault_layout(game_root);
+  const auto vault = core::resolve_vault_storage(game_root);
   const auto path = vault ? std::optional(metadata_path(*vault, name))
                           : fresh_metadata_path(game_root, name);
   if (!path) return false;

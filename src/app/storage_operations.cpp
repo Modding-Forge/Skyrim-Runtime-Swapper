@@ -390,23 +390,17 @@ prepare_launch(const std::filesystem::path &game_root, bool allow_persistent,
   if (!initial.success())
     return initial;
 
-  const auto persistent =
+  auto persistent =
       inspect_persistent_runtime(game_root, nullptr, nullptr, false);
-  if (persistent == PersistentRuntimeState::invalid) {
-    return failure(
-        ExitCode::journal_corrupt, std::move(initial.backend),
-        L"The persistent recovery markers are inconsistent. Skyrim was not "
-        L"started.");
-  }
   const bool needs_consent = initial.backend.mode != SafetyMode::automatic &&
-                             persistent == PersistentRuntimeState::inactive;
+                             persistent != PersistentRuntimeState::active;
   if (needs_consent && !allow_persistent) {
     initial.code = ExitCode::user_cancelled;
     initial.message = L"A persistent downgrade requires active confirmation.";
     return initial;
   }
   if (initial.backend.mode == SafetyMode::persistent_with_warning &&
-      persistent == PersistentRuntimeState::inactive && !risk_accepted) {
+      persistent != PersistentRuntimeState::active && !risk_accepted) {
     return failure(
         ExitCode::invalid_arguments, std::move(initial.backend),
         L"This unclassified filesystem requires active confirmation.");
@@ -435,10 +429,21 @@ prepare_launch(const std::filesystem::path &game_root, bool allow_persistent,
                    L"being prepared. No managed file was changed.");
   }
   PreparedStorageScope prepared_scope(*context);
-  return initial.backend.mode == SafetyMode::automatic &&
+  const auto reconciled = reconcile_source_storage(game_root, initial.backend);
+  if (reconciled && !reconciled->success()) return *reconciled;
+  if (reconciled) persistent = PersistentRuntimeState::inactive;
+  if (persistent == PersistentRuntimeState::invalid) {
+    return failure(ExitCode::journal_corrupt, initial.backend,
+        L"The prior recovery state does not match this package and a complete Skyrim "
+        L"1.7.104 source state could not be verified. Recovery data was retained. "
+        L"Restore using the original package or verify this installation with Steam.");
+  }
+  auto result = initial.backend.mode == SafetyMode::automatic &&
                  persistent == PersistentRuntimeState::inactive
              ? activate_session_target(game_root)
              : activate_persistent_target(game_root, risk_accepted);
+  if (reconciled) result.message = reconciled->message + L"\n" + result.message;
+  return result;
 }
 
 InstallationOperationResult
@@ -450,6 +455,10 @@ recover_installation(const std::filesystem::path &game_root,
   if (!probed.success())
     return probed;
   auto backend = std::move(probed.backend);
+
+  if (auto reconciled = reconcile_source_storage(game_root, backend)) {
+    if (!reconciled->success() || !retain_recovery_storage) return *reconciled;
+  }
 
   const auto restore_intent_state =
       read_recovery_metadata(game_root, restore_intent_name);
