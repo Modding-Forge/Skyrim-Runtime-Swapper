@@ -1,6 +1,6 @@
 #include "internal/posix_storage_probe.hpp"
 #include "internal/storage_probe_common.hpp"
-#include "internal/storage_policy.hpp"
+#include "internal/storage_probe.hpp"
 
 #include <runtime_swapper/checked_arithmetic.hpp>
 #include <runtime_swapper/sha256.hpp>
@@ -364,6 +364,62 @@ struct MountEntry {
   return hash ? std::optional("skyrimse-" + hash->substr(0, 16)) : std::nullopt;
 }
 
+class PosixProbePlatform final : public StorageProbePlatform {
+ public:
+  PosixProbePlatform(TransactionBackend& backend,
+                     std::optional<std::filesystem::path> state_anchor, bool local)
+      : StorageProbePlatform(backend, PathSyntax::posix),
+        state_anchor_(std::move(state_anchor)), local_(local) {}
+
+  std::optional<VolumeIdentity> volume_at(const std::filesystem::path& path) override {
+    return inspect_volume(path);
+  }
+  std::optional<std::filesystem::path> existing_ancestor(
+      const std::filesystem::path& path) override {
+    return posix_existing_directory_ancestor(path);
+  }
+  bool has_space(const std::filesystem::path& path, std::uint64_t required) override {
+    return has_available_space(path, required);
+  }
+  std::optional<BackendProbeResult> check_existing(
+      const StorageProbeContext& context, const VolumeIdentity& vault,
+      bool exists, bool) override {
+    if (exists && !private_directory(context.recovery_vault.value)) {
+      return context.failure(L"vault-owner-or-mode",
+          L"The vault is not owned by the current user with mode 0700.", vault);
+    }
+    return std::nullopt;
+  }
+  std::optional<BackendProbeResult> prepare_directory(
+      const StorageProbeContext& context, const VolumeIdentity&) override {
+    const auto secure_anchor = context.recovery_base.parent_path();
+    const auto& path = context.recovery_vault.value;
+    // Only resolver-owned descendants are private. Never chmod Steam,
+    // XDG_STATE_HOME, or the shared modding-forge parent.
+    if ((!local_ && (!state_anchor_ ||
+         !posix_ensure_directory_hierarchy(*state_anchor_, secure_anchor, false))) ||
+        !posix_secure_private_hierarchy(secure_anchor, path) ||
+        !managed_path_is_safe(path)) {
+      return context.failure(L"vault-create-failed",
+          L"The automatic vault could not be created with mode 0700.");
+    }
+    if (!private_directory(path)) {
+      return context.failure(L"vault-owner-or-mode",
+          L"The vault is not owned by the current user with mode 0700.");
+    }
+    return std::nullopt;
+  }
+
+ private:
+  static bool private_directory(const std::filesystem::path& path) {
+    struct stat status {};
+    return ::lstat(path.c_str(), &status) == 0 && S_ISDIR(status.st_mode) &&
+           status.st_uid == ::geteuid() && (status.st_mode & 0777U) == 0700U;
+  }
+  std::optional<std::filesystem::path> state_anchor_;
+  bool local_;
+};
+
 }  // namespace
 
 std::optional<std::uint64_t> posix_mount_id(
@@ -498,176 +554,10 @@ BackendProbeResult probe_posix_storage(
                      L"The state directory is not owned and controlled by the current "
                      L"user.", *target, {}, vault_path, *id);
     }
-    const auto workspace_locator =
-        target_storage_base / "work" / *id / "vault.locator";
-    const auto legacy_locator =
-        absolute / ".skyrim-runtime-swapper" / "vault.locator";
-    auto locator = workspace_locator;
-    auto locator_status = std::filesystem::symlink_status(locator, error);
-    if (error == std::errc::no_such_file_or_directory) {
-      error.clear();
-      const auto legacy_status =
-          std::filesystem::symlink_status(legacy_locator, error);
-      if (!error && std::filesystem::exists(legacy_status)) {
-        locator = legacy_locator;
-        locator_status = legacy_status;
-      }
-    }
-    const bool locator_exists = !error && std::filesystem::exists(locator_status);
-    if (error && error != std::errc::no_such_file_or_directory) {
-      return blocked(L"vault-locator-unreadable",
-                     L"The active recovery-vault locator could not be inspected.",
-                     *target, {}, vault_path, *id);
-    }
-    std::optional<std::filesystem::path> recorded_vault;
-    if (locator_exists) {
-      recorded_vault = locator_vault_path(locator, *id);
-      const auto& recorded = recorded_vault;
-      if (recorded) {
-        if (!managed_path_is_safe(recorded->parent_path())) {
-          return blocked(L"active-vault-locator-invalid",
-                         L"The active recovery-vault locator is invalid.",
-                         *target, {}, vault_path, *id);
-        }
-        vault_path = *recorded;
-      }
-    }
-    error.clear();
-    const bool vault_exists = std::filesystem::is_directory(vault_path, error) && !error;
-    if (recorded_vault && !vault_exists) {
-      return blocked(L"active-vault-directory-missing",
-                     L"The recorded recovery-vault directory is missing.",
-                     *target, {}, vault_path, *id);
-    }
-    if (recorded_vault &&
-        !std::filesystem::is_regular_file(vault_path / "manifest.v2", error)) {
-      return blocked(L"active-vault-manifest-missing",
-                     L"The recorded recovery-vault manifest is missing.",
-                     *target, {}, vault_path, *id);
-    }
-    error.clear();
-    if (!managed_path_is_safe(vault_path.parent_path())) {
-      return blocked(L"vault-parent-symlink",
-                     L"The automatic vault path contains a symbolic link.", *target, {},
-                     vault_path, *id);
-    }
-    const auto vault_anchor = vault_exists
-                                  ? std::optional(vault_path)
-                                  : posix_existing_directory_ancestor(storage_base);
-    auto vault = vault_anchor ? inspect_volume(*vault_anchor) : std::nullopt;
-    const bool locator_matches_vault =
-        locator_exists && std::filesystem::is_regular_file(locator_status) &&
-        vault_exists && vault && locator_matches(locator, *id, vault_path, *vault);
-    const bool locator_recoverable =
-        locator_exists && std::filesystem::is_regular_file(locator_status) &&
-        vault_exists && vault && !locator_matches_vault &&
-        vault_manifest_identity_matches(vault_path, *id, *target, *vault);
-    if (locator_exists && !locator_matches_vault && !locator_recoverable) {
-      return blocked(L"active-vault-unavailable",
-                     L"The recorded recovery vault is missing, changed, or unavailable. "
-                     L"The pending installation will not be redirected to a new vault.",
-                     *target, {}, vault_path, *id);
-    }
-    if (!vault || !recovery_volume_is_eligible(*vault)) {
-      return blocked(L"vault-volume-not-durable",
-                     L"The recovery vault is not on an internal ext4, XFS, or Btrfs "
-                     L"volume.", *target, vault.value_or(VolumeIdentity{}), vault_path, *id);
-    }
-    const auto required_capacity = required_vault_capacity(required_vault_bytes);
-    if (!vault_anchor || !required_capacity ||
-        !has_available_space(*vault_anchor, *required_capacity)) {
-      return blocked(L"vault-insufficient-space",
-                     L"The recovery vault does not have enough free space.", *target,
-                     *vault, vault_path, *id);
-    }
-    const auto candidate_mode = classify_storage(
-        *target, *vault, target->stable_id != vault->stable_id);
-    if (candidate_mode == SafetyMode::hard_blocked) {
-      return blocked(L"independent-vault-required",
-                     L"This target requires a vault on a different durable volume.",
-                     *target, *vault, vault_path, *id);
-    }
-
-    struct stat vault_status {};
-    if (vault_exists &&
-        (::lstat(vault_path.c_str(), &vault_status) != 0 ||
-         !S_ISDIR(vault_status.st_mode) || vault_status.st_uid != ::geteuid() ||
-         (vault_status.st_mode & 0777U) != 0700U)) {
-      return blocked(L"vault-owner-or-mode",
-                     L"The vault is not owned by the current user with mode 0700.",
-                     *target, *vault, vault_path, *id);
-    }
-    if (!prepare_vault) {
-      return attach_storage_paths({ExitCode::success, candidate_mode, *target, *vault, vault_path, *id,
-              safety_mode_label(candidate_mode) + L": " + target->description,
-              candidate_mode == SafetyMode::automatic
-                  ? L"native-session-durability"
-                  : L"persistent-recovery-required",
-              candidate_mode == SafetyMode::automatic
-                  ? L"Native filesystem durability supports automatic restoration."
-                  : L"Verified persistent recovery is required for this target.",
-              allowed_storage_operations(candidate_mode)}, storage_base,
-              target_storage_base, *id);
-    }
-
-    // Only the resolver-owned storage root and its descendants are private.
-    // Steam, XDG_STATE_HOME, and a shared "modding-forge" parent are validated
-    // but never chmodded.
-    const auto secure_anchor = storage_base.parent_path();
-    if ((!local_base &&
-         (!state_anchor ||
-          !posix_ensure_directory_hierarchy(*state_anchor, secure_anchor,
-                                            false))) ||
-        !posix_secure_private_hierarchy(secure_anchor, vault_path) ||
-        !managed_path_is_safe(vault_path)) {
-      return blocked(L"vault-create-failed",
-                     L"The automatic vault could not be created with mode 0700.", *target,
-                     {}, vault_path, *id);
-    }
-    if (::lstat(vault_path.c_str(), &vault_status) != 0 ||
-        !S_ISDIR(vault_status.st_mode) || vault_status.st_uid != ::geteuid() ||
-        (vault_status.st_mode & 0777U) != 0700U) {
-      return blocked(L"vault-owner-or-mode",
-                     L"The vault is not owned by the current user with mode 0700.",
-                     *target, {}, vault_path, *id);
-    }
-    vault = inspect_volume(vault_path);
-    if (!vault || !recovery_volume_is_eligible(*vault)) {
-      return blocked(L"vault-volume-not-durable",
-                     L"The recovery vault is not on an internal ext4, XFS, or Btrfs "
-                     L"volume.", *target, vault.value_or(VolumeIdentity{}), vault_path, *id);
-    }
-    if (!required_capacity ||
-        !has_available_space(vault_path, *required_capacity)) {
-      return blocked(L"vault-insufficient-space",
-                     L"The recovery vault does not have enough free space.", *target,
-                     *vault, vault_path, *id);
-    }
-    const auto mode = classify_storage(*target, *vault,
-                                       target->stable_id != vault->stable_id);
-    if (mode == SafetyMode::hard_blocked) {
-      return blocked(L"independent-vault-required",
-                     L"This target requires a vault on a different durable volume.",
-                     *target, *vault, vault_path, *id);
-    }
-    if ((locator_recoverable ||
-         (locator_exists && locator != workspace_locator)) &&
-        (!backend.write_atomic(workspace_locator,
-                       locator_contents(*id, vault_path, *vault)) ||
-         !locator_matches(workspace_locator, *id, vault_path, *vault))) {
-      return blocked(L"vault-locator-repair-failed",
-                     L"The verified recovery vault was found, but its damaged locator "
-                     L"could not be repaired.", *target, *vault, vault_path, *id);
-    }
-    return attach_storage_paths({ExitCode::success, mode, *target, *vault, vault_path, *id,
-            safety_mode_label(mode) + L": " + target->description,
-            mode == SafetyMode::automatic ? L"native-session-durability"
-                                          : L"persistent-recovery-required",
-            mode == SafetyMode::automatic
-                ? L"Native filesystem durability supports automatic restoration."
-                : L"Verified persistent recovery is required for this target.",
-            allowed_storage_operations(mode)}, storage_base,
-            target_storage_base, *id);
+    PosixProbePlatform platform(backend, state_anchor, local_base.has_value());
+    return probe_recovery_storage(
+        {absolute, *target, *id, storage_base, target_storage_base, {vault_path}},
+        platform, required_vault_bytes, prepare_vault);
   }
 
 }  // namespace runtime_swapper
