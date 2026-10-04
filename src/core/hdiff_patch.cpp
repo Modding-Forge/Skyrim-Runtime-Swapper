@@ -5,6 +5,7 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#include "internal/windows_file_diagnostics.hpp"
 #else
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -64,16 +65,19 @@ namespace {
 class NativeFile {
  public:
   NativeFile() = default;
-  explicit NativeFile(HANDLE value) noexcept : value_(value) {}
+  NativeFile(HANDLE value, const std::filesystem::path& path, DWORD access,
+             DWORD sharing, const wchar_t* owner) noexcept : value_(value) {
+    core::track_file_handle(value_, path, access, sharing, owner);
+  }
   ~NativeFile() {
-    if (valid()) CloseHandle(value_);
+    close();
   }
   NativeFile(const NativeFile&) = delete;
   NativeFile& operator=(const NativeFile&) = delete;
   NativeFile(NativeFile&& other) noexcept : value_(other.release()) {}
   NativeFile& operator=(NativeFile&& other) noexcept {
     if (this != &other) {
-      if (valid()) CloseHandle(value_);
+      close();
       value_ = other.release();
     }
     return *this;
@@ -88,6 +92,12 @@ class NativeFile {
   }
 
  private:
+  void close() noexcept {
+    if (valid()) {
+      core::untrack_file_handle(value_);
+      CloseHandle(value_);
+    }
+  }
   [[nodiscard]] HANDLE release() noexcept {
     const auto value = value_;
     value_ = INVALID_HANDLE_VALUE;
@@ -119,7 +129,7 @@ struct FileIdentity {
   NativeFile result(CreateFileW(
       path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
-      nullptr));
+      nullptr), path, GENERIC_READ, FILE_SHARE_READ, L"hdiffpatch-input");
   return result.valid() && identity(result.get()) ? std::move(result)
                                                    : NativeFile{};
 }
@@ -129,14 +139,15 @@ struct FileIdentity {
       path.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE, 0, nullptr,
       CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT |
                       FILE_FLAG_WRITE_THROUGH,
-      nullptr));
+      nullptr), path, GENERIC_READ | GENERIC_WRITE | DELETE, 0, L"hdiffpatch-output");
 }
 
 [[nodiscard]] bool path_matches(const std::filesystem::path& path,
                                 HANDLE held) {
   NativeFile current(CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
                                  FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                                 FILE_ATTRIBUTE_NORMAL, nullptr));
+                                 FILE_ATTRIBUTE_NORMAL, nullptr), path,
+                      FILE_READ_ATTRIBUTES, FILE_SHARE_READ, L"hdiffpatch-identity-check");
   const auto held_identity = identity(held);
   const auto current_identity = current.valid() ? identity(current.get())
                                                 : std::nullopt;

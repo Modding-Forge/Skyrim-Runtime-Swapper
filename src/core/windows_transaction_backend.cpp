@@ -4,6 +4,7 @@
 #include <runtime_swapper/release_version.hpp>
 
 #include "internal/fault_injection.hpp"
+#include "internal/windows_file_diagnostics.hpp"
 #include "internal/windows_storage_probe.hpp"
 
 #include <windows.h>
@@ -67,6 +68,7 @@ struct LocalFreeDeleter {
 struct HandleCloser {
   void operator()(void* value) const noexcept {
     if (value != nullptr && value != INVALID_HANDLE_VALUE) {
+      core::untrack_file_handle(static_cast<HANDLE>(value));
       CloseHandle(static_cast<HANDLE>(value));
     }
   }
@@ -280,6 +282,10 @@ struct FileIdentity {
           MutationState::untouched, std::error_code(static_cast<int>(code), std::system_category()),
           std::wstring(operation) + L"; path=" + path.wstring() +
           L"; requested-access=" + std::to_wstring(access) + file_snapshot(path));
+      if (code == ERROR_SHARING_VIOLATION || code == ERROR_LOCK_VIOLATION) {
+        diagnostic->detail += core::file_lock_diagnostics(
+            path, access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+      }
     }
     return {};
   };
@@ -289,6 +295,8 @@ struct FileIdentity {
       OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
   FILE_BASIC_INFO attributes{};
   if (handle.get() == INVALID_HANDLE_VALUE) return fail(L"CreateFileW(file)", GetLastError());
+  core::track_file_handle(handle.get(), path, access,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, L"backend-file");
   if (!GetFileInformationByHandleEx(handle.get(), FileBasicInfo,
                                     &attributes, sizeof(attributes))) {
     return fail(L"GetFileInformationByHandleEx(FileBasicInfo)", GetLastError());

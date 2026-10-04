@@ -5,7 +5,7 @@ project(SkyrimRuntimeSwapper VERSION 1.4.0 LANGUAGES C CXX)
 option(SKYRIM_RUNTIME_BUILD_FUZZER
   "Build the Linux libFuzzer target for the handle-bound HDiffPatch adapter" OFF)
 
-set(SKYRIM_RUNTIME_RELEASE_VERSION "1.4.0-rc1")
+set(SKYRIM_RUNTIME_RELEASE_VERSION "1.4.0-rc2")
 if(SKYRIM_RUNTIME_RELEASE_VERSION MATCHES "-")
   set(SKYRIM_RUNTIME_VERSION_FLAGS "VS_FF_PRERELEASE")
 else()
@@ -281,6 +281,7 @@ if(WIN32)
   set(RUNTIME_SWAPPER_PLATFORM_SOURCES
     src/core/sha256.cpp
     src/core/windows_transaction_backend.cpp
+    src/core/windows_file_diagnostics.cpp
     src/core/windows_storage_probe.cpp
     src/core/windows_private_directory.cpp
     src/core/windows_storage_access.cpp
@@ -331,7 +332,7 @@ if(WIN32)
   target_compile_definitions(runtime_swapper_core PRIVATE
     UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
   target_link_libraries(runtime_swapper_core PUBLIC bcrypt PRIVATE
-    hdiffpatch_native shell32 advapi32)
+    hdiffpatch_native shell32 advapi32 rstrtmgr)
 else()
   target_compile_definitions(runtime_swapper_core PRIVATE _FILE_OFFSET_BITS=64)
   target_link_libraries(runtime_swapper_core PRIVATE hdiffpatch_native)
@@ -526,6 +527,12 @@ endif()
 
 if(BUILD_TESTING)
   add_executable(runtime_version_tests src/tests/runtime_version_tests.cpp)
+  add_executable(windows_file_diagnostics_tests src/tests/windows_file_diagnostics_tests.cpp)
+  target_include_directories(windows_file_diagnostics_tests PRIVATE src/core src/tests)
+  target_link_libraries(windows_file_diagnostics_tests PRIVATE runtime_swapper_core)
+  target_compile_definitions(windows_file_diagnostics_tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_compile_options(windows_file_diagnostics_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
+  add_test(NAME windows_file_diagnostics_tests COMMAND windows_file_diagnostics_tests)
   add_executable(windows_private_directory_tests src/tests/windows_private_directory_tests.cpp)
   target_include_directories(windows_private_directory_tests PRIVATE src/core src/tests)
   target_link_libraries(windows_private_directory_tests PRIVATE runtime_swapper_core)

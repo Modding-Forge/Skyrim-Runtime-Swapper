@@ -2,6 +2,17 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.4.0-rc2 - 2026-10-04
+
+- Diagnoses Windows sharing violations before rollback: records requested access,
+  matching SRS handles and their sharing modes, plus resource-user process IDs,
+  names and executable paths reported by Windows Restart Manager.
+- Distinguishes a confirmed incompatible tracked SRS handle from other resource
+  users and incomplete diagnostics. No process is stopped, no foreign handle is
+  closed, and file-access permissions and recovery behavior remain unchanged.
+- Collects process diagnostics only on failed file-lock operations, with no extra
+  content hashing or process scan during successful starts.
+
 ## 1.4.0-rc1 - 2026-10-04
 
 - Enables automatic sessions on Windows external/removable NTFS with stable

@@ -5,6 +5,7 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#include "internal/windows_file_diagnostics.hpp"
 #else
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -38,7 +39,10 @@ struct FileIdentity {
 struct NativeHandle {
   HANDLE value{INVALID_HANDLE_VALUE};
   ~NativeHandle() {
-    if (value != INVALID_HANDLE_VALUE) CloseHandle(value);
+    if (value != INVALID_HANDLE_VALUE) {
+      core::untrack_file_handle(value);
+      CloseHandle(value);
+    }
   }
 };
 
@@ -53,6 +57,9 @@ struct NativeHandle {
           (directory ? FILE_FLAG_BACKUP_SEMANTICS : FILE_FLAG_SEQUENTIAL_SCAN),
       nullptr);
   if (handle->value == INVALID_HANDLE_VALUE) return {};
+  if (!directory) core::track_file_handle(handle->value, path,
+      FILE_READ_ATTRIBUTES | GENERIC_READ,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, L"prepared-storage");
   // FileAttributeTagInfo is unsupported on exFAT. Basic attributes still
   // identify directories and reparse points on the same opened object.
   FILE_BASIC_INFO tag{};
