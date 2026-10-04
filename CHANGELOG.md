@@ -2,6 +2,12 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.3.3-rc4 - 2026-10-04
+
+- Publishes RC-tag builds as GitHub prereleases with all seven packages and
+  SHA-256 checksums. RC builds remain excluded from Nexus publication.
+- Retains the RC3 recovery and Windows replacement diagnostics unchanged.
+
 ## 1.3.3-rc3 - 2026-10-04
 
 - Reports rejected recovery journal profiles, their exact bytes, selected journal,
