@@ -174,6 +174,16 @@ void scenarios(PathSyntax syntax) {
   }
   {
     Fixture f(syntax);
+    f.context.recovery_vault.value = f.root / fs::path(u8"Vault \u00e4 \u65e5\u672c");
+    f.manifest();
+    f.locator(f.legacy);
+    check_result(f, f.probe(true));
+    require(locator_vault_path(f.current, f.context.installation) ==
+                f.context.recovery_vault.value,
+            "Unicode vault survives legacy locator migration unchanged");
+  }
+  {
+    Fixture f(syntax);
     fs::create_directories(f.current);
     require(f.probe(true).technical_reason == L"active-vault-unavailable" &&
             !fs::exists(f.context.recovery_vault.value), "non-file locator blocks before writes");
@@ -318,6 +328,19 @@ int main() {
   try {
     scenarios(PathSyntax::windows);
     scenarios(PathSyntax::posix);
+    Fixture native(PathSyntax::windows);
+    const auto library = native.root / "SteamLibrary";
+    const auto game = library / "steamapps/common" / fs::path(u8"Skyrim \u00e4 \u65e5\u672c");
+    fs::create_directories(game);
+    auto& backend = transaction_backend();
+    const auto inspected = backend.probe(game);
+    require(inspected.success() && !fs::exists(library / ".runtime-swapper"),
+            "native Unicode inspection does not mutate");
+    const auto prepared = backend.probe(game, 0, true);
+    require(prepared.success() && inspected.installation_id == prepared.installation_id &&
+            inspected.vault_path == prepared.vault_path &&
+            inspected.target_volume.stable_id == prepared.target_volume.stable_id,
+            "native Unicode preparation retains paths and identities");
     std::cout << "Shared storage probe contracts passed\n";
     return 0;
   } catch (const std::exception& error) {

@@ -1,0 +1,201 @@
+Storage unification - local implementation and validation, 2026-10-04
+
+Status
+
+The production refactor is implemented. No regression was observed in the
+completed comparisons. This is NOT an all-green release qualification: the
+existing test failures and outstanding manual checks below remain explicit.
+No version, release workflow, packaging, tag or remote branch was changed.
+The product version remains 1.3.3-rc5; that existing tag does not contain this work.
+
+Baseline and implementation
+
+- af99b94 captures the previously uncommitted external Windows NTFS support,
+  its tests, and the corrected physical-unplug validation record. It is the
+  comparison baseline, rather than the older rc5 tag alone.
+- d83e01e adds cross-platform policy characterization before extraction.
+- ca68426 centralizes the checked 256 MiB recovery reserve and volume eligibility.
+- 1d7a408 extracts the internal probe context/platform seam and Windows flow.
+- 1c33d33 binds POSIX to that same flow without replacing its storage resolver.
+- 8f5dff2 adds locator, permission, failure-boundary and storage-selection tests.
+- Additional Unicode tests exercise both locator migration and native probing.
+
+The common flow now owns locator priority, pinned-vault adoption, manifest
+matching, capacity/classification checks, creation-boundary rechecks, locator
+repair and successful BackendProbeResult construction. Platform adapters retain
+native access checks, directory preparation, volume inspection and free space.
+There is one production flow, not a runtime switch between old and new versions.
+
+Unchanged contracts:
+- Public classify_storage(), TransactionBackend::probe() and BackendProbeResult.
+- Installation/volume identities, patch-plan hash, case rules and storage bases.
+- Windows and POSIX selection rules, including conflicting private/library state.
+- On-disk/protocol formats, locking, recovery, migration and cleanup ordering.
+- Native filesystem primitives, link handling and PreparedStorageContext handles.
+- Repair-sensitive reasons, including vault-owner-or-dacl, active-vault-* and
+  state-home-not-controlled. ContentCatalog repair prefix behavior is unchanged.
+- External Windows NTFS remains Automatic with independent internal recovery;
+  external exFAT remains Persistent only. No new filesystem was enabled here.
+
+Shared messages retain native details; POSIX success/warning and capacity text
+is more explicit. POSIX volume eligibility now uses the common helper: its
+unchanged inspector only sets native_durability for local, internal trusted
+filesystems, so the additional explicit local/internal predicates do not change
+any volume returned by that inspector. No extra hash or diagnostic probe is added.
+
+Compared with af99b94, core production code is 39 lines smaller, including the
+new internal interface. Most added lines are regression tests, not product logic.
+Foreign changes and the untracked third_party/f4se directory were not included.
+Countdown and local orchestration scripts remain ignored under build/.
+
+Automated matrix
+
+Release builds completed for all seven variants on Windows/MSVC and Linux/GCC:
+  1.5.97   BoBW, BoAW
+  1.6.640  BoBW, BoAW
+  1.6.1170 BoBW, BoAW, BoAW-clean
+
+Windows CTest: 24/25 passed for each variant, 168/175 executions overall.
+Linux CTest: 14/14 for six variants; 13/14 for 1.5.97 BoAW, 97/98 overall.
+Combined Release matrix: 265/273 passed. The eight failed executions are two
+distinct pre-existing failures, not eight distinct regressions:
+
+1. windows_storage_access_tests cannot create its final directory-symlink
+   fixture without Windows Developer Mode/appropriate symlink privilege.
+   The baseline fails at the same assertion. Earlier ACL repair, metadata,
+   backup preservation, idempotence and ContentCatalog-prefix assertions run
+   before this point; windows_catalog_storage_access_tests passes separately.
+   The final unsafe-directory-link assertions remain unexecuted on this host.
+   No tests were skipped and Windows security settings were not changed.
+
+2. Linux 1.5.97 BoAW posix_creation_club_tests throws filesystem_error:
+   "Cannot convert character sequence: Invalid or incomplete multibyte or wide
+   character" in its Unicode scenario. Rebuilding af99b94 in an isolated source
+   snapshot reproduces the same failure. The other profiles do not exercise
+   that quarantine scenario. This unrelated Unicode defect was not patched here.
+
+Debug builds also completed: Windows 24/25 with the same symlink-fixture failure;
+Linux 14/14, both using BoBW 1.6.1170.
+
+The shared tests cover policy/operations, overflow and capacity boundaries,
+current/legacy locator priority, valid/torn/missing/incompatible state, pinned
+vault selection, before/after creation failures, locator write/verification
+failures, error precedence, retained diagnostics and inspect-only non-mutation.
+A recording adapter asserts the call sequence and recheck counts; no duplicate
+full probe is introduced. Native Unicode paths retain their IDs and storage
+paths; Unicode legacy vault locators survive migration on Windows and Linux.
+
+POSIX resolver tests cover custom XDG state, HOME alias, existing private locks,
+ambiguous private/library state, unsafe existing library storage, fresh fallback,
+unchanged foreign-parent permissions and refusal to chmod an unsafe old vault.
+Existing prepared-context tests still verify hash reuse, rename rebind and cache
+invalidation. Existing layout, vault, lifecycle, legacy cleanup, ContentCatalog,
+filesystem, fault-injection and sidecar protocol suites were included above.
+
+Real patch and recovery integration
+
+- All seven variants completed actual downgrade, persistent finalization,
+  deliberately corrupted-file fallback recovery and source verification on
+  isolated Windows NTFS copies and native Linux ext4 copies (14 runs).
+- No live Skyrim installation was used. These probe runs do not launch SKSE or
+  the watcher. RuntimeTransactionProbe leaves its test vaults for inspection;
+  complete vault deletion is covered separately by lifecycle/USB checks.
+- BoAW-clean fixtures omit optional beafarmer content; this does not qualify a
+  real deployed beafarmer file or a Collection/VFS end-to-end launch.
+- Baseline and refactored Windows 1.5.97 BoBW runs both report hashes=18,
+  cache-hits=37, rename-rebinds=5, invalidations=0. Windows and Linux current
+  metrics agree across the other corresponding profiles as well.
+- An initial Windows fixture under the long Codex LocalAppData path failed to
+  commit its source backup object. af99b94 reproduces that failure on a separate
+  long-path fixture, with the same correct source hash. A shorter isolated path
+  passes both baseline and refactored runs. The precise long-path/environment
+  cause has not been established; it is not counted as a refactor regression
+  and long-path backup support is not claimed verified.
+
+Wine, sanitizers and binary checks
+
+- All seven Windows WineSidecarProbe + matching native ELF combinations passed
+  under Wine in Ubuntu 22.04 WSL, returning Automatic on native ext4.
+  This tests the verified bridge, not Skyrim, Proton or an Amethyst deployment.
+- The existing Linux bind-mount transaction-workspace integration test passed.
+- ASan/UBSan build completed with Clang 14. An ordinary CTest invocation showed
+  intermittent early crashes without sanitizer reports, including unchanged
+  executables. With ASLR disabled only for the test process using setarch -R,
+  all 14 tests passed repeatedly with leak/strict-string/initialization checks
+  and UBSan halt-on-error enabled. Host settings and production hardening were
+  not changed. The ordinary-ASLR sanitizer instability remains unresolved.
+- The HDIFFW26 adapter fuzz smoke run completed 2,766,646 inputs in 37 seconds
+  without a sanitizer finding, using valid/truncated/corrupt/random corpus seeds.
+- All seven ELFs passed the existing GLIBC/GLIBCXX/CXXABI limits and ELF hardening
+  checks. All fourteen Windows EXE/DLL binaries passed PE hardening checks.
+- All nine recursive third-party pins passed. WSL initially interpreted the
+  Windows checkout's CRLF files as modifications; verification with process-local
+  core.autocrlf=true passed. No dependency was reset, rewritten or repinned.
+- GCC/MSVC Release and Debug builds produced no new warnings. Clang reports two
+  existing sign-conversion sites in unchanged creation_club_inventory.cpp:70,126.
+- git diff --check passes. No repository formatter gate is configured; no broad
+  reformatting or warning suppression was introduced.
+
+External NTFS and performance
+
+G: remains the existing isolated Intenso SRS_TEST NTFS fixture. No reformatting.
+Baseline/current probe output agrees on mode, volume identity and storage paths.
+Repeated downgrade/source restore and cleanup passed. Five injected terminations
+also passed fresh-process recovery followed by another idempotent recovery:
+  activation: replace.after-source-move, replace.after-rename
+  restoration: replace.after-source-move, replace.after-rename, remove-tree.before
+The final source state is restored and its active recovery vault is removed.
+
+The user-operated physical unplug before this refactor is documented in
+external-ntfs-validation-2026-10-04.txt. It passed fallback recovery after
+reconnection. These new process-termination tests are NOT another physical
+unplug/power-loss test. A repeat with the current code requires user coordination.
+
+Five cold-SRS-cache and five warm-SRS-cache activations per implementation:
+  baseline cold ms:   11202, 9072, 7421, 6984, 6585  (median 7421)
+  refactor cold ms:    6791, 6638, 7812, 9703, 33870 (median 7812; +5.27%)
+  baseline warm ms:    4984, 2485, 2673, 3462, 5019  (median 3462)
+  refactor warm ms:    2403, 5441, 9684, 2353, 2423  (median 2423; -30.01%)
+These are SRS transaction timings, not game startup time. Cold means an empty
+SRS target cache, not flushed OS caches. Previous caches were moved aside under
+the isolated test root, not deleted. Restore/source verification follows every
+activation. The measured median threshold is met, but background builds and
+large I/O outliers make this insufficient evidence of a speedup. A quiet repeat
+would improve confidence; no performance gain is claimed.
+
+Outstanding acceptance checks
+
+- Resolve or separately approve the two existing native-suite failures above.
+- Explain/retest normal-ASLR sanitizer instability and the long Windows path
+  backup failure; neither is masked by a changed production policy.
+- Repeat physical USB disconnection with the user; no automatic unplug claim.
+- Actual Amethyst symlink/hardlink/VFS deployments and real SKSE/watcher sessions.
+- Real Windows volume-mount identity tests, another device at the old mountpoint,
+  external exFAT, XFS/Btrfs/ntfs3/fuseblk, Proton and other unavailable hardware.
+  Synthetic policies, native primitive tests and the ext4 bind test are not
+  substitutes for these complete physical/deployment scenarios.
+- No release bundles or reproducibility comparison were requested for this
+  refactor. Existing release CI/packaging remains untouched.
+
+Local evidence retained (not committed binaries)
+
+Repository build/storage-refactor/:
+  windows/<target>/<profile>/{configure,build,tests}.log
+  windows-debug/{configure,build,tests}.log
+  baseline-windows-build/long-path-baseline.log
+  benchmark-baseline-recorded.log, benchmark-refactored-recorded.log
+  usb-faults.log; baseline binaries and source archive
+
+Windows runtime fixtures: C:\Users\wuerf\srs-refactor-runtime\
+  <target>-<profile>/integration.log and baseline-1.5.97-bobw/integration.log
+Long-path reproduction: Codex LocalAppData/SRS-Storage-Refactor-Tests/
+
+WSL /home/wuerf/srs-build/:
+  storage-refactor/<target>/<profile>/{configure,build,tests}.log
+  storage-refactor-debug/{configure,build,tests}.log
+  storage-refactor-runtime/<target>-<profile>/integration.log
+  storage-refactor-wine/<target>-<profile>.log
+  storage-refactor-sanitized/{build,tests,tests-no-aslr,fuzz}.log
+  storage-refactor-baseline-boaw/Testing/Temporary/LastTest.log
+
+Manual countdown remains only in the ignored build/usb-unplug directory.
