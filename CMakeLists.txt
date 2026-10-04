@@ -339,6 +339,12 @@ endif()
 include(CTest)
 
 if(BUILD_TESTING)
+  add_executable(storage_policy_tests src/tests/storage_policy_tests.cpp)
+  target_include_directories(storage_policy_tests PRIVATE src/core)
+  target_link_libraries(storage_policy_tests PRIVATE runtime_swapper_core)
+  srs_harden_compile(storage_policy_tests)
+  add_test(NAME storage_policy_tests COMMAND storage_policy_tests)
+
   add_executable(storage_restore_tests
     src/tests/storage_restore_tests.cpp
     src/app/storage_restore.cpp
