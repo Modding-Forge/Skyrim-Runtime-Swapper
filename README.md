@@ -35,7 +35,7 @@ On Linux, the Windows application starts the native helper automatically; do not
 
 ## Automatic or persistent
 
-On supported internal NTFS, ext4, XFS, or Btrfs storage, SRS normally restores 1.7.104 after Skyrim closes. External, removable, exFAT, and some other local storage require a persistent downgrade with a separate durable recovery vault. Unsupported or unverifiable storage is blocked.
+On supported internal NTFS, ext4, XFS, or Btrfs storage, SRS normally restores 1.7.104 after Skyrim closes. Windows external/removable NTFS also supports automatic restoration when a separate durable internal recovery vault is available. Keep the drive connected until restoration finishes; after disconnection, recovery remains pending until the drive returns. exFAT and other external or uncertain local storage require a persistent downgrade. Unsupported or unverifiable storage is blocked.
 
 Open `SkyrimRuntimeSwapper.exe` to keep the target active or restore 1.7.104. **Persistent mode does not restore automatically.** An already-installed verified target is not upgraded merely because a game session ends.
 

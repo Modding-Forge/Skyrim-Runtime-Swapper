@@ -1,4 +1,5 @@
 #include "internal/transaction_journal.hpp"
+#include "test_paths.hpp"
 
 #include <runtime_swapper/transaction_backend.hpp>
 
@@ -15,7 +16,7 @@ namespace {
 class TemporaryDirectory {
  public:
   TemporaryDirectory()
-      : path_(std::filesystem::temp_directory_path() /
+      : path_(runtime_swapper::tests::test_root() /
               (L"skyrim-runtime-swapper-fault-tests-" +
                std::to_wstring(GetCurrentProcessId()))) {
     std::error_code error;

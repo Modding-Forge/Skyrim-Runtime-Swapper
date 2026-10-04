@@ -24,13 +24,22 @@ SafetyMode classify_storage(const VolumeIdentity& target,
                             bool different_volume) noexcept {
   if (!target.local || !target.stable ||
       target.medium == StorageMedium::network || !vault.local ||
-      !vault.stable || !vault.native_durability) {
+      !vault.stable || !vault.native_durability ||
+      vault.medium != StorageMedium::internal) {
     return SafetyMode::hard_blocked;
   }
   if (target.medium == StorageMedium::internal && target.native_durability) {
     return SafetyMode::automatic;
   }
   if (!different_volume) return SafetyMode::hard_blocked;
+  // Disconnectable NTFS supports native transactions, but recovery must survive
+  // losing the entire target device. External media never qualify as a vault.
+  if (target.native_durability &&
+      equal_ascii_ignore_case(target.filesystem, L"ntfs") &&
+      (target.medium == StorageMedium::external ||
+       target.medium == StorageMedium::removable)) {
+    return SafetyMode::automatic;
+  }
   if (target.medium == StorageMedium::external ||
       target.medium == StorageMedium::removable ||
       equal_ascii_ignore_case(target.filesystem, L"exfat")) {

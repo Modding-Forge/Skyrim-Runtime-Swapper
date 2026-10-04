@@ -717,6 +717,15 @@ if(BUILD_TESTING)
   endif()
 
   add_executable(runtime_transaction_probe src/tests/runtime_transaction_probe.cpp)
+  add_executable(external_ntfs_probe src/tests/external_ntfs_probe.cpp)
+  target_include_directories(external_ntfs_probe BEFORE PRIVATE
+    "${GENERATED_INCLUDE}" src/include src/core)
+  target_compile_definitions(external_ntfs_probe PRIVATE
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_link_libraries(external_ntfs_probe PRIVATE runtime_swapper_core)
+  if(MSVC)
+    target_compile_options(external_ntfs_probe PRIVATE /W4 /permissive- /EHsc /utf-8)
+  endif()
   target_include_directories(runtime_transaction_probe BEFORE PRIVATE
     "${GENERATED_INCLUDE}" src/include)
   target_compile_definitions(runtime_transaction_probe PRIVATE

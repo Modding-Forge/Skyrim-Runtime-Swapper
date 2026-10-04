@@ -138,13 +138,31 @@ int main() {
   }
   const runtime_swapper::VolumeIdentity external_ntfs{
       L"external", L"NTFS", L"external NTFS", runtime_swapper::StorageMedium::external,
-      true, true, false};
+      true, true, true};
   if (runtime_swapper::classify_storage(external_ntfs, durable_vault, true) !=
-          runtime_swapper::SafetyMode::persistent_only ||
+          runtime_swapper::SafetyMode::automatic ||
       runtime_swapper::classify_storage(external_ntfs, durable_vault, false) !=
           runtime_swapper::SafetyMode::hard_blocked) {
     return 21;
   }
+  auto removable_ntfs = external_ntfs;
+  removable_ntfs.medium = runtime_swapper::StorageMedium::removable;
+  auto external_vault = durable_vault;
+  external_vault.medium = runtime_swapper::StorageMedium::external;
+  auto unstable_ntfs = external_ntfs;
+  unstable_ntfs.stable = false;
+  auto nonnative_ntfs = external_ntfs;
+  nonnative_ntfs.native_durability = false;
+  if (runtime_swapper::classify_storage(removable_ntfs, durable_vault, true) !=
+          runtime_swapper::SafetyMode::automatic ||
+      runtime_swapper::classify_storage(external_ntfs, external_vault, true) !=
+          runtime_swapper::SafetyMode::hard_blocked ||
+      runtime_swapper::classify_storage(internal_ntfs, external_vault, true) !=
+          runtime_swapper::SafetyMode::hard_blocked ||
+      runtime_swapper::classify_storage(unstable_ntfs, durable_vault, true) !=
+          runtime_swapper::SafetyMode::hard_blocked ||
+      runtime_swapper::classify_storage(nonnative_ntfs, durable_vault, true) !=
+          runtime_swapper::SafetyMode::persistent_only) return 25;
   const runtime_swapper::VolumeIdentity exfat{
       L"exfat", L"exFAT", L"external exFAT", runtime_swapper::StorageMedium::external,
       true, true, false};
@@ -332,18 +350,24 @@ int main() {
                           L"common" / L"Skyrim Special Edition";
   std::filesystem::create_directories(steam_game);
   const auto steam_probe = backend.probe(steam_game);
-  const auto local_storage = steam_probe.vault_path.parent_path().parent_path()
-                                 .parent_path();
+  // The backend resolves redirected Windows profile paths through handles.
+  const auto local_storage = steam_probe.target_cache.value.parent_path().parent_path();
+  const bool internal_target = steam_probe.target_volume.medium ==
+                              runtime_swapper::StorageMedium::internal;
+  const bool recovery_location_valid = internal_target
+      ? steam_probe.vault_path.parent_path().parent_path().parent_path() == local_storage &&
+            steam_probe.coordination_lock.value.parent_path().parent_path() == local_storage
+      : steam_probe.vault_volume.medium == runtime_swapper::StorageMedium::internal &&
+            steam_probe.target_volume.stable_id != steam_probe.vault_volume.stable_id &&
+            steam_probe.coordination_lock.value.root_name() == steam_probe.vault_path.root_name();
   if (!steam_probe.success() ||
       steam_probe.mode != runtime_swapper::SafetyMode::automatic ||
       local_storage.filename() != L".runtime-swapper" ||
       local_storage.parent_path().filename() != L"SteamLibrary" ||
-      steam_probe.vault_path.lexically_relative(local_storage).empty() ||
+      !recovery_location_valid ||
       steam_probe.target_cache.value.parent_path().parent_path() !=
           local_storage ||
       steam_probe.transaction_work.value.parent_path().parent_path() !=
-          local_storage ||
-      steam_probe.coordination_lock.value.parent_path().parent_path() !=
           local_storage) {
     std::wcerr << L"steam-probe code=" << static_cast<int>(steam_probe.code)
                << L" mode=" << static_cast<int>(steam_probe.mode)

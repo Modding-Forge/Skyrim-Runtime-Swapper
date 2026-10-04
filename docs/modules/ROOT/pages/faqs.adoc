@@ -80,7 +80,7 @@ An unrelated renamed executable is not accepted.
 == Does SRS work on an external SSD?
 
 Yes, when its filesystem and identity are supported and a durable independent recovery vault is available.
-External storage uses Persistent-only mode and requires a manual GUI restore.
+Windows external NTFS can use Automatic mode with a separate internal recovery vault. Other supported external storage uses Persistent-only mode and requires a manual GUI restore.
 
 == Does SRS work on exFAT?
 
@@ -94,10 +94,10 @@ SRS does not yet resolve their persistent pool/dataset identities and cannot use
 The generic `target-volume-unrecoverable` message does not mean ZFS is necessarily network storage or unsafe.
 See xref:linux.adoc#zfs[ZFS support status].
 
-== Why is an external NTFS drive not Automatic?
+== Can external NTFS use Automatic mode?
 
-Automatic restore requires both durable filesystem semantics and a trusted internal physical medium.
-An external or removable device can disappear during activation or restore, so it remains persistent-only regardless of NTFS support.
+Yes on Windows, with native NTFS durability, a stable target identity and a verified vault on a separate internal volume.
+Keep the drive connected through restoration. If it disappears, the internal recovery data is retained and recovery can resume after reconnection. An external drive is never accepted as the recovery vault.
 
 == Can I choose the recovery-vault path?
 

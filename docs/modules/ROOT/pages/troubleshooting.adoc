@@ -146,7 +146,7 @@ If the failure persists, submit the complete log instead of disabling VFS safety
 
 == Persistent downgrade is required
 
-This is expected on external, removable, exFAT, or uncertain local storage.
+This is expected on exFAT and other external, removable, or uncertain local storage without automatic support. Windows external NTFS can use Automatic mode with a stable identity and a verified separate internal recovery vault.
 
 . Read the game-volume and recovery-vault descriptions.
 . Continue only if the displayed vault is available and should remain available.

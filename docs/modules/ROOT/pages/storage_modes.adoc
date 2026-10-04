@@ -7,9 +7,10 @@ The decision considers the game filesystem, physical storage type, stable volume
 
 == Automatic
 
-Automatic mode is used when the game is on trusted internal storage with native durability:
+Automatic mode requires native durability and a verified internal recovery vault:
 
 * Internal NTFS on Windows
+* External or removable NTFS on Windows, with stable identity and a vault on a separate internal volume
 * Internal ext4, XFS, or Btrfs on Linux
 
 When starting from the source state without a persistent target active, the target runtime is activated for one Skyrim session and Skyrim 1.7.104 is restored after the game exits.
@@ -17,14 +18,15 @@ An existing verified target is not automatically restored merely because the sto
 
 What to do:: Launch through `skse64_loader.exe` normally.
 
+Keep external NTFS connected until the watcher finishes restoring the source state.
+If the drive disappears, recovery data is retained on the internal volume. Recovery must finish after reconnection before another session can start.
+
 == Persistent only
 
 Persistent-only mode is used for storage that is local and recoverable but not safe for automatic session restoration:
 
-* External USB SSDs and HDDs
-* Removable drives
-* SD and microSD cards
-* External NTFS, ext4, XFS, or Btrfs
+* External or removable drives without supported native NTFS durability on Windows
+* External ext4, XFS, or Btrfs
 * Internal or external exFAT
 
 A stable target identity and a durable recovery vault on a different volume are required.

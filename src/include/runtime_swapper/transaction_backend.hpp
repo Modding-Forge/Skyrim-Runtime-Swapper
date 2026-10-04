@@ -78,6 +78,7 @@ struct VolumeIdentity {
   StorageMedium medium{StorageMedium::unknown};
   bool local{};
   bool stable{};
+  // Native transaction primitives; does not imply the physical medium is internal.
   bool native_durability{};
 };
 

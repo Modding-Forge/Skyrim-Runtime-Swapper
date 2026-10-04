@@ -26,7 +26,8 @@ When SRS switches a source installation on trusted internal storage, the target 
 A detached watcher restores Skyrim 1.7.104 after the game closes.
 An existing verified target is not automatically upgraded to 1.7.104 merely because the game closes.
 
-On external, removable, exFAT, or otherwise uncertain local storage, automatic restoration is not considered safe.
+Windows external NTFS also supports automatic restoration with a verified separate internal vault; keep the drive connected until restoration finishes.
+On exFAT and other external, removable, or otherwise uncertain local storage, automatic restoration is not enabled.
 When a durable independent recovery location is available, Skyrim Runtime Swapper offers a persistent downgrade instead.
 The original state can later be restored through `SkyrimRuntimeSwapper.exe`.
 

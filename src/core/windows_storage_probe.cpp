@@ -433,7 +433,9 @@ using UniqueHandle = std::unique_ptr<void, HandleCloser>;
   const bool local = drive_type != DRIVE_REMOTE && drive_type != DRIVE_NO_ROOT_DIR &&
                      drive_type != DRIVE_UNKNOWN;
   const bool ntfs = equal_ordinal(filesystem.data(), L"NTFS");
-  const bool native_durability = local && ntfs && medium == StorageMedium::internal;
+  const bool native_durability = local && ntfs &&
+      (medium == StorageMedium::internal || medium == StorageMedium::external ||
+       medium == StorageMedium::removable);
 
   std::wstring stable_id;
   if (stable) {
@@ -691,7 +693,8 @@ BackendProbeResult probe_windows_storage(
                      L"The pending installation will not be redirected to a new vault.",
                      *target, {}, vault_path, *id);
     }
-    if (!vault || !vault->local || !vault->stable || !vault->native_durability) {
+    if (!vault || !vault->local || !vault->stable || !vault->native_durability ||
+        vault->medium != StorageMedium::internal) {
       return blocked(L"vault-volume-not-durable",
                      L"The automatic recovery vault is not on a stable internal NTFS "
                      L"volume.", *target, vault.value_or(VolumeIdentity{}), vault_path, *id);
@@ -768,7 +771,8 @@ BackendProbeResult probe_windows_storage(
                      storage_base, target_storage_base, *id);
     }
     vault = inspect_volume(vault_path);
-    if (!vault || !vault->local || !vault->stable || !vault->native_durability) {
+    if (!vault || !vault->local || !vault->stable || !vault->native_durability ||
+        vault->medium != StorageMedium::internal) {
       return blocked(L"vault-volume-not-durable",
                      L"The automatic recovery vault is not on a stable internal NTFS "
                      L"volume.", *target, vault.value_or(VolumeIdentity{}), vault_path, *id);

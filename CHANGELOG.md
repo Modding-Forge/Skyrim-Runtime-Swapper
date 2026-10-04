@@ -2,6 +2,14 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## Unreleased
+
+- Enables automatic sessions on Windows external/removable NTFS with stable
+  identity and a separate verified internal recovery vault. External volumes
+  remain ineligible as recovery vaults; exFAT remains persistent-only.
+- Adds external NTFS classification, USB filesystem and abrupt-process recovery
+  coverage without changing persistent-session behavior.
+
 ## 1.3.3-rc5 - 2026-10-04
 
 - Builds Windows packages and verifies archives in parallel, using one shared

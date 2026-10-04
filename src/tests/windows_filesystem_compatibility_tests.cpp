@@ -84,6 +84,17 @@ int main() {
     auto context = prepare_storage_context(fixture.root, 0, &error);
     if (!context) std::wcerr << error << '\n';
     require(context.has_value(), "prepare context");
+    if (context->backend.target_volume.filesystem == L"NTFS" &&
+        (context->backend.target_volume.medium == StorageMedium::external ||
+         context->backend.target_volume.medium == StorageMedium::removable)) {
+      require(context->backend.mode == SafetyMode::automatic,
+              "external NTFS automatic with internal vault");
+      require(context->backend.vault_volume.medium == StorageMedium::internal &&
+                  context->backend.vault_volume.stable_id != context->backend.target_volume.stable_id,
+              "external NTFS never stores recovery on target device");
+      require(context->backend.coordination_lock.value.root_name() != fixture.root.root_name(),
+              "external NTFS coordination lock survives target loss");
+    }
     if (context->backend.target_volume.filesystem == L"exFAT") {
       require(context->backend.mode == SafetyMode::persistent_only, "exFAT persistent only");
       require(context->backend.vault_volume.stable && context->backend.vault_volume.native_durability,

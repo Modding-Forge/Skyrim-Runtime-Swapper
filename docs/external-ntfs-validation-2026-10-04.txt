@@ -1,0 +1,47 @@
+External Windows NTFS validation - 2026-10-04
+
+Hardware: Intenso Twist Line USB, disk 3, approximately 64 GB, drive G:.
+User-authorized reformat from exFAT to NTFS (label SRS_TEST).
+Format-Volume failed; format.com completed and NTFS was verified afterward.
+No production Skyrim files were modified.
+
+Isolated fixture:
+G:\SRS-NTFS-diagnostic\steamapps\common\Skyrim Special Edition
+Source copies: SkyrimSE.exe, SkyrimSELauncher.exe, Data/Skyrim - Shaders.bsa.
+Profile: BoBW 1.7.104 -> 1.6.1170, actual patch assets.
+Probe: external_ntfs_probe (BUILD_TESTING only, not packaged).
+Usage: external_ntfs_probe <isolated-game> <patch-root> activate|recover [crash-point]
+Requires .srs-isolated-repro marker and external/removable NTFS with separate
+internal vault. Optional crash-point terminates the process immediately with 99.
+The unavailable operation only accepts a missing game root and expects recovery
+to fail without changes.
+
+Passed:
+- Automatic classification on removable G:, recovery vault and lock on internal C:.
+- Downgrade to target without persistent marker, verified source restore and cleanup.
+- Process termination during activation at replace.after-source-move and
+  replace.after-rename; fresh-process recovery and repeated recovery succeeded.
+- Process termination during recovery at those two boundaries and at
+  remove-tree.before; fresh-process recovery and cleanup succeeded.
+- Temporarily renamed isolated game directory: recovery blocked, every vault
+  file hash unchanged, successful recovery after restoring the directory name.
+- Final three source files match the source copies by SHA-256; active vault removed.
+- core_storage_tests, windows_filesystem_compatibility_tests,
+  fault_injection_tests, recovery_lifecycle_tests on G: and internal default root.
+- posix_storage_tests on Ubuntu 22.04 WSL (external ext4 policy unchanged).
+- Windows compilation without new warnings after correcting test conversion.
+- User-operated physical USB disconnect during restore after source relocation,
+  before replacement installation (unplug-20261004-155627.log). The absent device
+  produced ERROR_NOT_READY (21), state=source-relocated. After reconnecting the
+  same G: device, fallback recovery, repeated recovery and source cleanup passed.
+  The local countdown helper remains ignored under build/usb-unplug.
+
+Limitations:
+- mountvol G:\ /D was denied by Windows; that attempt did not detach the drive.
+  The later physical unplug test covers one restore boundary on this USB device,
+  not every timing window, controller or power-loss scenario.
+- No actual Skyrim/SKSE process or watcher end-to-end launch in this fixture.
+- Full BoAW/Creation Club/ContentCatalog and all-target matrix not repeated.
+- This is local unreleased work, not part of the existing rc5 tag or artifacts.
+
+The isolated source fixture and replaceable target cache remain on G: for reuse.
