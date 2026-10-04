@@ -2,51 +2,37 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
-## Unreleased
+## 1.4.0-rc1 - 2026-10-04
 
 - Enables automatic sessions on Windows external/removable NTFS with stable
   identity and a separate verified internal recovery vault. External volumes
   remain ineligible as recovery vaults; exFAT remains persistent-only.
-- Adds external NTFS classification, USB filesystem and abrupt-process recovery
-  coverage without changing persistent-session behavior.
-
-## 1.3.3-rc5 - 2026-10-04
-
-- Builds Windows packages and verifies archives in parallel, using one shared
-  seven-profile CI matrix. Stable tests, hardening and round-trip checks remain enabled
-  as before; RC builds continue to skip the full test suite.
-- Assembles the complete verified package set before GitHub prerelease or Nexus
-  publication. No runtime behavior changes from RC4.
-
-## 1.3.3-rc4 - 2026-10-04
-
-- Publishes RC-tag builds as GitHub prereleases with all seven packages and
-  SHA-256 checksums. RC builds remain excluded from Nexus publication.
-- Retains the RC3 recovery and Windows replacement diagnostics unchanged.
-
-## 1.3.3-rc3 - 2026-10-04
-
-- Reports rejected recovery journal profiles, their exact bytes, selected journal,
-  transaction, expected and legacy profiles, patch plan and observed file states.
-- Adds failure-only Windows file snapshots with read-only/reparse attributes,
-  hardlink count and identity, without additional content hashing or permission changes.
-- Distinguishes skipped post-replacement hash checks from hash failures and keeps
-  replacement diagnostics captured before rollback. Includes the RC2 diagnostics.
-
-## 1.3.3-rc2 - 2026-09-30
-
-- Preserves Windows error codes at failing replacement checks and reports the
-  operation, affected path, occupied rollback destinations and identity changes.
-- Reports fallback restore failures alongside the original recovery failure.
-- Adds regression coverage for locked files and occupied rollback destinations.
-
-## 1.3.3-rc1 - 2026-09-23
-
 - Fixes Windows exFAT failures when preparing storage, hashing files and
   validating transaction entries. Handle-bound attribute checks now use an
   exFAT-compatible query without relaxing reparse-point or file-type checks.
-- Adds a filesystem compatibility regression test for hashing, storage
-  preparation, copying, replacement, restore and removal on NTFS and exFAT.
+- Unifies Windows and Linux locator/vault probing, recovery-volume eligibility,
+  overflow-safe capacity reserve and probe results. Platform-specific permission
+  checks and storage selection remain intact, including existing lock locations.
+- Preserves storage identities, recovery formats, error priority, link handling
+  and prepared-handle/hash reuse while removing duplicate production logic.
+  ContentCatalog behavior is unchanged.
+- Improves recovery diagnostics with rejected journal profiles, exact profile
+  bytes, transaction and patch-plan context, and observed file states.
+- Preserves failing Windows operations, paths and native error codes, including
+  locked files, occupied rollback destinations and identity changes. Failure-only
+  snapshots report attributes and hardlink identity without extra content hashing.
+- Distinguishes skipped verification from failed hashes, keeps diagnostics from
+  before rollback, and reports fallback restore failures alongside the original error.
+- Adds cross-platform policy, probe-order, locator migration, capacity, Unicode,
+  permission and storage-selection regression coverage, plus NTFS/exFAT primitive
+  and interrupted external-NTFS recovery tests.
+- Builds Windows packages and verifies archives in parallel across all seven
+  profiles. Complete verified RC package sets and SHA-256 checksums are published
+  as GitHub prereleases, never to Nexus. RC builds skip the full test suite;
+  stable release checks, binary hardening and archive verification remain enabled.
+- Consolidates the unreleased 1.3.3 RC series and storage refactor into this
+  minor-version test release. Outstanding validation limits are documented in
+  `docs/storage-unification-validation-2026-10-04.txt`.
 
 ## 1.3.2 - 2026-09-23
 

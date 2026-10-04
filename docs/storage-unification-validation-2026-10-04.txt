@@ -5,8 +5,9 @@ Status
 The production refactor is implemented. No regression was observed in the
 completed comparisons. This is NOT an all-green release qualification: the
 existing test failures and outstanding manual checks below remain explicit.
-No version, release workflow, packaging, tag or remote branch was changed.
-The product version remains 1.3.3-rc5; that existing tag does not contain this work.
+During this validation no version, release workflow, packaging, tag or remote
+branch was changed. The tested binaries identified as 1.3.3-rc5; that existing
+tag does not contain this work. The subsequent test release is 1.4.0-rc1.
 
 Baseline and implementation
 
