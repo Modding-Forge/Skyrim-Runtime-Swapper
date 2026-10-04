@@ -313,6 +313,7 @@ add_library(runtime_swapper_core STATIC
   src/core/runtime_activation.cpp
   src/core/runtime_transform.cpp
   src/core/storage_probe_common.cpp
+  src/core/storage_probe.cpp
   src/core/storage_classification.cpp
   src/core/storage_entry_policy.cpp
   src/core/transaction_workspace.cpp
@@ -344,6 +345,12 @@ if(BUILD_TESTING)
   target_link_libraries(storage_policy_tests PRIVATE runtime_swapper_core)
   srs_harden_compile(storage_policy_tests)
   add_test(NAME storage_policy_tests COMMAND storage_policy_tests)
+
+  add_executable(storage_probe_tests src/tests/storage_probe_tests.cpp)
+  target_include_directories(storage_probe_tests PRIVATE src/core)
+  target_link_libraries(storage_probe_tests PRIVATE runtime_swapper_core)
+  srs_harden_compile(storage_probe_tests)
+  add_test(NAME storage_probe_tests COMMAND storage_probe_tests)
 
   add_executable(storage_restore_tests
     src/tests/storage_restore_tests.cpp
