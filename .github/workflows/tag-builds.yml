@@ -24,7 +24,13 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
+      - name: Define package matrix
+        id: matrix
+        shell: bash
+        run: |
+          echo 'matrix={"include":[{"target":"1.5.97","profile":"bobw","catalog":"1.7.104-to-1.5.97"},{"target":"1.5.97","profile":"boaw","catalog":"1.7.104-to-1.5.97"},{"target":"1.6.640","profile":"bobw","catalog":"1.7.104-to-1.6.640"},{"target":"1.6.640","profile":"boaw","catalog":"1.7.104-to-1.6.640"},{"target":"1.6.1170","profile":"bobw","catalog":"1.7.104-to-1.6.1170"},{"target":"1.6.1170","profile":"boaw","catalog":"1.7.104-to-1.6.1170"},{"target":"1.6.1170","profile":"boaw-clean","catalog":"1.7.104-to-1.6.1170-clean"}]}' >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v5
         with:
           submodules: recursive
@@ -93,15 +99,7 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { target: '1.5.97', profile: bobw, catalog: '1.7.104-to-1.5.97' }
-          - { target: '1.5.97', profile: boaw, catalog: '1.7.104-to-1.5.97' }
-          - { target: '1.6.640', profile: bobw, catalog: '1.7.104-to-1.6.640' }
-          - { target: '1.6.640', profile: boaw, catalog: '1.7.104-to-1.6.640' }
-          - { target: '1.6.1170', profile: bobw, catalog: '1.7.104-to-1.6.1170' }
-          - { target: '1.6.1170', profile: boaw, catalog: '1.7.104-to-1.6.1170' }
-          - { target: '1.6.1170', profile: boaw-clean, catalog: '1.7.104-to-1.6.1170-clean' }
+      matrix: ${{ fromJSON(needs.validate.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -142,6 +140,9 @@ jobs:
     needs: [validate, native]
     runs-on: windows-2025
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.validate.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -152,36 +153,38 @@ jobs:
           python-version: '3.12'
       - uses: actions/download-artifact@v5
         with:
-          pattern: sidecar-*
-          merge-multiple: true
+          name: sidecar-${{ matrix.target }}-${{ matrix.profile }}
           path: native
       - name: Enable symlink fixtures
         shell: pwsh
         run: |
           New-Item -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' -Force | Out-Null
           Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' -Name AllowDevelopmentWithoutDevLicense -Type DWord -Value 1
-      - name: Build and stage all seven profiles (tests for stable releases only)
+      - name: Build and stage selected profile (tests for stable releases only)
         shell: pwsh
         run: |
-          cmake "-DNATIVE_SIDECAR_ROOT=$env:GITHUB_WORKSPACE/native" -DSTAGE_ONLY=ON -P tools/build-all.cmake
+          cmake "-DNATIVE_SIDECAR_ROOT=$env:GITHUB_WORKSPACE/native" "-DASSET_MANIFEST=$env:GITHUB_WORKSPACE/assets/runtime/${{ matrix.catalog }}/manifest.json" "-DBUILD_PROFILE=${{ matrix.profile }}" -DSTAGE_ONLY=ON -P tools/build-all.cmake
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify PE hardening
         shell: pwsh
         run: |
           $binaries = Get-ChildItem dist/builds -Recurse -File | Where-Object { $_.Name -in @('version.dll', 'SkyrimRuntimeSwapper.exe') }
-          if ($binaries.Count -ne 14) { throw 'Expected fourteen Windows binaries' }
+          if ($binaries.Count -ne 2) { throw 'Expected two Windows binaries' }
           ./tools/tests/verify-pe-hardening.ps1 -Path $binaries.FullName
       - uses: actions/upload-artifact@v5
         with:
-          name: staged-release
+          name: staged-release-${{ matrix.target }}-${{ matrix.profile }}
           path: dist/builds/
           if-no-files-found: error
           retention-days: 7
 
-  packages:
+  package:
     needs: [validate, windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.validate.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -189,7 +192,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@v5
         with:
-          name: staged-release
+          name: staged-release-${{ matrix.target }}-${{ matrix.profile }}
           path: staged
       - name: Package and round-trip verify
         env:
@@ -200,8 +203,8 @@ jobs:
           from pathlib import Path
           version = os.environ['RELEASE_VERSION']
           sources = sorted(Path('staged').glob(f'{version}/*/SRS-v{version}-*'))
-          if len(sources) != 7 or any(not path.is_dir() for path in sources):
-              raise SystemExit('Expected exactly seven staged packages')
+          if len(sources) != 1 or not sources[0].is_dir():
+              raise SystemExit('Expected exactly one staged package')
           Path('release').mkdir()
           for source in sources:
               if not (source / 'SkyrimRuntimeSwapper.Native').is_file():
@@ -210,7 +213,40 @@ jobs:
                               '--output', f'release/{source.name}.7z'], check=True)
           PY
           cd release
-          sha256sum -- *.7z > SHA256SUMS.txt
+          sha256sum -- *.7z > SHA256SUMS-${{ matrix.target }}-${{ matrix.profile }}.txt
+          sha256sum --check SHA256SUMS-${{ matrix.target }}-${{ matrix.profile }}.txt
+      - uses: actions/upload-artifact@v5
+        with:
+          name: verified-package-${{ matrix.target }}-${{ matrix.profile }}
+          path: |
+            release/*.7z
+            release/SHA256SUMS-*.txt
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+
+  packages:
+    needs: [validate, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: verified-package-*
+          merge-multiple: true
+          path: release
+      - name: Assemble verified release set
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          shopt -s nullglob
+          archives=(SRS-v"$RELEASE_VERSION"-*.7z)
+          receipts=(SHA256SUMS-*.txt)
+          [[ ${#archives[@]} -eq 7 && ${#receipts[@]} -eq 7 ]] || { echo 'Expected seven verified packages'; exit 1; }
+          cat "${receipts[@]}" | LC_ALL=C sort -k2 > SHA256SUMS.txt
           sha256sum --check SHA256SUMS.txt
       - uses: actions/upload-artifact@v5
         with:

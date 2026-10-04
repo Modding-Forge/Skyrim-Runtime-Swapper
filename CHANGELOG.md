@@ -2,6 +2,14 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.3.3-rc5 - 2026-10-04
+
+- Builds Windows packages and verifies archives in parallel, using one shared
+  seven-profile CI matrix. Stable tests, hardening and round-trip checks remain enabled
+  as before; RC builds continue to skip the full test suite.
+- Assembles the complete verified package set before GitHub prerelease or Nexus
+  publication. No runtime behavior changes from RC4.
+
 ## 1.3.3-rc4 - 2026-10-04
 
 - Publishes RC-tag builds as GitHub prereleases with all seven packages and

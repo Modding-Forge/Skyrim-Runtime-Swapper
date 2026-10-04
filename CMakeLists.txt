@@ -5,7 +5,7 @@ project(SkyrimRuntimeSwapper VERSION 1.3.3 LANGUAGES C CXX)
 option(SKYRIM_RUNTIME_BUILD_FUZZER
   "Build the Linux libFuzzer target for the handle-bound HDiffPatch adapter" OFF)
 
-set(SKYRIM_RUNTIME_RELEASE_VERSION "1.3.3-rc4")
+set(SKYRIM_RUNTIME_RELEASE_VERSION "1.3.3-rc5")
 if(SKYRIM_RUNTIME_RELEASE_VERSION MATCHES "-")
   set(SKYRIM_RUNTIME_VERSION_FLAGS "VS_FF_PRERELEASE")
 else()
