@@ -1,4 +1,7 @@
 #include <runtime_swapper/transaction_backend.hpp>
+#include <runtime_swapper/checked_arithmetic.hpp>
+
+#include "internal/storage_policy.hpp"
 
 #include <string_view>
 
@@ -19,13 +22,25 @@ namespace {
 
 }  // namespace
 
+std::optional<std::uint64_t> required_vault_capacity(
+    std::uint64_t required_bytes) noexcept {
+  constexpr std::uint64_t reserve = 256ULL * 1024ULL * 1024ULL;
+  std::uint64_t total{};
+  return checked_add(required_bytes, reserve, total) ? std::optional(total)
+                                                    : std::nullopt;
+}
+
+bool recovery_volume_is_eligible(const VolumeIdentity& volume) noexcept {
+  return volume.local && volume.stable && volume.native_durability &&
+         volume.medium == StorageMedium::internal;
+}
+
 SafetyMode classify_storage(const VolumeIdentity& target,
                             const VolumeIdentity& vault,
                             bool different_volume) noexcept {
   if (!target.local || !target.stable ||
-      target.medium == StorageMedium::network || !vault.local ||
-      !vault.stable || !vault.native_durability ||
-      vault.medium != StorageMedium::internal) {
+      target.medium == StorageMedium::network ||
+      !recovery_volume_is_eligible(vault)) {
     return SafetyMode::hard_blocked;
   }
   if (target.medium == StorageMedium::internal && target.native_durability) {

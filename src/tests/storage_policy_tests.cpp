@@ -1,7 +1,9 @@
 #include <runtime_swapper/transaction_backend.hpp>
+#include "internal/storage_policy.hpp"
 
 #include <array>
 #include <iostream>
+#include <limits>
 
 int main() {
   using namespace runtime_swapper;
@@ -66,6 +68,7 @@ int main() {
           vault.native_durability = native;
           const auto expected = medium == StorageMedium::internal && local &&
                                         stable && native ? automatic : blocked;
+          if (recovery_volume_is_eligible(vault) != (expected == automatic)) return 5;
           if (classify_storage(durable, vault, true) != expected) return 3;
         }
       }
@@ -78,6 +81,13 @@ int main() {
       allowed_storage_operations(persistent) != persistent_operations ||
       allowed_storage_operations(warning) != persistent_operations ||
       allowed_storage_operations(blocked) != StorageOperation::none) return 4;
+  constexpr std::uint64_t reserve = 256ULL * 1024ULL * 1024ULL;
+  constexpr auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+  if (required_vault_capacity(0) != reserve ||
+      required_vault_capacity(1) != reserve + 1 ||
+      required_vault_capacity(maximum - reserve) != maximum ||
+      required_vault_capacity(maximum - reserve + 1) ||
+      required_vault_capacity(maximum)) return 6;
   std::cout << "Storage policy characterization passed\n";
   return 0;
 }

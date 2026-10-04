@@ -1,6 +1,5 @@
 #include <runtime_swapper/transaction_backend.hpp>
 
-#include <runtime_swapper/checked_arithmetic.hpp>
 #include <runtime_swapper/sha256.hpp>
 #include <runtime_swapper/release_version.hpp>
 
@@ -40,8 +39,6 @@
 
 namespace runtime_swapper {
 namespace {
-
-constexpr std::uint64_t vault_reserve_bytes = 256ULL * 1024ULL * 1024ULL;
 
 struct FileDescriptor {
   int value{-1};

@@ -1,6 +1,5 @@
 #include <runtime_swapper/transaction_backend.hpp>
 
-#include <runtime_swapper/checked_arithmetic.hpp>
 #include <runtime_swapper/sha256.hpp>
 #include <runtime_swapper/release_version.hpp>
 
@@ -34,8 +33,6 @@
 namespace runtime_swapper {
 namespace {
 
-constexpr std::uint64_t vault_reserve_bytes = 256ULL * 1024ULL * 1024ULL;
-
 [[nodiscard]] std::optional<std::wstring> random_token() {
   std::array<unsigned char, 16> bytes{};
   if (!BCRYPT_SUCCESS(BCryptGenRandom(
@@ -59,14 +56,6 @@ constexpr std::uint64_t vault_reserve_bytes = 256ULL * 1024ULL * 1024ULL;
   if (!token) return std::nullopt;
   return destination.parent_path() /
          (L".srs-" + std::wstring(purpose) + L"-" + *token);
-}
-
-[[nodiscard]] std::optional<std::uint64_t> required_vault_capacity(
-    std::uint64_t required_bytes) {
-  std::uint64_t total{};
-  return checked_add(required_bytes, vault_reserve_bytes, total)
-             ? std::optional(total)
-             : std::nullopt;
 }
 
 struct LocalFreeDeleter {

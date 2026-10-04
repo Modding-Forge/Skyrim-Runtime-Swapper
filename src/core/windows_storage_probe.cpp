@@ -1,6 +1,7 @@
 #include "internal/windows_storage_probe.hpp"
 #include "internal/windows_private_directory.hpp"
 #include "internal/storage_probe_common.hpp"
+#include "internal/storage_policy.hpp"
 
 #include <runtime_swapper/checked_arithmetic.hpp>
 #include <runtime_swapper/sha256.hpp>
@@ -26,16 +27,6 @@
 
 namespace runtime_swapper {
 namespace {
-
-constexpr std::uint64_t vault_reserve_bytes = 256ULL * 1024ULL * 1024ULL;
-
-[[nodiscard]] std::optional<std::uint64_t> required_vault_capacity(
-    std::uint64_t required_bytes) {
-  std::uint64_t total{};
-  return checked_add(required_bytes, vault_reserve_bytes, total)
-             ? std::optional(total)
-             : std::nullopt;
-}
 
 struct LocalFreeDeleter {
   void operator()(void* value) const noexcept {
@@ -693,8 +684,7 @@ BackendProbeResult probe_windows_storage(
                      L"The pending installation will not be redirected to a new vault.",
                      *target, {}, vault_path, *id);
     }
-    if (!vault || !vault->local || !vault->stable || !vault->native_durability ||
-        vault->medium != StorageMedium::internal) {
+    if (!vault || !recovery_volume_is_eligible(*vault)) {
       return blocked(L"vault-volume-not-durable",
                      L"The automatic recovery vault is not on a stable internal NTFS "
                      L"volume.", *target, vault.value_or(VolumeIdentity{}), vault_path, *id);
@@ -771,8 +761,7 @@ BackendProbeResult probe_windows_storage(
                      storage_base, target_storage_base, *id);
     }
     vault = inspect_volume(vault_path);
-    if (!vault || !vault->local || !vault->stable || !vault->native_durability ||
-        vault->medium != StorageMedium::internal) {
+    if (!vault || !recovery_volume_is_eligible(*vault)) {
       return blocked(L"vault-volume-not-durable",
                      L"The automatic recovery vault is not on a stable internal NTFS "
                      L"volume.", *target, vault.value_or(VolumeIdentity{}), vault_path, *id);

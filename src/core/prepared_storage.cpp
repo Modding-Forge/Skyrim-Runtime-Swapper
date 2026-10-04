@@ -1,6 +1,6 @@
 #include <runtime_swapper/prepared_storage.hpp>
 
-#include <runtime_swapper/checked_arithmetic.hpp>
+#include "internal/storage_policy.hpp"
 #include <runtime_swapper/sha256.hpp>
 
 #if defined(_WIN32)
@@ -23,8 +23,6 @@
 
 namespace runtime_swapper {
 namespace {
-
-constexpr std::uint64_t recovery_reserve_bytes = 256ULL * 1024ULL * 1024ULL;
 
 struct FileIdentity {
   std::uint64_t device{};
@@ -160,13 +158,11 @@ thread_local PreparedStorageContext* active_context{};
 
 [[nodiscard]] bool has_recovery_capacity(
     const std::filesystem::path& vault, std::uint64_t required_bytes) {
-  std::uint64_t required{};
-  if (!checked_add(required_bytes, recovery_reserve_bytes, required)) {
-    return false;
-  }
+  const auto required = required_vault_capacity(required_bytes);
+  if (!required) return false;
   std::error_code error;
   const auto available = std::filesystem::space(vault, error);
-  return !error && available.available >= required;
+  return !error && available.available >= *required;
 }
 
 }  // namespace

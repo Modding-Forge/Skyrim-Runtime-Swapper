@@ -1,5 +1,6 @@
 #include "internal/posix_storage_probe.hpp"
 #include "internal/storage_probe_common.hpp"
+#include "internal/storage_policy.hpp"
 
 #include <runtime_swapper/checked_arithmetic.hpp>
 #include <runtime_swapper/sha256.hpp>
@@ -32,8 +33,6 @@
 
 namespace runtime_swapper {
 namespace {
-
-constexpr std::uint64_t vault_reserve_bytes = 256ULL * 1024ULL * 1024ULL;
 
 struct FileDescriptor {
   int value{-1};
@@ -294,14 +293,6 @@ struct MountEntry {
                           static_cast<std::uint64_t>(space.f_frsize),
                           available) &&
          available >= required_bytes;
-}
-
-[[nodiscard]] std::optional<std::uint64_t> required_vault_capacity(
-    std::uint64_t required_bytes) {
-  std::uint64_t total{};
-  return checked_add(required_bytes, vault_reserve_bytes, total)
-             ? std::optional(total)
-             : std::nullopt;
 }
 
 [[nodiscard]] std::optional<std::filesystem::path> state_home() {
@@ -577,7 +568,7 @@ BackendProbeResult probe_posix_storage(
                      L"The pending installation will not be redirected to a new vault.",
                      *target, {}, vault_path, *id);
     }
-    if (!vault || !vault->native_durability || !vault->stable) {
+    if (!vault || !recovery_volume_is_eligible(*vault)) {
       return blocked(L"vault-volume-not-durable",
                      L"The recovery vault is not on an internal ext4, XFS, or Btrfs "
                      L"volume.", *target, vault.value_or(VolumeIdentity{}), vault_path, *id);
@@ -641,7 +632,7 @@ BackendProbeResult probe_posix_storage(
                      *target, {}, vault_path, *id);
     }
     vault = inspect_volume(vault_path);
-    if (!vault || !vault->native_durability || !vault->stable) {
+    if (!vault || !recovery_volume_is_eligible(*vault)) {
       return blocked(L"vault-volume-not-durable",
                      L"The recovery vault is not on an internal ext4, XFS, or Btrfs "
                      L"volume.", *target, vault.value_or(VolumeIdentity{}), vault_path, *id);
