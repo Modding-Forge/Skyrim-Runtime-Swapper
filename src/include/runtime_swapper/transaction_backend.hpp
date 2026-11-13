@@ -197,6 +197,13 @@ struct MutationResult {
 // redirecting path entry. Uninspectable entries are treated as redirected.
 [[nodiscard]] bool managed_path_entry_is_redirected(
     const std::filesystem::path& path) noexcept;
+// Returns true when the entry was pending deletion by a legacy filesystem and
+// has since disappeared. Returns false for every other state.
+[[nodiscard]] bool await_managed_path_entry_pending_delete(
+    const std::filesystem::path& path) noexcept;
+// Describes how the entry answered an attribute query, for diagnostics.
+[[nodiscard]] std::wstring describe_managed_path_entry(
+    const std::filesystem::path& path);
 
 class TransactionBackend {
  public:

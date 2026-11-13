@@ -160,19 +160,33 @@ struct CleanupResult {
   return {false, std::move(detail)};
 }
 
+[[nodiscard]] CleanupResult unsafe_entry_failure(std::wstring_view action,
+                                                 const std::filesystem::path& path,
+                                                 const std::error_code& error = {}) {
+  auto failure = cleanup_failure(action, path, error);
+  failure.detail += L" [" + describe_managed_path_entry(path) + L"]";
+  return failure;
+}
+
 [[nodiscard]] CleanupResult remove_transaction_file(
     const std::filesystem::path& path) {
   std::error_code error;
   const auto status = std::filesystem::symlink_status(path, error);
   if (error == std::errc::no_such_file_or_directory) return {true, {}};
-  if (error) return cleanup_failure(L"Could not inspect transaction file", path, error);
+  if (error) {
+    // exFAT keeps a deleted name visible while another handle is open.
+    if (await_managed_path_entry_pending_delete(path)) return {true, {}};
+    return unsafe_entry_failure(L"Could not inspect transaction file", path, error);
+  }
   if (!std::filesystem::exists(status)) return {true, {}};
   if (!std::filesystem::is_regular_file(status) ||
       managed_path_entry_is_redirected(path)) {
-    return cleanup_failure(L"Refused to remove an unsafe transaction entry", path);
+    return unsafe_entry_failure(L"Refused to remove an unsafe transaction entry", path);
   }
-  if (!transaction_backend().durable_remove(path)) {
-    return cleanup_failure(L"Could not durably remove transaction file", path);
+  const auto removed = transaction_backend().durable_remove(path);
+  if (!removed) {
+    return {false, L"Could not durably remove transaction file: " + quote_path(path) +
+                       L"\n" + mutation_failure_detail(removed)};
   }
   return {true, {}};
 }
@@ -188,7 +202,7 @@ struct CleanupResult {
   if (!std::filesystem::exists(root_status)) return {true, {}};
   if (!std::filesystem::is_directory(root_status) ||
       managed_path_entry_is_redirected(root)) {
-    return cleanup_failure(L"Refused to traverse an unsafe transaction directory",
+    return unsafe_entry_failure(L"Refused to traverse an unsafe transaction directory",
                            root);
   }
 
@@ -208,7 +222,7 @@ struct CleanupResult {
     }
     if (managed_path_entry_is_redirected(entry)) {
       iterator.disable_recursion_pending();
-      return cleanup_failure(L"Refused to traverse an unsafe transaction entry", entry);
+      return unsafe_entry_failure(L"Refused to traverse an unsafe transaction entry", entry);
     }
     if (std::filesystem::is_directory(status)) {
       directories.push_back(entry);
@@ -238,16 +252,20 @@ struct CleanupResult {
         (!error && !std::filesystem::exists(current_status))) {
       continue;
     }
+    if (error && await_managed_path_entry_pending_delete(*directory)) continue;
     if (error || !std::filesystem::is_directory(current_status) ||
         managed_path_entry_is_redirected(*directory)) {
-      return cleanup_failure(L"Refused to remove an unsafe transaction directory",
-                             *directory, error);
+      return unsafe_entry_failure(L"Refused to remove an unsafe transaction directory",
+                                  *directory, error);
     }
     const bool removed = std::filesystem::remove(*directory, error);
     if (error) {
       return cleanup_failure(L"Could not remove transaction directory", *directory,
                              error);
     }
+    // A legacy filesystem keeps the removed name until other handles close;
+    // the parent cannot be removed before it is gone.
+    if (removed) (void)await_managed_path_entry_pending_delete(*directory);
     if (!removed) {
       const auto status = std::filesystem::symlink_status(*directory, error);
       if (error != std::errc::no_such_file_or_directory &&

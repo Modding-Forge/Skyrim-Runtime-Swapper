@@ -19,6 +19,11 @@ struct StorageProbeContext {
       bool include_storage_paths = false) const;
 };
 
+struct StorageSpaceResult {
+  std::uint64_t available{};
+  std::error_code error;
+};
+
 // Internal seam: native checks keep their original ordering and error details.
 // In particular check_existing may repair only when prepare is explicitly true.
 class StorageProbePlatform {
@@ -32,8 +37,8 @@ class StorageProbePlatform {
       const std::filesystem::path& path) = 0;
   [[nodiscard]] virtual std::optional<std::filesystem::path> existing_ancestor(
       const std::filesystem::path& path) = 0;
-  [[nodiscard]] virtual bool has_space(const std::filesystem::path& path,
-                                      std::uint64_t required) = 0;
+  [[nodiscard]] virtual StorageSpaceResult free_space(
+      const std::filesystem::path& path) = 0;
   [[nodiscard]] virtual std::optional<BackendProbeResult> check_existing(
       const StorageProbeContext& context, const VolumeIdentity& vault,
       bool exists, bool prepare) = 0;

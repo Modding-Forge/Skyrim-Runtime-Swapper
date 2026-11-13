@@ -505,11 +505,13 @@ using UniqueHandle = std::unique_ptr<void, HandleCloser>;
   return "skyrimse-" + hash->substr(0, 16);
 }
 
-[[nodiscard]] bool has_free_space(const std::filesystem::path& path,
-                                  std::uint64_t required) {
+[[nodiscard]] StorageSpaceResult query_free_space(const std::filesystem::path& path) {
   ULARGE_INTEGER available{};
-  return GetDiskFreeSpaceExW(path.c_str(), &available, nullptr, nullptr) &&
-         available.QuadPart >= required;
+  if (!GetDiskFreeSpaceExW(path.c_str(), &available, nullptr, nullptr)) {
+    const auto error = GetLastError();
+    return {0, std::error_code(static_cast<int>(error), std::system_category())};
+  }
+  return {available.QuadPart, {}};
 }
 
 class WindowsProbePlatform final : public StorageProbePlatform {
@@ -524,8 +526,8 @@ class WindowsProbePlatform final : public StorageProbePlatform {
       const std::filesystem::path& path) override {
     return existing_directory_ancestor(path);
   }
-  bool has_space(const std::filesystem::path& path, std::uint64_t required) override {
-    return has_free_space(path, required);
+  StorageSpaceResult free_space(const std::filesystem::path& path) override {
+    return query_free_space(path);
   }
   std::optional<BackendProbeResult> check_existing(
       const StorageProbeContext& context, const VolumeIdentity& vault,

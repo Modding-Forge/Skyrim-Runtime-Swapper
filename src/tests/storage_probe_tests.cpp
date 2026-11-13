@@ -44,6 +44,8 @@ class Platform final : public StorageProbePlatform {
   bool write_failure{};
   bool fail_after_write{};
   bool corrupt_write{};
+  std::error_code space_error;
+  bool error_after_creation{};
   unsigned volume_calls{};
   unsigned writes{};
 
@@ -57,9 +59,10 @@ class Platform final : public StorageProbePlatform {
     if (missing_anchor) return std::nullopt;
     return path.parent_path();
   }
-  bool has_space(const fs::path&, std::uint64_t required) override {
+  StorageSpaceResult free_space(const fs::path&) override {
     calls.push_back("space");
-    return required <= capacity && !(volume_calls > 1 && lose_space);
+    if (space_error && (!error_after_creation || volume_calls > 1)) return {0, space_error};
+    return {volume_calls > 1 && lose_space ? 0 : capacity, {}};
   }
   std::optional<BackendProbeResult> check_existing(
       const StorageProbeContext& context, const VolumeIdentity& volume,
@@ -302,6 +305,33 @@ void scenarios(PathSyntax syntax) {
     Fixture f(syntax);
     f.platform.lose_space = true;
     require(f.probe(true).technical_reason == L"vault-insufficient-space", "space recheck");
+  }
+  for (const bool after_creation : {false, true}) {
+    for (const auto error : {std::errc::permission_denied, std::errc::io_error}) {
+      Fixture f(syntax);
+      f.platform.space_error = std::make_error_code(error);
+      f.platform.error_after_creation = after_creation;
+      const auto result = f.probe(true);
+      require(result.technical_reason == (syntax == PathSyntax::windows &&
+              error == std::errc::permission_denied ? L"vault-owner-or-dacl" : L"vault-space-query-failed"),
+              "query failure is not insufficient space");
+      require(result.message.find(L"Native error: " + std::to_wstring(f.platform.space_error.value())) !=
+                  std::wstring::npos && result.message.find(L"268435456") != std::wstring::npos,
+              "query diagnostics preserve native error and required bytes");
+      require(result.recovery_vault.value == f.context.recovery_vault.value &&
+                  !result.coordination_lock.value.empty(), "query failure retains repair paths");
+      require(fs::exists(f.context.recovery_vault.value) == after_creation &&
+                  f.platform.writes == 0, "query error cannot create or publish further state");
+    }
+  }
+  {
+    Fixture f(syntax);
+    f.platform.capacity = 123;
+    const auto result = f.probe();
+    require(result.technical_reason == L"vault-insufficient-space" &&
+                result.message.find(L"Available bytes: 123") != std::wstring::npos &&
+                result.message.find(L"268435456") != std::wstring::npos,
+            "genuine low space includes measured capacity");
   }
   {
     Fixture f(syntax);

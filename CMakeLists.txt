@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(SkyrimRuntimeSwapper VERSION 1.4.0 LANGUAGES C CXX)
+project(SkyrimRuntimeSwapper VERSION 1.4.1 LANGUAGES C CXX)
 
 option(SKYRIM_RUNTIME_BUILD_FUZZER
   "Build the Linux libFuzzer target for the handle-bound HDiffPatch adapter" OFF)
 
-set(SKYRIM_RUNTIME_RELEASE_VERSION "1.4.0")
+set(SKYRIM_RUNTIME_RELEASE_VERSION "1.4.1-rc3")
 if(SKYRIM_RUNTIME_RELEASE_VERSION MATCHES "-")
   set(SKYRIM_RUNTIME_VERSION_FLAGS "VS_FF_PRERELEASE")
 else()
@@ -645,6 +645,8 @@ if(BUILD_TESTING)
     target_compile_options(windows_storage_access_tests PRIVATE /W4 /permissive- /EHsc /utf-8)
   endif()
   add_test(NAME windows_storage_access_tests COMMAND windows_storage_access_tests)
+  add_test(NAME windows_storage_space_access_tests
+    COMMAND windows_storage_access_tests --space-access-only)
   add_test(NAME windows_catalog_storage_access_tests
     COMMAND windows_storage_access_tests --catalog-acl-only)
   target_include_directories(core_storage_tests PRIVATE src/core)

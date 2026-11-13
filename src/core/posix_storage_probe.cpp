@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -283,15 +284,17 @@ struct MountEntry {
                         local && medium == StorageMedium::internal && trusted_fs};
 }
 
-[[nodiscard]] bool has_available_space(const std::filesystem::path& path,
-                                       std::uint64_t required_bytes) {
+[[nodiscard]] StorageSpaceResult query_free_space(const std::filesystem::path& path) {
   struct statvfs space {};
-  if (::statvfs(path.c_str(), &space) != 0) return false;
+  if (::statvfs(path.c_str(), &space) != 0) {
+    return {0, std::error_code(errno, std::generic_category())};
+  }
   std::uint64_t available{};
-  return checked_multiply(static_cast<std::uint64_t>(space.f_bavail),
-                          static_cast<std::uint64_t>(space.f_frsize),
-                          available) &&
-         available >= required_bytes;
+  if (!checked_multiply(static_cast<std::uint64_t>(space.f_bavail),
+                        static_cast<std::uint64_t>(space.f_frsize), available)) {
+    return {0, std::make_error_code(std::errc::value_too_large)};
+  }
+  return {available, {}};
 }
 
 [[nodiscard]] std::optional<std::filesystem::path> state_home() {
@@ -377,8 +380,8 @@ class PosixProbePlatform final : public StorageProbePlatform {
       const std::filesystem::path& path) override {
     return posix_existing_directory_ancestor(path);
   }
-  bool has_space(const std::filesystem::path& path, std::uint64_t required) override {
-    return has_available_space(path, required);
+  StorageSpaceResult free_space(const std::filesystem::path& path) override {
+    return query_free_space(path);
   }
   std::optional<BackendProbeResult> check_existing(
       const StorageProbeContext& context, const VolumeIdentity& vault,

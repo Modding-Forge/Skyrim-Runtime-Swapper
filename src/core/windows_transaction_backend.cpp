@@ -19,6 +19,7 @@
 #include <array>
 #include <cstddef>
 #include <cstring>
+#include <cwchar>
 #include <cwctype>
 #include <filesystem>
 #include <functional>
@@ -221,18 +222,20 @@ static_assert(offsetof(MountPointReparseData, path_buffer) == 16);
   return file && FlushFileBuffers(file.get()) != FALSE;
 }
 
-[[nodiscard]] bool attempt_directory_flush(const std::filesystem::path& directory) {
+[[nodiscard]] std::error_code directory_flush_error(const std::filesystem::path& directory) {
   UniqueHandle handle(CreateFileW(directory.c_str(), GENERIC_READ,
                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                   nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS,
                                   nullptr));
-  if (!handle) return false;
+  if (!handle)
+    return {static_cast<int>(GetLastError()), std::system_category()};
   const BOOL result = FlushFileBuffers(handle.get());
   const DWORD error = result ? ERROR_SUCCESS : GetLastError();
   // Metadata-changing calls use write-through. Windows commonly rejects flushing a
   // directory handle with either of these two documented filesystem errors.
-  return result != FALSE || error == ERROR_INVALID_FUNCTION ||
-         error == ERROR_ACCESS_DENIED || error == ERROR_INVALID_HANDLE;
+  if (result != FALSE || error == ERROR_INVALID_FUNCTION ||
+      error == ERROR_ACCESS_DENIED || error == ERROR_INVALID_HANDLE) return {};
+  return {static_cast<int>(error), std::system_category()};
 }
 
 struct FileIdentity {
@@ -452,6 +455,61 @@ struct FileIdentity {
     }
   }
   return FlushFileBuffers(destination) != FALSE;
+}
+
+using RtlGetLastNtStatusFunction = NTSTATUS(NTAPI*)();
+// Resolved during static initialization so that querying it cannot disturb
+// the thread's last NTSTATUS between a failed call and its classification.
+const auto rtl_get_last_nt_status = reinterpret_cast<RtlGetLastNtStatusFunction>(
+    GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetLastNtStatus"));
+
+// Legacy deletion on exFAT and FAT keeps a name visible until the last handle
+// closes. Windows reports opens and attribute queries of that name as access
+// denied; only the thread's last NTSTATUS identifies STATUS_DELETE_PENDING.
+[[nodiscard]] bool delete_pending_error(DWORD error) noexcept {
+  constexpr auto status_delete_pending = static_cast<NTSTATUS>(0xC0000056L);
+  return error == ERROR_ACCESS_DENIED && rtl_get_last_nt_status != nullptr &&
+         rtl_get_last_nt_status() == status_delete_pending;
+}
+
+// Waits until a delete-pending name has left its directory. Returns false
+// immediately for any other state, and when the name is still present after
+// the timeout because another handle keeps it open.
+[[nodiscard]] bool await_pending_delete(const std::filesystem::path& path) noexcept {
+  constexpr int attempts = 100;
+  for (int attempt = 0; attempt < attempts; ++attempt) {
+    if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) return false;
+    const DWORD error = GetLastError();
+    if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) return true;
+    if (!delete_pending_error(error)) return false;
+    Sleep(100);
+  }
+  return false;
+}
+
+// A delete-pending leaf fails the per-component reparse check because it can
+// no longer be queried. Accept it only below a verified parent once it is gone.
+[[nodiscard]] bool pending_leaf_removed(const std::filesystem::path& path) {
+  return !path_has_unsupported_reparse_component(path.parent_path()) &&
+         await_pending_delete(path);
+}
+
+// Reads the attributes recorded in the parent directory listing. Unlike
+// GetFileAttributesW this does not open the entry, so it still works for a
+// delete-pending name.
+[[nodiscard]] std::optional<DWORD> listed_attributes(
+    const std::filesystem::path& path) noexcept {
+  try {
+    WIN32_FIND_DATAW data{};
+    const HANDLE find = FindFirstFileExW(path.c_str(), FindExInfoBasic, &data,
+                                         FindExSearchNameMatch, nullptr, 0);
+    if (find == INVALID_HANDLE_VALUE) return std::nullopt;
+    FindClose(find);
+    if (!equal_ordinal(data.cFileName, path.filename().wstring())) return std::nullopt;
+    return data.dwFileAttributes;
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
 }
 
 void discard_open_file(HANDLE file) noexcept {
@@ -842,10 +900,24 @@ class WindowsTransactionBackend final : public TransactionBackend {
   }
 
   MutationResult durable_remove(const std::filesystem::path& path) override {
-    if (core::fault_injected("remove.before") ||
-        path_has_unsupported_reparse_component(path)) {
+    const auto flush_removed_parent = [&]() {
+      auto parent = open_plain_directory(path.parent_path());
+      if (!parent || !flush_directory_handle(parent.get())) {
+        return windows_failure(MutationStep::flush_directory,
+                               MutationState::source_relocated);
+      }
+      return MutationResult::success();
+    };
+    if (core::fault_injected("remove.before")) {
       return MutationResult::failure(MutationStep::validate,
                                      MutationState::untouched);
+    }
+    if (path_has_unsupported_reparse_component(path)) {
+      if (pending_leaf_removed(path)) return flush_removed_parent();
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched, {},
+                                     L"validate-path; " + describe_managed_path_entry(path) +
+                                         L"; path=" + path.wstring());
     }
     UniqueHandle file(CreateFileW(
         path.c_str(), DELETE | FILE_READ_ATTRIBUTES, FILE_SHARE_READ |
@@ -853,12 +925,19 @@ class WindowsTransactionBackend final : public TransactionBackend {
         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
     if (file.get() == INVALID_HANDLE_VALUE) {
       const DWORD error = GetLastError();
-      return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND
-                 ? MutationResult::success()
-                 : MutationResult::failure(
-                       MutationStep::validate, MutationState::untouched,
-                       std::error_code(static_cast<int>(error),
-                                       std::system_category()));
+      if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+        return MutationResult::success();
+      }
+      if (delete_pending_error(error)) {
+        if (await_pending_delete(path)) return flush_removed_parent();
+        return MutationResult::failure(
+            MutationStep::remove, MutationState::source_relocated,
+            std::error_code(static_cast<int>(error), std::system_category()),
+            L"delete-pending; path=" + path.wstring());
+      }
+      return MutationResult::failure(
+          MutationStep::validate, MutationState::untouched,
+          std::error_code(static_cast<int>(error), std::system_category()));
     }
     FILE_STANDARD_INFO standard{};
     FILE_BASIC_INFO basic{};
@@ -878,7 +957,9 @@ class WindowsTransactionBackend final : public TransactionBackend {
         FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE};
     bool removed = SetFileInformationByHandle(
         file.get(), FileDispositionInfoEx, &disposition, sizeof(disposition));
+    bool legacy_disposition = false;
     if (!removed) {
+      legacy_disposition = true;
       const DWORD disposition_error = GetLastError();
       if (disposition_error != ERROR_INVALID_PARAMETER &&
           disposition_error != ERROR_NOT_SUPPORTED &&
@@ -907,18 +988,23 @@ class WindowsTransactionBackend final : public TransactionBackend {
       removed = SetFileInformationByHandle(file.get(), FileDispositionInfo,
                                            &legacy, sizeof(legacy));
     }
-    file.reset();
     if (!removed) return windows_failure(MutationStep::remove,
                                          MutationState::untouched);
+    file.reset();
+    // Without POSIX semantics the name stays until every other handle, such as
+    // a scanner's, is closed. Callers expect the entry gone on success.
+    if (legacy_disposition && !await_pending_delete(path)) {
+      return MutationResult::failure(
+          MutationStep::remove, MutationState::source_relocated,
+          std::make_error_code(std::errc::device_or_resource_busy),
+          L"delete-pending-after-legacy-disposition; path=" + path.wstring());
+    }
     if (core::fault_injected("remove.after-unlink")) {
       return MutationResult::failure(MutationStep::remove,
                                      MutationState::source_relocated);
     }
-    auto parent = open_plain_directory(path.parent_path());
-    if (!parent || !flush_directory_handle(parent.get())) {
-      return windows_failure(MutationStep::flush_directory,
-                             MutationState::source_relocated);
-    }
+    const auto flushed = flush_removed_parent();
+    if (!flushed) return flushed;
     if (core::fault_injected("remove.after-sync")) {
       return MutationResult::failure(MutationStep::flush_directory,
                                      MutationState::fully_durable);
@@ -928,8 +1014,14 @@ class WindowsTransactionBackend final : public TransactionBackend {
 
   MutationResult durable_remove_deferred_sync(
       const std::filesystem::path& path) override {
-    if (core::fault_injected("remove.before") ||
-        path_has_unsupported_reparse_component(path)) {
+    if (core::fault_injected("remove.before")) {
+      return MutationResult::failure(MutationStep::validate,
+                                     MutationState::untouched);
+    }
+    if (path_has_unsupported_reparse_component(path)) {
+      if (pending_leaf_removed(path)) {
+        return MutationResult::success(MutationState::source_relocated);
+      }
       return MutationResult::failure(MutationStep::validate,
                                      MutationState::untouched);
     }
@@ -940,7 +1032,8 @@ class WindowsTransactionBackend final : public TransactionBackend {
         nullptr));
     if (file.get() == INVALID_HANDLE_VALUE) {
       const DWORD error = GetLastError();
-      return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND
+      return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ||
+                     (delete_pending_error(error) && await_pending_delete(path))
                  ? MutationResult::success(MutationState::source_relocated)
                  : MutationResult::failure(
                        MutationStep::validate, MutationState::untouched,
@@ -959,6 +1052,7 @@ class WindowsTransactionBackend final : public TransactionBackend {
     FILE_DISPOSITION_INFO_EX disposition{
         FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS |
         FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE};
+    bool legacy_disposition = false;
     if (!SetFileInformationByHandle(file.get(), FileDispositionInfoEx,
                                     &disposition, sizeof(disposition))) {
       FILE_DISPOSITION_INFO legacy{TRUE};
@@ -967,8 +1061,15 @@ class WindowsTransactionBackend final : public TransactionBackend {
         return windows_failure(MutationStep::remove,
                                MutationState::untouched);
       }
+      legacy_disposition = true;
     }
     file.reset();
+    if (legacy_disposition && !await_pending_delete(path)) {
+      return MutationResult::failure(
+          MutationStep::remove, MutationState::source_relocated,
+          std::make_error_code(std::errc::device_or_resource_busy),
+          L"delete-pending-after-legacy-disposition; path=" + path.wstring());
+    }
     if (core::fault_injected("remove.after-unlink")) {
       return MutationResult::failure(MutationStep::remove,
                                      MutationState::source_relocated);
@@ -991,22 +1092,44 @@ class WindowsTransactionBackend final : public TransactionBackend {
         std::filesystem::is_symlink(status) ||
         path_has_unsupported_reparse_component(root)) {
       return MutationResult::failure(MutationStep::validate,
-                                     MutationState::untouched, error);
+          MutationState::untouched,
+          error ? error : std::make_error_code(std::errc::invalid_argument),
+          L"validate-tree-root; path=" + root.wstring());
     }
 
-    std::function<bool(const std::filesystem::path&)> remove_directory;
+    const auto failed = [](const std::filesystem::path& path,
+                           const wchar_t* operation, std::error_code code,
+                           MutationStep step = MutationStep::remove) {
+      return MutationResult::failure(step, MutationState::source_relocated, code,
+          std::wstring(operation) + L"; path=" + path.wstring());
+    };
+    const auto native_failed = [&](const std::filesystem::path& path,
+                                   const wchar_t* operation, DWORD code) {
+      return failed(path, operation,
+          std::error_code(static_cast<int>(code), std::system_category()));
+    };
+    std::function<MutationResult(const std::filesystem::path&)> remove_directory;
     remove_directory = [&](const std::filesystem::path& directory) {
       std::error_code iteration_error;
       for (std::filesystem::directory_iterator iterator(directory, iteration_error), end;
            !iteration_error && iterator != end; iterator.increment(iteration_error)) {
         const auto child = iterator->path();
-        const auto child_status = std::filesystem::symlink_status(child, iteration_error);
+        // Uses the status recorded by the enumeration, which remains available
+        // for a delete-pending entry that can no longer be queried by name.
+        const auto child_status = iterator->symlink_status(iteration_error);
+        if (!iteration_error && !std::filesystem::is_symlink(child_status) &&
+            path_has_unsupported_reparse_component(child) &&
+            pending_leaf_removed(child)) {
+          continue;
+        }
         if (iteration_error || std::filesystem::is_symlink(child_status) ||
             path_has_unsupported_reparse_component(child)) {
-          return false;
+          return failed(child, L"validate-tree-entry", iteration_error ? iteration_error :
+              std::make_error_code(std::errc::invalid_argument));
         }
         if (std::filesystem::is_directory(child_status)) {
-          if (!remove_directory(child)) return false;
+          const auto removed = remove_directory(child);
+          if (!removed) return removed;
         } else if (std::filesystem::is_regular_file(child_status)) {
           UniqueHandle child_handle(CreateFileW(
               child.c_str(), FILE_READ_ATTRIBUTES,
@@ -1015,20 +1138,31 @@ class WindowsTransactionBackend final : public TransactionBackend {
                                  FILE_FLAG_OPEN_REPARSE_POINT,
               nullptr));
           FILE_STANDARD_INFO child_standard{};
-          if (!child_handle ||
-              !GetFileInformationByHandleEx(child_handle.get(), FileStandardInfo,
-                                            &child_standard,
-                                            sizeof(child_standard)) ||
-              child_standard.NumberOfLinks != 1) {
-            return false;
+          if (child_handle.get() == INVALID_HANDLE_VALUE) child_handle.release();
+          if (!child_handle) {
+            const DWORD code = GetLastError();
+            if (delete_pending_error(code) && await_pending_delete(child)) continue;
+            return native_failed(child, L"CreateFileW(tree-file)", code);
           }
+          if (!GetFileInformationByHandleEx(child_handle.get(), FileStandardInfo,
+                                            &child_standard, sizeof(child_standard)))
+            return native_failed(child, L"GetFileInformationByHandleEx(FileStandardInfo)", GetLastError());
+          if (child_standard.NumberOfLinks != 1)
+            return failed(child, L"reject-tree-hardlink",
+                          std::make_error_code(std::errc::invalid_argument));
           child_handle.reset();
-          if (!durable_remove(child)) return false;
+          auto removed = durable_remove(child);
+          if (!removed) {
+            removed.state = MutationState::source_relocated;
+            removed.detail += L"; tree-file=" + child.wstring();
+            return removed;
+          }
         } else {
-          return false;
+          return failed(child, L"reject-tree-entry-type",
+                        std::make_error_code(std::errc::invalid_argument));
         }
       }
-      if (iteration_error) return false;
+      if (iteration_error) return failed(directory, L"enumerate-tree", iteration_error);
 
       UniqueHandle handle(CreateFileW(
           directory.c_str(), DELETE | FILE_READ_ATTRIBUTES,
@@ -1037,28 +1171,50 @@ class WindowsTransactionBackend final : public TransactionBackend {
                              FILE_FLAG_OPEN_REPARSE_POINT,
           nullptr));
       FILE_BASIC_INFO attributes{};
-      if (!handle ||
-          !GetFileInformationByHandleEx(handle.get(), FileBasicInfo,
-                                        &attributes, sizeof(attributes)) ||
-          (attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
-          (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        return false;
+      if (handle.get() == INVALID_HANDLE_VALUE) handle.release();
+      if (!handle) {
+        const DWORD code = GetLastError();
+        if (delete_pending_error(code) && await_pending_delete(directory))
+          return MutationResult::success();
+        return native_failed(directory, L"CreateFileW(tree-directory)", code);
       }
+      if (!GetFileInformationByHandleEx(handle.get(), FileBasicInfo,
+                                        &attributes, sizeof(attributes)))
+        return native_failed(directory, L"GetFileInformationByHandleEx(FileBasicInfo)", GetLastError());
+      if ((attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+          (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+        return failed(directory, L"validate-tree-directory",
+                      std::make_error_code(std::errc::invalid_argument));
       FILE_DISPOSITION_INFO_EX disposition{
           FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS |
           FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE};
-      if (!SetFileInformationByHandle(handle.get(), FileDispositionInfoEx,
-                                      &disposition, sizeof(disposition))) {
-        return false;
+      const bool legacy_test = core::fault_injected("remove-tree.legacy-disposition");
+      bool legacy_disposition = false;
+      if (legacy_test || !SetFileInformationByHandle(handle.get(), FileDispositionInfoEx,
+                                                     &disposition, sizeof(disposition))) {
+        legacy_disposition = true;
+        const DWORD code = legacy_test ? ERROR_INVALID_PARAMETER : GetLastError();
+        if (code != ERROR_INVALID_PARAMETER && code != ERROR_NOT_SUPPORTED &&
+            code != ERROR_INVALID_FUNCTION)
+          return native_failed(directory, L"SetFileInformationByHandle(FileDispositionInfoEx)", code);
+        FILE_DISPOSITION_INFO legacy{TRUE};
+        if (!SetFileInformationByHandle(handle.get(), FileDispositionInfo,
+                                        &legacy, sizeof(legacy)))
+          return native_failed(directory, L"SetFileInformationByHandle(FileDispositionInfo)", GetLastError());
       }
       handle.reset();
-      return attempt_directory_flush(directory.parent_path());
+      if (legacy_disposition && !await_pending_delete(directory))
+        return failed(directory, L"delete-pending-after-legacy-disposition",
+                      std::make_error_code(std::errc::device_or_resource_busy));
+      const auto flush_error = directory_flush_error(directory.parent_path());
+      if (flush_error)
+        return failed(directory.parent_path(), L"flush-tree-parent",
+                      flush_error, MutationStep::flush_directory);
+      return MutationResult::success();
     };
 
-    if (!remove_directory(root)) {
-      return windows_failure(MutationStep::remove,
-                             MutationState::source_relocated);
-    }
+    const auto removed = remove_directory(root);
+    if (!removed) return removed;
     if (core::fault_injected("remove-tree.after-sync")) {
       return MutationResult::failure(MutationStep::flush_directory,
                                      MutationState::fully_durable);
@@ -1180,8 +1336,38 @@ bool managed_path_is_safe(const std::filesystem::path& path) noexcept {
 bool managed_path_entry_is_redirected(
     const std::filesystem::path& path) noexcept {
   const DWORD attributes = GetFileAttributesW(path.c_str());
-  return attributes == INVALID_FILE_ATTRIBUTES ||
-         (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+  if (attributes != INVALID_FILE_ATTRIBUTES) {
+    return (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+  }
+  // A delete-pending entry cannot be queried by name, but its directory
+  // listing still records whether it is a reparse point.
+  if (!delete_pending_error(GetLastError())) return true;
+  const auto listed = listed_attributes(path);
+  return !listed || (*listed & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+}
+
+bool await_managed_path_entry_pending_delete(
+    const std::filesystem::path& path) noexcept {
+  return await_pending_delete(path);
+}
+
+std::wstring describe_managed_path_entry(const std::filesystem::path& path) {
+  const DWORD attributes = GetFileAttributesW(path.c_str());
+  if (attributes != INVALID_FILE_ATTRIBUTES) {
+    wchar_t text[32]{};
+    swprintf_s(text, L"attributes=0x%08lx", attributes);
+    return text;
+  }
+  const DWORD error = GetLastError();
+  const bool pending = delete_pending_error(error);
+  std::wstring detail = L"native-error=" + std::to_wstring(error);
+  if (pending) detail += L"; delete-pending=yes";
+  if (const auto listed = listed_attributes(path)) {
+    wchar_t text[40]{};
+    swprintf_s(text, L"; listed-attributes=0x%08lx", *listed);
+    detail += text;
+  }
+  return detail;
 }
 
 bool is_wine_environment() noexcept {

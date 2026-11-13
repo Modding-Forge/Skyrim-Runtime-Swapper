@@ -50,10 +50,73 @@ struct Fixture {
     std::filesystem::remove_all(root, error);
   }
 };
+
+void inaccessible_storage_root() {
+  Fixture fixture;
+  const auto library = fixture.root / L"Steam";
+  const auto game = library / L"steamapps" / L"common" / L"Skyrim Special Edition";
+  std::filesystem::create_directories(game);
+  auto& backend = runtime_swapper::transaction_backend();
+  const auto initial = backend.probe(game);
+  require(initial.success(), "initial denied-root fixture probe");
+  const auto storage = initial.coordination_lock.value.parent_path().parent_path();
+  std::filesystem::create_directory(storage);
+  const auto library_security = security_snapshot(library);
+  const auto preserved = storage / L"existing-recovery-data.bin";
+  std::ofstream(preserved, std::ios::binary) << "keep unknown recovery data";
+  const auto before = runtime_swapper::sha256_file(preserved);
+  require(before.has_value(), "recovery fixture hash");
+  const auto preserved_security = security_snapshot(preserved);
+  PSECURITY_DESCRIPTOR descriptor{};
+  require(ConvertStringSecurityDescriptorToSecurityDescriptorW(
+              L"D:P(D;;FA;;;WD)", SDDL_REVISION_1, &descriptor, nullptr) != FALSE,
+          "build inaccessible DACL");
+  const auto applied = SetFileSecurityW(storage.c_str(), DACL_SECURITY_INFORMATION |
+      PROTECTED_DACL_SECURITY_INFORMATION, descriptor);
+  LocalFree(descriptor);
+  require(applied != FALSE, "deny directory access on storage root");
+  ULARGE_INTEGER available{};
+  const auto query_ok = GetDiskFreeSpaceExW(storage.c_str(), &available, nullptr, nullptr);
+  const auto query_error = query_ok ? ERROR_SUCCESS : GetLastError();
+  const auto attributes = GetFileAttributesW(storage.c_str());
+  const auto blocked = backend.probe(game);
+  const bool offered = runtime_swapper::windows_storage_directories_need_repair(blocked);
+  // The test runner is unelevated; restore attribute access before exercising
+  // the repair itself. Old-user takeover requires the explicit UAC repair path.
+  broad_acl(storage);
+  const auto repaired = runtime_swapper::repair_windows_storage_directories(blocked);
+  const auto verified = backend.probe(game);
+  const bool private_root = runtime_swapper::windows_storage_directory_is_private(storage);
+  require(!query_ok && query_error == ERROR_ACCESS_DENIED &&
+              attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY),
+          "fixture reproduces visible directory with denied space query");
+  if (blocked.technical_reason != L"vault-owner-or-dacl") {
+    std::wcerr << blocked.technical_reason << L": " << blocked.message << L'\n';
+  }
+  require(blocked.technical_reason == L"vault-owner-or-dacl", "denied root is an access error");
+  require(blocked.message.find(L"Native error: 5") != std::wstring::npos &&
+              blocked.message.find(storage.wstring()) != std::wstring::npos,
+          "denied space query preserves native error and exact path");
+  require(blocked.recovery_vault.value == initial.recovery_vault.value &&
+              blocked.coordination_lock.value == initial.coordination_lock.value,
+          "denied root retains original repair locations");
+  require(offered, "denied-root query offers repair");
+  if (!repaired) std::wcerr << repaired.detail << L'\n';
+  require(static_cast<bool>(repaired) && private_root, "repair after denied-root query succeeds");
+  require(verified.success(), "normal probe succeeds after root repair");
+  require(before == runtime_swapper::sha256_file(preserved) &&
+              preserved_security == security_snapshot(preserved), "unknown recovery data and ACL preserved");
+  require(library_security == security_snapshot(library), "library permissions preserved");
+}
 }
 
 int main(int argc, char** argv) {
   try {
+    inaccessible_storage_root();
+    if (argc == 2 && std::string_view(argv[1]) == "--space-access-only") {
+      std::cout << "Denied space query, repair selection and recovery preservation passed\n";
+      return 0;
+    }
     Fixture fixture;
     const auto game = fixture.root / L"Steam" / L"steamapps" / L"common" / L"Skyrim Special Edition";
     std::filesystem::create_directories(game);

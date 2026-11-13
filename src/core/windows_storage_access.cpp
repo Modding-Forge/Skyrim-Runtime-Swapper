@@ -147,17 +147,31 @@ std::vector<std::byte> user_sid() {
   return result;
 }
 
-bool enable_take_ownership() {
-  HANDLE raw{};
-  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &raw)) return false;
-  Handle token(raw);
-  TOKEN_PRIVILEGES privileges{};
-  privileges.PrivilegeCount = 1;
-  if (!LookupPrivilegeValueW(nullptr, SE_TAKE_OWNERSHIP_NAME, &privileges.Privileges[0].Luid)) return false;
-  privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-  return AdjustTokenPrivileges(token.get(), FALSE, &privileges, 0, nullptr, nullptr) &&
-         GetLastError() == ERROR_SUCCESS;
-}
+class RepairPrivilege {
+ public:
+  explicit RepairPrivilege(const wchar_t* name) {
+    HANDLE raw{};
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &raw)) return;
+    token_.reset(raw);
+    TOKEN_PRIVILEGES requested{};
+    requested.PrivilegeCount = 1;
+    if (!LookupPrivilegeValueW(nullptr, name, &requested.Privileges[0].Luid)) return;
+    requested.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    DWORD size = sizeof(previous_);
+    restore_ = AdjustTokenPrivileges(token_.get(), FALSE, &requested,
+        sizeof(previous_), &previous_, &size) != FALSE && previous_.PrivilegeCount != 0;
+  }
+  ~RepairPrivilege() {
+    if (restore_) AdjustTokenPrivileges(token_.get(), FALSE, &previous_, 0, nullptr, nullptr);
+  }
+  RepairPrivilege(const RepairPrivilege&) = delete;
+  RepairPrivilege& operator=(const RepairPrivilege&) = delete;
+
+ private:
+  Handle token_;
+  TOKEN_PRIVILEGES previous_{};
+  bool restore_{};
+};
 
 MutationResult repair_object(const std::filesystem::path& path, PSID user,
                              bool directory) {
@@ -183,7 +197,6 @@ MutationResult repair_object(const std::filesystem::path& path, PSID user,
       OWNER_SECURITY_INFORMATION, &owner, nullptr, nullptr, nullptr, &raw);
   std::unique_ptr<void, LocalCloser> descriptor(raw);
   if (status != ERROR_SUCCESS || !owner || !EqualSid(owner, user)) {
-    if (!enable_take_ownership()) return failure(path, L"ownership privilege", GetLastError());
     Handle handle(CreateFileW(path.c_str(), WRITE_OWNER,
                               FILE_SHARE_READ | FILE_SHARE_WRITE,
                               nullptr, OPEN_EXISTING,
@@ -269,7 +282,7 @@ MutationResult pin_file(const std::filesystem::path& path,
   }
   Handle handle(CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
                             FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
                             nullptr));
   if (handle.get() == INVALID_HANDLE_VALUE) {
     return failure(path, L"pin file", GetLastError());
@@ -331,6 +344,10 @@ MutationResult repair_windows_storage_directories(const BackendProbeResult& prob
   try {
     const auto plan = repair_plan(probe);
     if (plan.empty()) return failure({}, L"unsupported repair layout", ERROR_INVALID_NAME);
+    // Only the explicit repair enables these privileges. Backup semantics let
+    // elevated validation pin old-user objects before changing any permissions.
+    const RepairPrivilege backup(SE_BACKUP_NAME);
+    const RepairPrivilege ownership(SE_TAKE_OWNERSHIP_NAME);
     auto sid = user_sid();
     if (sid.empty()) return failure({}, L"current user SID", GetLastError());
     std::vector<Handle> pinned;

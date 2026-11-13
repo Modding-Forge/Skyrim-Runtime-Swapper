@@ -1,6 +1,8 @@
 #include "internal/storage_probe.hpp"
 #include "internal/storage_policy.hpp"
 
+#include <runtime_swapper/path_presentation.hpp>
+
 #include <utility>
 
 namespace runtime_swapper {
@@ -126,11 +128,6 @@ BackendProbeResult probe_recovery_storage(
                 : L"The recovery vault is not on an internal ext4, XFS, or Btrfs volume.",
         vault.value_or(VolumeIdentity{}));
   };
-  const auto space_failure = [&] {
-    return context.failure(L"vault-insufficient-space",
-        L"The recovery vault does not have enough free space including the safety reserve.",
-        *vault);
-  };
   const auto mode_failure = [&] {
     return context.failure(L"independent-vault-required",
         windows ? L"This game volume requires a recovery vault on a different durable "
@@ -139,8 +136,34 @@ BackendProbeResult probe_recovery_storage(
   };
   if (!vault || !recovery_volume_is_eligible(*vault)) return volume_failure();
   const auto required_capacity = required_vault_capacity(required_vault_bytes);
-  if (!vault_anchor || !required_capacity ||
-      !platform.has_space(*vault_anchor, *required_capacity)) return space_failure();
+  if (!required_capacity) {
+    return context.failure(L"vault-insufficient-space",
+        L"The required recovery capacity including the safety reserve overflows the supported range.",
+        *vault, true);
+  }
+  const auto check_space = [&](const std::filesystem::path& path)
+      -> std::optional<BackendProbeResult> {
+    const auto space = platform.free_space(path);
+    if (!space.error && space.available >= *required_capacity) return std::nullopt;
+    const auto details = L"\nPath: " + present_path(path) +
+        L"\nRequired bytes (including safety reserve): " + std::to_wstring(*required_capacity);
+    if (space.error) {
+      const bool access_denied = windows && space.error == std::errc::permission_denied;
+      return context.failure(access_denied ? L"vault-owner-or-dacl" : L"vault-space-query-failed",
+          std::wstring(access_denied
+              ? L"Windows denied access to the SRS recovery storage while checking free space."
+              : L"The free space of the recovery storage could not be queried.") +
+              details + L"\nNative error: " + std::to_wstring(space.error.value()),
+          *vault, true);
+    }
+    if (space.available < *required_capacity) {
+      return context.failure(L"vault-insufficient-space",
+          L"The recovery vault does not have enough free space including the safety reserve." +
+              details + L"\nAvailable bytes: " + std::to_wstring(space.available), *vault, true);
+    }
+    return std::nullopt;
+  };
+  if (auto failure = check_space(*vault_anchor)) return *failure;
   auto mode = classify_storage(context.target, *vault,
                                context.target.stable_id != vault->stable_id);
   if (mode == SafetyMode::hard_blocked) return mode_failure();
@@ -153,9 +176,7 @@ BackendProbeResult probe_recovery_storage(
   // Creation/ACL repair is a security boundary, not a reusable earlier probe.
   vault = platform.volume_at(vault_path);
   if (!vault || !recovery_volume_is_eligible(*vault)) return volume_failure();
-  if (!required_capacity || !platform.has_space(vault_path, *required_capacity)) {
-    return space_failure();
-  }
+  if (auto failure = check_space(vault_path)) return *failure;
   mode = classify_storage(context.target, *vault,
                            context.target.stable_id != vault->stable_id);
   if (mode == SafetyMode::hard_blocked) return mode_failure();

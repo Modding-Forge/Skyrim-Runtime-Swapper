@@ -1068,6 +1068,19 @@ bool managed_path_entry_is_redirected(
   return !parent_mount || !entry_mount || *parent_mount != *entry_mount;
 }
 
+bool await_managed_path_entry_pending_delete(
+    const std::filesystem::path&) noexcept {
+  return false;
+}
+
+std::wstring describe_managed_path_entry(const std::filesystem::path& path) {
+  struct stat status {};
+  if (::lstat(path.c_str(), &status) == 0) {
+    return L"mode=" + std::to_wstring(static_cast<unsigned long>(status.st_mode));
+  }
+  return L"native-error=" + std::to_wstring(errno);
+}
+
 bool is_wine_environment() noexcept { return false; }
 
 TransactionBackend& transaction_backend() {

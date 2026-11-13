@@ -2,6 +2,34 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.4.1-rc3 - 2026-11-13
+
+- Recognizes recovery files that exFAT and FAT still list while their deletion
+  is pending, instead of refusing them as unsafe redirected entries. Reparse
+  points remain rejected using the attributes recorded in the directory listing.
+- Waits for legacy deletions to leave the directory before cleanup continues,
+  and reports a still-open name as delete-pending instead of a generic failure.
+- Records the native attribute-query error, delete-pending state and listed
+  attributes whenever a transaction entry is refused during cleanup.
+
+## 1.4.1-rc2 - 2026-10-29
+
+- Adds a handle-bound legacy directory-deletion fallback when a filesystem rejects
+  extended deletion flags, allowing obsolete recovery trees to be removed on exFAT.
+- Preserves the failing cleanup operation, path and native error before handles
+  are closed. Adds regression coverage for fallback cleanup and locked entries.
+
+## 1.4.1-rc1 - 2026-10-25
+
+- Distinguishes recovery-storage access failures from genuine insufficient space.
+  Failed queries retain the affected path, native error and typed repair paths;
+  insufficient-space messages include available and required bytes.
+- Offers the existing Windows SRS folder repair when the free-space query is
+  denied, instead of incorrectly blocking with an insufficient-space message.
+- Scopes backup/ownership privileges to explicit Windows storage repair so
+  elevated validation can inspect old-user storage before changing permissions.
+  Recovery payloads and Steam/game directory permissions remain untouched.
+
 ## 1.4.0 - 2026-10-05
 
 - Allows a fully verified Skyrim 1.7.104 installation to retire stale recovery

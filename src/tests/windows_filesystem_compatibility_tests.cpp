@@ -142,6 +142,89 @@ int main() {
     require(sha256_file(live) == original_hash, "verify restore");
     require(backend.durable_remove(live), "remove file");
     require(!std::filesystem::exists(live), "verify removal");
+    for (const bool legacy : {false, true}) {
+      const auto tree = fixture.root / (legacy ? "legacy-tree" : "native-tree");
+      std::filesystem::create_directories(tree / "nested" / "empty");
+      { std::ofstream(tree / "nested" / "payload.bin") << "cleanup payload"; }
+      if (legacy)
+        require(SetEnvironmentVariableA("SKYRIM_RUNTIME_SWAPPER_FAULT_POINT",
+                    "remove-tree.legacy-disposition") != FALSE, "enable legacy deletion test");
+      const auto removed = backend.durable_remove_tree(tree);
+      SetEnvironmentVariableA("SKYRIM_RUNTIME_SWAPPER_FAULT_POINT", nullptr);
+      require(removed, "remove nested recovery tree");
+      require(!std::filesystem::exists(tree), "verify tree removal");
+      require(backend.durable_remove_tree(tree), "repeat tree cleanup");
+    }
+    const auto locked_tree = fixture.root / "locked-tree";
+    std::filesystem::create_directory(locked_tree);
+    const auto locked_child = locked_tree / "locked.bin";
+    { std::ofstream(locked_child) << "preserve until unlocked"; }
+    const HANDLE held_directory = CreateFileW(locked_child.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL, nullptr);
+    require(held_directory != INVALID_HANDLE_VALUE, "hold cleanup file");
+    const auto cleanup_failure = backend.durable_remove_tree(locked_tree);
+    CloseHandle(held_directory);
+    if (cleanup_failure || cleanup_failure.error.value() != ERROR_SHARING_VIOLATION ||
+        cleanup_failure.detail.find(locked_child.wstring()) == std::wstring::npos)
+      std::wcerr << L"Cleanup diagnostic: error=" << cleanup_failure.error.value()
+                 << L"; " << cleanup_failure.detail << L'\n';
+    require(!cleanup_failure && cleanup_failure.error.value() == ERROR_SHARING_VIOLATION &&
+                cleanup_failure.detail.find(locked_child.wstring()) != std::wstring::npos,
+            "preserve tree cleanup error and path");
+    require(backend.durable_remove_tree(locked_tree), "retry unlocked directory cleanup");
+
+    // Legacy deletion keeps the name visible while another handle is open, as
+    // exFAT always does. Such an entry is not a redirection and must be awaited.
+    const auto pending_tree = fixture.root / "pending-tree";
+    std::filesystem::create_directory(pending_tree);
+    const auto pending = pending_tree / "0";
+    { std::ofstream(pending) << "rollback"; }
+    const auto open_shared = [&](DWORD access) {
+      return CreateFileW(pending.c_str(), access,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    };
+    const auto mark_pending = [&]() {
+      const HANDLE scanner = open_shared(GENERIC_READ);
+      const HANDLE deleter = open_shared(DELETE);
+      require(scanner != INVALID_HANDLE_VALUE && deleter != INVALID_HANDLE_VALUE,
+              "open delete-pending fixture");
+      FILE_DISPOSITION_INFO legacy{TRUE};
+      require(SetFileInformationByHandle(deleter, FileDispositionInfo, &legacy,
+                                         sizeof(legacy)) != FALSE,
+              "mark fixture delete-pending");
+      CloseHandle(deleter);
+      return scanner;
+    };
+    HANDLE scanner = mark_pending();
+    require(GetFileAttributesW(pending.c_str()) == INVALID_FILE_ATTRIBUTES,
+            "delete-pending name cannot be queried");
+    require(!managed_path_entry_is_redirected(pending),
+            "delete-pending entry is not a redirection");
+    require(describe_managed_path_entry(pending).find(L"delete-pending=yes") !=
+                std::wstring::npos,
+            "describe delete-pending entry");
+    const auto close_later = [](HANDLE handle) {
+      return CreateThread(nullptr, 0, [](void* value) -> DWORD {
+        Sleep(300);
+        CloseHandle(static_cast<HANDLE>(value));
+        return 0;
+      }, handle, 0, nullptr);
+    };
+    HANDLE closer = close_later(scanner);
+    require(backend.durable_remove(pending), "await delete-pending file");
+    require(!std::filesystem::exists(pending), "delete-pending file removed");
+    WaitForSingleObject(closer, INFINITE);
+    CloseHandle(closer);
+
+    { std::ofstream(pending) << "rollback"; }
+    scanner = mark_pending();
+    closer = close_later(scanner);
+    require(backend.durable_remove_tree(pending_tree), "remove tree with delete-pending file");
+    require(!std::filesystem::exists(pending_tree), "delete-pending tree removed");
+    WaitForSingleObject(closer, INFINITE);
+    CloseHandle(closer);
     std::cout << "Filesystem compatibility checks passed\n";
     return 0;
   } catch (const std::exception& error) {
