@@ -294,6 +294,7 @@ class IpcCleanup {
 
 enum class PermissionRepairStatus {
   launch_failed,
+  dispatched,
   timed_out,
   wait_failed,
   exit_failed,
@@ -309,13 +310,16 @@ struct PermissionRepairResult {
   }
 
   [[nodiscard]] bool completed() const noexcept {
-    return success() || status == PermissionRepairStatus::exit_failed;
+    return success() || status == PermissionRepairStatus::exit_failed ||
+           status == PermissionRepairStatus::dispatched;
   }
 
   [[nodiscard]] std::wstring diagnostic() const {
     switch (status) {
       case PermissionRepairStatus::launch_failed:
         return L"launch-error-" + std::to_wstring(detail);
+      case PermissionRepairStatus::dispatched:
+        return L"dispatched-unverified-" + std::to_wstring(detail);
       case PermissionRepairStatus::timed_out:
         return L"timeout";
       case PermissionRepairStatus::wait_failed:
@@ -329,6 +333,11 @@ struct PermissionRepairResult {
   }
 };
 
+// Wine executes native ELF programs passed to CreateProcessW through its Unix
+// fork/exec path. Such processes have no Windows handle, and some Proton builds
+// (observed with Proton 11.0) report the launch as failed although exec already
+// happened, leaving an unrelated stale last-error value. Launch outcomes for
+// native programs are therefore confirmed out of band instead of trusted.
 [[nodiscard]] PermissionRepairResult repair_sidecar_permissions(
     std::wstring_view unix_sidecar,
     const std::filesystem::path& working_directory) {
@@ -337,30 +346,31 @@ struct PermissionRepairResult {
     return {PermissionRepairStatus::launch_failed, ERROR_INVALID_NAME};
   }
 
-  std::array<wchar_t, MAX_PATH> system_directory{};
-  const UINT system_directory_length =
-      GetSystemDirectoryW(system_directory.data(),
-                          static_cast<UINT>(system_directory.size()));
-  if (system_directory_length == 0 ||
-      system_directory_length >= system_directory.size()) {
+  // Run /bin/chmod directly. Routing it through start.exe /unix uses
+  // ShellExecute, which on affected Proton builds falls back to a file
+  // association and shows a "no Windows program configured" dialog.
+  const auto chmod_path = wine_windows_path("/bin/chmod");
+  if (!chmod_path) {
     return {PermissionRepairStatus::launch_failed, ERROR_FILE_NOT_FOUND};
   }
-
-  const auto start_path = std::filesystem::path(system_directory.data()) /
-                          L"start.exe";
-  auto command = quote_windows_command_argument(start_path.wstring()) +
-                 L" /wait /unix /bin/chmod 0700 " +
-                 quote_windows_command_argument(unix_sidecar);
+  auto command = quote_windows_command_argument(chmod_path->wstring()) +
+                 L" 0700 " + quote_windows_command_argument(unix_sidecar);
   std::vector<wchar_t> mutable_command(command.begin(), command.end());
   mutable_command.push_back(L'\0');
   STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
   PROCESS_INFORMATION process_info{};
-  if (!CreateProcessW(start_path.c_str(), mutable_command.data(), nullptr,
-                      nullptr, FALSE,
-                      CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, nullptr,
-                      working_directory.c_str(), &startup, &process_info)) {
-    return {PermissionRepairStatus::launch_failed, GetLastError()};
+  const BOOL launched = CreateProcessW(
+      chmod_path->c_str(), mutable_command.data(), nullptr, nullptr, FALSE,
+      CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, nullptr,
+      working_directory.c_str(), &startup, &process_info);
+  const DWORD launch_error = launched ? ERROR_SUCCESS : GetLastError();
+  if (!launched || process_info.hProcess == nullptr) {
+    if (process_info.hThread != nullptr) CloseHandle(process_info.hThread);
+    // A native chmod finishes almost immediately; give it a moment and let the
+    // caller confirm the outcome by relaunching the helper.
+    Sleep(500);
+    return {PermissionRepairStatus::dispatched, launch_error};
   }
 
   UniqueHandle process(process_info.hProcess);
@@ -383,6 +393,58 @@ struct PermissionRepairResult {
              ? PermissionRepairResult{PermissionRepairStatus::succeeded, 0}
              : PermissionRepairResult{PermissionRepairStatus::exit_failed,
                                       exit_code};
+}
+
+// The helper claims a request by exclusively creating response.tmp before it
+// executes anything, and publishes response.bin when it is done.
+[[nodiscard]] bool sidecar_claimed(const std::filesystem::path& ipc_directory) {
+  for (const auto* name : {L"response.tmp", L"response.bin"}) {
+    if (GetFileAttributesW((ipc_directory / name).c_str()) !=
+        INVALID_FILE_ATTRIBUTES) {
+      return true;
+    }
+    const DWORD error = GetLastError();
+    // Anything but a clean "absent" answer is treated as claimed so the
+    // response checks decide, never a second launch.
+    if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
+      return true;
+    }
+  }
+  return false;
+}
+
+[[nodiscard]] bool await_sidecar_claim(const std::filesystem::path& ipc_directory,
+                                       DWORD timeout_ms) {
+  const ULONGLONG deadline = GetTickCount64() + timeout_ms;
+  for (;;) {
+    if (sidecar_claimed(ipc_directory)) return true;
+    if (GetTickCount64() >= deadline) return false;
+    Sleep(20);
+  }
+}
+
+enum class RequestRevocation { revoked, claimed, failed };
+
+// Atomically takes the helper's claim slot so that no helper instance that
+// was exec'd but has not yet claimed the request can start working after SRS
+// has given up. Losing the race means a helper owns the request.
+[[nodiscard]] RequestRevocation revoke_sidecar_request(
+    const std::filesystem::path& ipc_directory) {
+  UniqueHandle slot(CreateFileW(
+      (ipc_directory / L"response.tmp").c_str(), GENERIC_WRITE, 0, nullptr,
+      CREATE_NEW, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_OPEN_REPARSE_POINT,
+      nullptr));
+  if (slot) {
+    // A helper that already finished renamed its claim to response.bin.
+    return GetFileAttributesW((ipc_directory / L"response.bin").c_str()) !=
+                   INVALID_FILE_ATTRIBUTES
+               ? RequestRevocation::claimed
+               : RequestRevocation::revoked;
+  }
+  const DWORD error = GetLastError();
+  return error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS
+             ? RequestRevocation::claimed
+             : RequestRevocation::failed;
 }
 
 }  // namespace
@@ -523,12 +585,23 @@ InstallationOperationResult run_wine_sidecar(
   const auto sidecar_arguments =
       L" " + quote_windows_command_argument(*wide_request) + L" " +
       quote_windows_command_argument(*wide_response);
+  // A failed CreateProcessW is not proof that the helper did not start (see
+  // repair_sidecar_permissions). Wait for its claim on the request before any
+  // further launch attempt; the helper's exclusive claim keeps a duplicate
+  // instance from ever executing the same request.
+  constexpr DWORD sidecar_claim_timeout_ms = 5'000;
+  const auto confirm_launch = [&](BOOL launched) {
+    if (launched || sidecar_identity_changed) return launched;
+    return await_sidecar_claim(ipc_directory, sidecar_claim_timeout_ms) ? TRUE
+                                                                         : FALSE;
+  };
   BOOL started = start_process(
       sidecar, quote_windows_command_argument(sidecar.wstring()) +
                    sidecar_arguments);
   const DWORD direct_error = started ? ERROR_SUCCESS : GetLastError();
+  started = confirm_launch(started);
   std::optional<PermissionRepairResult> permission_repair;
-  if (!started) {
+  if (!started && !sidecar_identity_changed) {
     permission_repair =
         repair_sidecar_permissions(*wide_sidecar, game_root);
     if (permission_repair->completed()) {
@@ -537,13 +610,13 @@ InstallationOperationResult run_wine_sidecar(
             L"native-sidecar-hash-mismatch",
             L"The native Linux helper changed while its executable permission was restored.");
       }
-      started = start_process(
+      started = confirm_launch(start_process(
           sidecar, quote_windows_command_argument(sidecar.wstring()) +
-                       sidecar_arguments);
+                       sidecar_arguments));
     }
   }
   DWORD interpreter_error = ERROR_SUCCESS;
-  if (!started) {
+  if (!started && !sidecar_identity_changed) {
     const auto interpreter = elf_interpreter(sidecar);
     auto windows_interpreter =
         interpreter ? wine_windows_path(*interpreter) : std::nullopt;
@@ -563,6 +636,19 @@ InstallationOperationResult run_wine_sidecar(
           sidecar_arguments;
       started = start_process(*windows_interpreter, command);
       if (!started) interpreter_error = GetLastError();
+      started = confirm_launch(started);
+    }
+  }
+  if (!started) {
+    // Close the claim slot before giving up so that no helper exec'd by one of
+    // the attempts above can act on the request without SRS supervising it.
+    const auto revocation = revoke_sidecar_request(ipc_directory);
+    if (revocation == RequestRevocation::claimed) {
+      started = TRUE;
+    } else if (revocation == RequestRevocation::failed) {
+      return error_result(
+          L"sidecar-request-revoke-failed",
+          L"The native helper could not be confirmed as stopped; its request could not be closed safely.");
     }
   }
   if (!started) {

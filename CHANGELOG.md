@@ -2,6 +2,17 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
+## 1.4.1-rc4 - 2026-11-13
+
+- Fixes the native Linux helper failing to start under Proton 11. Proton runs
+  the helper but reports the launch as failed; SRS now confirms the start by
+  the helper's claim on its request instead of trusting the reported result.
+- Prevents a helper that was started during a reported failure from acting
+  after SRS gives up, by closing the request's claim slot before reporting an
+  error.
+- Restores the helper's executable permission by running chmod directly instead
+  of through start.exe, which showed a "no Windows program configured" dialog.
+
 ## 1.4.1-rc3 - 2026-11-13
 
 - Recognizes recovery files that exFAT and FAT still list while their deletion
