@@ -2,7 +2,7 @@
 
 All notable changes to Skyrim Runtime Swapper are documented in this file.
 
-## 1.4.1-rc4 - 2026-11-13
+## 1.4.1 - 2026-11-14
 
 - Fixes the native Linux helper failing to start under Proton 11. Proton runs
   the helper but reports the launch as failed; SRS now confirms the start by
@@ -13,8 +13,6 @@ All notable changes to Skyrim Runtime Swapper are documented in this file.
 - Restores the helper's executable permission by running chmod directly instead
   of through start.exe, which showed a "no Windows program configured" dialog.
 
-## 1.4.1-rc3 - 2026-11-13
-
 - Recognizes recovery files that exFAT and FAT still list while their deletion
   is pending, instead of refusing them as unsafe redirected entries. Reparse
   points remain rejected using the attributes recorded in the directory listing.
@@ -23,14 +21,10 @@ All notable changes to Skyrim Runtime Swapper are documented in this file.
 - Records the native attribute-query error, delete-pending state and listed
   attributes whenever a transaction entry is refused during cleanup.
 
-## 1.4.1-rc2 - 2026-10-29
-
 - Adds a handle-bound legacy directory-deletion fallback when a filesystem rejects
   extended deletion flags, allowing obsolete recovery trees to be removed on exFAT.
 - Preserves the failing cleanup operation, path and native error before handles
   are closed. Adds regression coverage for fallback cleanup and locked entries.
-
-## 1.4.1-rc1 - 2026-10-25
 
 - Distinguishes recovery-storage access failures from genuine insufficient space.
   Failed queries retain the affected path, native error and typed repair paths;
